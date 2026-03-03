@@ -1,4 +1,5 @@
 # YT-DPI Check
+![GitHub Release](https://img.shields.io/badge/release-1.0.0-red)
 
 [[Русский язык](README_ru.md)]
 
