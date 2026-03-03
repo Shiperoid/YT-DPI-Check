@@ -14,13 +14,10 @@
 *   **Auto-Diagnosis:** The script analyzes results and provides a final summary.
 
 ### How to Use
-1.  Download the `YT-DPI-Check.ps1` script.
-2.  Right-click the file and select **"Run with PowerShell"**.
-3.  *Optional: If you encounter execution policy errors, run this in the terminal:*
-    ```powershell
-    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-    .\YT-DPI-Check.ps1
-    ```
+1. Download the **`YT-DPI-Check.bat`** file from the latest [release](../../releases/latest).
+2. Run it by double-clicking.
+3. The script will automatically bypass PowerShell execution policies and display the result.
+   *No additional steps or settings are required.*
 
 ### Status Legend
 *   **OK**: Connection successful.
