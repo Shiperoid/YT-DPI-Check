@@ -1,32 +1,32 @@
-# Настройка окружения
+# Environment Setup
 $ErrorActionPreference = "SilentlyContinue"
 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
-# Определяем доступные протоколы (TLS 1.3 доступен только на Win 10 21H1+ / Win 11)
+# Define available protocols (TLS 1.3 is available only on Win 10 21H1+ / Win 11)
 $IsWin7 = ([Environment]::OSVersion.Version.Major -eq 6 -and [Environment]::OSVersion.Version.Minor -eq 1)
 if ($IsWin7) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $GlobalProtocol = [System.Security.Authentication.SslProtocols]::Tls12
 } else {
-    # Для Win 10/11 пробуем TLS 1.2 + 1.3
+    # For Win 10/11 try TLS 1.2 + 1.3 (12288 is the enum value for Tls13)
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor 12288
     $GlobalProtocol = [System.Security.Authentication.SslProtocols]::Tls12
 }
 
-# --- Функция динамического поиска ближайшего CDN ---
+# --- Function to dynamically find the nearest CDN node ---
 function Get-LocalCDN {
     $cdnHost = "redirector.googlevideo.com"
     try {
-        # Разрешаем CNAME/IP для ближайшего узла
+        # Resolve CNAME/IP for the nearest node
         $addresses = [System.Net.Dns]::GetHostAddresses($cdnHost)
         $hostName = [System.Net.Dns]::GetHostEntry($addresses[0]).HostName
         return $hostName
     } catch {
-        return "rr1---sn-uxax-5u6e.googlevideo.com" # Фолбэк если DNS перехвачен
+        return "rr1---sn-uxax-5u6e.googlevideo.com" # Fallback if DNS is hijacked/poisoned
     }
 }
 
-# --- Ядро проверки ---
+# --- Core testing function ---
 function Test-NetworkDPI {
     param([string]$Target)
     $timeout = 2500
@@ -36,11 +36,11 @@ function Test-NetworkDPI {
     $tcp = New-Object System.Net.Sockets.TcpClient
     
     try {
-        # 0. DNS Resolve
+        # 0. DNS Resolution
         $ips = [System.Net.Dns]::GetHostAddresses($Target)
         $res.IP = $ips[0].IPAddressToString.PadRight(15)
 
-        # 1. TCP Check (443)
+        # 1. TCP Check (Port 443)
         $ar = $tcp.BeginConnect($Target, 443, $null, $null)
         if ($ar.AsyncWaitHandle.WaitOne($timeout)) {
             $tcp.EndConnect($ar)
@@ -51,14 +51,14 @@ function Test-NetworkDPI {
             return $res
         }
 
-        # 2. TLS Handshake (SNI) - Тест блокировки ТСПУ
+        # 2. TLS Handshake (SNI) - Testing for DPI/TSPU blocking
         $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
         $arSsl = $ssl.BeginAuthenticateAsClient($Target, $null, $GlobalProtocol, $false, $null, $null)
         if ($arSsl.AsyncWaitHandle.WaitOne($timeout)) {
             $ssl.EndAuthenticateAsClient($arSsl)
             $res.TLS = "OK  "
         } else {
-            $res.TLS = "DROP" # Пакет ушел, ответа нет (DPI)
+            $res.TLS = "DROP" # Packet sent, but no response (common DPI behavior)
             $res.Verdict = "DPI BLOCK (SNI)"
             return $res
         }
@@ -67,12 +67,14 @@ function Test-NetworkDPI {
         $udp = New-Object System.Net.Sockets.UdpClient
         $udp.Connect($Target, 443)
         $udp.Send([byte[]](1..10), 10) | Out-Null
-        $res.UDP = "SENT" # UDP не имеет состояния, если не было ICMP отбоя - считаем SENT
+        $res.UDP = "SENT" # UDP is stateless; if no ICMP unreachable was received, we assume SENT
         $udp.Close()
 
         $res.Verdict = "AVAILABLE"
     } catch {
-        $res.Verdict = "ERROR: $($_.Exception.Message.Substring(0,10))"
+        # Handle cases where the exception message might be too short for Substring
+        $errMsg = $_.Exception.Message
+        $res.Verdict = "ERROR: $(if ($errMsg.Length -gt 10) { $errMsg.Substring(0,10) } else { $errMsg })"
     } finally {
         if ($ssl) { $ssl.Dispose() }
         if ($tcp) { $tcp.Dispose() }
@@ -80,7 +82,7 @@ function Test-NetworkDPI {
     return $res
 }
 
-# --- Выполнение ---
+# --- Execution ---
 Clear-Host
 Write-Host "--- SCANNING NETWORK FOR YOUTUBE BLOCKING (WIN 7/10/11) ---"
 Write-Host "Resolving local Google Global Cache node..."
@@ -88,13 +90,13 @@ $localCDN = Get-LocalCDN
 Write-Host "Detected your CDN: $localCDN" -ForegroundColor Cyan
 
 $targets = @(
-    "google.com",                  # Контроль доступа к Google
-    "www.youtube.com",             # Вход на сайт
-    "m.youtube.com",               # Мобильный интерфейс
-    "i.ytimg.com",                 # Обложки/картинки
-    "yt3.ggpht.com",               # Аватары
-    "manifest.googlevideo.com",    # Метаданные потока
-    $localCDN                      # Ваш локальный сервер видео (CDN)
+    "google.com",                  # Control check for Google access
+    "www.youtube.com",             # Main website entry
+    "m.youtube.com",               # Mobile interface
+    "i.ytimg.com",                 # Thumbnails and static images
+    "yt3.ggpht.com",               # User avatars
+    "manifest.googlevideo.com",    # Video stream metadata
+    $localCDN                      # Your local video server (CDN)
 )
 
 Write-Host ""
@@ -109,7 +111,7 @@ foreach ($t in $targets) {
     elseif ($report.Verdict -match "DPI") { $color = "Yellow" }
     elseif ($report.Verdict -eq "IP BLOCK") { $color = "DarkRed" }
 
-    # Вывод одной строкой
+    # Single-line console output
     Write-Host "$($report.Domain)" -NoNewline
     Write-Host "$($report.IP) " -NoNewline -ForegroundColor Gray
     Write-Host "$($report.TCP)  " -NoNewline
