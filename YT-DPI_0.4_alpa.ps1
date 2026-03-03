@@ -104,7 +104,7 @@ function Test-NetworkDPI {
 
 # --- Execution ---
 Clear-Host
-Write-Host "--- youtube_checker_0.4_alpa ---" -ForegroundColor White
+Write-Host "--- YT-DPI_0.4_alpa YOUTUBE CHECK UTILITY ---" -ForegroundColor White
 $localCDN = Get-LocalCDN
 Write-Host "Detected CDN: $localCDN" -ForegroundColor Cyan
 
