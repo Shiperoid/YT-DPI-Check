@@ -67,7 +67,7 @@ function Test-NetworkDPI {
 
 # --- Execution ---
 Clear-Host
-Write-Host ">>> YOUTUBE DPI DIAGNOSTIC v0.6 <<<" -ForegroundColor White
+Write-Host ">>> YT-DPI check v0.6 <<<" -ForegroundColor White
 $localCDN = Get-LocalCDN
 Write-Host "CDN: $localCDN" -ForegroundColor Cyan
 Write-Host ("=" * 79)
