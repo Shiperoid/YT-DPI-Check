@@ -1,7 +1,7 @@
 <# :
 @echo off
 :: Batch-starter: launches PowerShell without execution policy restrictions
-title YT-DPI Check Tool
+title YT-DPI Check Tool v1.0.1
 setlocal
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((Get-Content '%~f0') -join [Environment]::NewLine)"
 if %errorlevel% neq 0 pause
@@ -9,12 +9,19 @@ exit /b
 #>
 
 # --- Environment Setup ---
+# Force console window expansion to fit long domain names
+if ($Host.UI.RawUI.BufferSize.Width -lt 110) {
+    $size = $Host.UI.RawUI.BufferSize; $size.Width = 110; $Host.UI.RawUI.BufferSize = $size
+    $window = $Host.UI.RawUI.WindowSize; $window.Width = 110; $Host.UI.RawUI.WindowSize = $window
+}
+
 $ErrorActionPreference = "SilentlyContinue"
 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
 # TLS protocols setup (1.2 + 1.3 for modern OS)
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor 12288
+    [Net.SecurityProtocolType]$Tls13 = 12288
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor $Tls13
     $GlobalProtocol = [System.Security.Authentication.SslProtocols]::Tls12 -bor 12288
 } catch {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -25,16 +32,23 @@ try {
 function Format-WideString {
     param([string]$str, [int]$len)
     if ($str.Length -gt $len) { return $str.Substring(0, $len - 3) + "..." }
-    return $str
+    return $str.PadRight($len)
 }
 
-# Discover nearest Google Global Cache node
+# Discover nearest Google Global Cache node using Mapping Algorithm
 function Get-LocalCDN {
-    $cdnHost = "redirector.googlevideo.com"
+    $url = "http://redirector.googlevideo.com/report_mapping?di=no"
     try {
-        $addresses = [System.Net.Dns]::GetHostAddresses($cdnHost)
-        return [System.Net.Dns]::GetHostEntry($addresses[0]).HostName
-    } catch { return "rr1---sn-uxax-5u6e.googlevideo.com" }
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
+        $raw = $wc.DownloadString($url)
+        # Search for pattern '=> cluster-name'
+        if ($raw -match "=>\s+([\w-]+)") {
+            $cluster = $matches[1]
+            return "r1.$cluster.googlevideo.com"
+        }
+    } catch {}
+    return "manifest.googlevideo.com" # Fallback
 }
 
 # Core Logic: TCP connection and TLS/SNI Handshake test
@@ -81,16 +95,20 @@ function Test-NetworkDPI {
 
 # --- Execution ---
 Clear-Host
-Write-Host ">>> YT-DPI Check v1.0.0 <<<" -ForegroundColor White
+Write-Host ">>> YT-DPI Check v1.0.1 <<<" -ForegroundColor White
 $localCDN = Get-LocalCDN
-Write-Host "CDN Node: $localCDN" -ForegroundColor Cyan
-Write-Host ("=" * 79)
+Write-Host "Detected CDN Node: $localCDN" -ForegroundColor Cyan
+Write-Host ("=" * 105)
 
-$header = "{0,-25} {1,-15} {2,-4} {3,-4} {4,-4} {5,-6} {6}"
+# Format: Domain(45) IP(15) TCP(4) TLS(4) UDP(4) Lat(7) Result
+$header = "{0,-45} {1,-15} {2,-4} {3,-4} {4,-4} {5,-7} {6}"
 Write-Host ($header -f "DOMAIN", "IP", "TCP", "TLS", "UDP", "LAT", "RESULT")
-Write-Host ("-" * 79)
+Write-Host ("-" * 105)
 
+# Collect targets and remove duplicates
 $targets = @("google.com", "www.youtube.com", "i.ytimg.com", "yt3.ggpht.com", "manifest.googlevideo.com", $localCDN)
+$targets = $targets | Select-Object -Unique
+
 $allResults = @() 
 
 # Run tests
@@ -102,7 +120,7 @@ foreach ($t in $targets) {
     if ($report.Verdict -eq "AVAILABLE") { $color = "Green" }
     elseif ($report.Verdict -match "DPI") { $color = "Yellow" }
     
-    $dispDomain = Format-WideString $report.Domain 25
+    $dispDomain = Format-WideString $report.Domain 45
     $dispIP     = Format-WideString $report.IP 15
     $dispLat    = if ($report.Latency -gt 0) { "$($report.Latency)ms" } else { "---" }
 
@@ -110,9 +128,9 @@ foreach ($t in $targets) {
 }
 
 # --- Status Legend ---
-Write-Host ("=" * 79)
+Write-Host ("=" * 105)
 Write-Host " STATUS LEGEND" -ForegroundColor Cyan
-Write-Host ("-" * 79)
+Write-Host ("-" * 105)
 
 Write-Host "  [TCP/TLS]  " -NoNewline -ForegroundColor Gray
 Write-Host "OK" -NoNewline -ForegroundColor Green
@@ -129,7 +147,7 @@ Write-Host "DPI BLOCK" -NoNewline -ForegroundColor Yellow
 Write-Host ": SNI filter detected | " -NoNewline
 Write-Host "IP BLOCK" -NoNewline -ForegroundColor Red
 Write-Host ": Address unreachable"
-Write-Host ("-" * 79)
+Write-Host ("-" * 105)
 
 # Final Summary
 $dpiDetected = ($allResults | Where-Object { $_.Verdict -eq "DPI BLOCK" }).Count
@@ -139,5 +157,5 @@ if ($dpiDetected -gt 0) {
     Write-Host "DIAGNOSIS: No DPI filtering detected. Connectivity is normal." -ForegroundColor Green
 }
 
-Write-Host ("=" * 79)
+Write-Host ("=" * 105)
 Read-Host "Analysis finished. Press Enter to exit"
