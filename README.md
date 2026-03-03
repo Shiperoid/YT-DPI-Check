@@ -4,6 +4,9 @@
 [[Русский язык](README_ru.md)]
 
 ### Overview
+
+![YT-DPI Check Preview](img/preview.png)
+
 **YT-DPI Check** is a lightweight PowerShell utility designed to identify the exact cause of YouTube accessibility issues. It performs a multi-layered network analysis to distinguish between simple connection failures and sophisticated DPI (Deep Packet Inspection) filtering.
 
 ### Key Features
