@@ -120,4 +120,4 @@ foreach ($t in $targets) {
 }
 
 Write-Host "--------------------------------------------------------------------------------------------"
-Read-Host "`nДиагностика завершена. Нажмите Enter..."
+Read-Host "`nThe diagnosis is complete. Press Enter..."
