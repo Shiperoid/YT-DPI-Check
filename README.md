@@ -14,12 +14,12 @@
 *   **Auto-Diagnosis:** The script analyzes results and provides a final summary.
 
 ### How to Use
-1.  Download the `YT-DPI-Test.ps1` script.
+1.  Download the `YT-DPI-Check.ps1` script.
 2.  Right-click the file and select **"Run with PowerShell"**.
 3.  *Optional: If you encounter execution policy errors, run this in the terminal:*
     ```powershell
     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-    .\YT-DPI-Test.ps1
+    .\YT-DPI-Check.ps1
     ```
 
 ### Status Legend
