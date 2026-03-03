@@ -32,5 +32,8 @@
 | **DNS SPOOFED** | Your DNS provider is returning fake IP addresses (e.g., 127.0.0.1). |
 | **ERROR** | General network error or timeout. |
 
+## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
 ---
 *Disclaimer: This tool is for diagnostic and educational purposes only.*
