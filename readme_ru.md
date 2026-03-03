@@ -1,6 +1,6 @@
 # YT-DPI Diagnostic Tool
 
-[[English language](readme.md)]
+[[English language](README.md)]
 
 
 ### Описание
