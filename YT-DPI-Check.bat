@@ -1,7 +1,7 @@
 <# :
 @echo off
 :: Batch-starter: launches PowerShell without execution policy restrictions
-title YT-DPI Check Tool v1.0.1
+title YT-DPI Check Tool v1.1.0
 setlocal
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((Get-Content '%~f0') -join [Environment]::NewLine)"
 if %errorlevel% neq 0 pause
@@ -9,51 +9,44 @@ exit /b
 #>
 
 # --- Environment Setup ---
-# Force console window expansion to fit long domain names
-if ($Host.UI.RawUI.BufferSize.Width -lt 110) {
-    $size = $Host.UI.RawUI.BufferSize; $size.Width = 110; $Host.UI.RawUI.BufferSize = $size
-    $window = $Host.UI.RawUI.WindowSize; $window.Width = 110; $Host.UI.RawUI.WindowSize = $window
+if ($Host.UI.RawUI.BufferSize.Width -lt 115) {
+    $size = $Host.UI.RawUI.BufferSize; $size.Width = 115; $Host.UI.RawUI.BufferSize = $size
+    $window = $Host.UI.RawUI.WindowSize; $window.Width = 115; $Host.UI.RawUI.WindowSize = $window
 }
 
 $ErrorActionPreference = "SilentlyContinue"
 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
-# TLS protocols setup (1.2 + 1.3 for modern OS)
+# TLS Setup: Force TLS 1.2 and 1.3
 try {
-    [Net.SecurityProtocolType]$Tls13 = 12288
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor $Tls13
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor 12288
     $GlobalProtocol = [System.Security.Authentication.SslProtocols]::Tls12 -bor 12288
 } catch {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $GlobalProtocol = [System.Security.Authentication.SslProtocols]::Tls12
 }
 
-# UI Helper: Truncate long strings for table alignment
 function Format-WideString {
     param([string]$str, [int]$len)
     if ($str.Length -gt $len) { return $str.Substring(0, $len - 3) + "..." }
     return $str.PadRight($len)
 }
 
-# Discover nearest Google Global Cache node using Mapping Algorithm
 function Get-LocalCDN {
     $url = "http://redirector.googlevideo.com/report_mapping?di=no"
     try {
         $wc = New-Object System.Net.WebClient
         $wc.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
         $raw = $wc.DownloadString($url)
-        # Search for pattern '=> cluster-name'
-        if ($raw -match "=>\s+([\w-]+)") {
-            $cluster = $matches[1]
-            return "r1.$cluster.googlevideo.com"
-        }
+        if ($raw -match "=>\s+([\w-]+)") { return "r1.$($matches[1]).googlevideo.com" }
     } catch {}
-    return "manifest.googlevideo.com" # Fallback
+    return "manifest.googlevideo.com"
 }
 
-# Core Logic: TCP connection and TLS/SNI Handshake test
+# --- Advanced DPI Test Logic ---
 function Test-NetworkDPI {
-    param([string]$Target, [int]$MaxRetries = 2)
+    param([string]$Target, [int]$MaxRetries = 1)
+    
     try {
         $ips = [System.Net.Dns]::GetHostAddresses($Target)
         $targetIP = $ips[0].IPAddressToString
@@ -64,54 +57,96 @@ function Test-NetworkDPI {
     $res = @{ Domain=$Target; IP=$targetIP; TCP="FL"; TLS="FL"; UDP="??"; Latency=0; Verdict="UNKNOWN" }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
+    # 1. UDP / QUIC Probe (Basic check for UDP 443 reachability)
+    $udpClient = New-Object System.Net.Sockets.UdpClient
+    $udpClient.Connect($targetIP, 443)
+    try {
+        $dummyQUIC = [byte[]](0x01, 0x00, 0x00, 0x00) # Dummy QUIC-like header
+        $udpClient.Send($dummyQUIC, $dummyQUIC.Length)
+        $res.UDP = "OK" 
+    } catch {
+        $res.UDP = "BK" # Blocked or Unreachable
+    } finally { $udpClient.Close() }
+
+    # 2. TCP & TLS/SNI Handshake
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
         $tcp = New-Object System.Net.Sockets.TcpClient
         $ssl = $null
         try {
-            # Step 1: TCP Port 443 check
             $ar = $tcp.BeginConnect($targetIP, 443, $null, $null)
-            if ($ar.AsyncWaitHandle.WaitOne(2500)) {
+            if ($ar.AsyncWaitHandle.WaitOne(2000)) {
                 $tcp.EndConnect($ar)
                 $res.TCP = "OK"
                 if ($res.Latency -eq 0) { $res.Latency = $sw.ElapsedMilliseconds }
 
-                # Step 2: TLS/SNI Handshake (Checks for DPI interference)
+                # Deep TLS Check with SNI
                 $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
                 $arSsl = $ssl.BeginAuthenticateAsClient($Target, $null, $GlobalProtocol, $false, $null, $null)
+                
                 if ($arSsl.AsyncWaitHandle.WaitOne(2500)) {
                     $ssl.EndAuthenticateAsClient($arSsl)
-                    $res.TLS = "OK"; $res.Verdict = "AVAILABLE"; $res.UDP = "OK"
+                    $res.TLS = "OK"; $res.Verdict = "AVAILABLE"
                     return $res
                 } else {
+                    # If TCP connected but TLS timed out - 99% SNI Filter (DPI)
                     $res.TLS = "DR"; $res.Verdict = "DPI BLOCK"
                 }
-            } else { $res.Verdict = "IP BLOCK"; break }
-        } catch { $res.Verdict = "ERR" }
+            } else { $res.Verdict = "IP BLOCK" }
+        } catch {
+            # Handling "Connection Reset" or "Remote Certificate Invalid"
+            # In many cases with Google, a Reset after ClientHello is also DPI.
+            if ($_.Exception.InnerException -match "reset" -or $_.Exception.Message -match "reset") {
+                $res.TLS = "RS"; $res.Verdict = "DPI RESET"
+            } elseif ($res.TCP -eq "OK") {
+                # If TCP is fine but TLS throws a non-timeout error, it might be reachable but refusing SNI
+                $res.TLS = "OK"; $res.Verdict = "AVAILABLE" 
+            }
+        }
         finally { if ($ssl){$ssl.Close()}; if ($tcp){$tcp.Close()} }
-        if ($attempt -lt $MaxRetries) { Start-Sleep -Milliseconds 400 }
     }
     return $res
 }
 
 # --- Execution ---
 Clear-Host
-Write-Host ">>> YT-DPI Check v1.0.1 <<<" -ForegroundColor White
+Write-Host ">>> YT-DPI Check v1.1.0 <<<" -ForegroundColor White
 $localCDN = Get-LocalCDN
 Write-Host "Detected CDN Node: $localCDN" -ForegroundColor Cyan
-Write-Host ("=" * 105)
+Write-Host ("=" * 110)
 
-# Format: Domain(45) IP(15) TCP(4) TLS(4) UDP(4) Lat(7) Result
 $header = "{0,-45} {1,-15} {2,-4} {3,-4} {4,-4} {5,-7} {6}"
 Write-Host ($header -f "DOMAIN", "IP", "TCP", "TLS", "UDP", "LAT", "RESULT")
-Write-Host ("-" * 105)
+Write-Host ("-" * 110)
 
-# Collect targets and remove duplicates
-$targets = @("google.com", "www.youtube.com", "i.ytimg.com", "yt3.ggpht.com", "manifest.googlevideo.com", $localCDN)
+# Optimized target list (focused on high-load services)
+$targets = @(
+    "google.com",
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "youtu.be",
+    "i.ytimg.com",
+    "i9.ytimg.com",
+    "s.ytimg.com",
+    "yt3.ggpht.com",
+    "yt4.ggpht.com",
+    "googleusercontent.com",
+    "yt3.googleusercontent.com",
+    "googlevideo.com",
+    "manifest.googlevideo.com",
+    "redirector.googlevideo.com",
+    "googleapis.com",
+    "youtubei.googleapis.com",
+    "youtubeembeddedplayer.googleapis.com",
+    "youtubekids.com",
+    "nhacmp3youtube.com",
+    "signaler-pa.youtube.com",
+    $localCDN
+)
+
 $targets = $targets | Select-Object -Unique
-
 $allResults = @() 
 
-# Run tests
 foreach ($t in $targets) {
     $report = Test-NetworkDPI $t
     $allResults += $report
@@ -127,35 +162,18 @@ foreach ($t in $targets) {
     Write-Host ($header -f $dispDomain, $dispIP, $report.TCP, $report.TLS, $report.UDP, $dispLat, $report.Verdict) -ForegroundColor $color
 }
 
-# --- Status Legend ---
-Write-Host ("=" * 105)
+Write-Host ("=" * 110)
 Write-Host " STATUS LEGEND" -ForegroundColor Cyan
-Write-Host ("-" * 105)
+Write-Host "  TCP/TLS/UDP: OK = Pass | FL = Failed | DR = Dropped (DPI) | RS = Reset (DPI) | BK = UDP Blocked"
+Write-Host "  RESULT:      AVAILABLE = Normal | DPI BLOCK = SNI Filtering | IP BLOCK = Routing Issue"
+Write-Host ("-" * 110)
 
-Write-Host "  [TCP/TLS]  " -NoNewline -ForegroundColor Gray
-Write-Host "OK" -NoNewline -ForegroundColor Green
-Write-Host ": Success | " -NoNewline
-Write-Host "FL" -NoNewline -ForegroundColor Red
-Write-Host ": Failed | " -NoNewline
-Write-Host "DR" -NoNewline -ForegroundColor Yellow
-Write-Host ": Dropped (DPI Filter) | " -NoNewline
-Write-Host "--" -NoNewline -ForegroundColor Gray
-Write-Host ": Skipped"
-
-Write-Host "  [RESULT]   " -NoNewline -ForegroundColor Gray
-Write-Host "DPI BLOCK" -NoNewline -ForegroundColor Yellow
-Write-Host ": SNI filter detected | " -NoNewline
-Write-Host "IP BLOCK" -NoNewline -ForegroundColor Red
-Write-Host ": Address unreachable"
-Write-Host ("-" * 105)
-
-# Final Summary
-$dpiDetected = ($allResults | Where-Object { $_.Verdict -eq "DPI BLOCK" }).Count
+$dpiDetected = ($allResults | Where-Object { $_.Verdict -match "DPI" }).Count
 if ($dpiDetected -gt 0) {
-    Write-Host "DIAGNOSIS: DPI/TSPU interference detected on $dpiDetected host(s)." -ForegroundColor Yellow
+    Write-Host "DIAGNOSIS: DPI/TSPU interference detected on $dpiDetected host(s). Try using ByeDPI/GoodCheck." -ForegroundColor Yellow
 } else {
     Write-Host "DIAGNOSIS: No DPI filtering detected. Connectivity is normal." -ForegroundColor Green
 }
 
-Write-Host ("=" * 105)
+Write-Host ("=" * 110)
 Read-Host "Analysis finished. Press Enter to exit"
