@@ -1,44 +1,60 @@
-# YT-DPI Check
-![GitHub Release](https://img.shields.io/badge/release-1.0.0-red)
+# YT-DPI Check v1.0.2
+![GitHub Release](https://img.shields.io/badge/release-1.0.1-red)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 [[Русский язык](README_ru.md)]
 
 ### Overview
-
-![YT-DPI Check Preview](img/preview.png)
-
-**YT-DPI Check** is a lightweight PowerShell utility designed to identify the exact cause of YouTube accessibility issues. It performs a multi-layered network analysis to distinguish between simple connection failures and sophisticated DPI (Deep Packet Inspection) filtering.
+**YT-DPI Check** is a lightweight, zero-dependency diagnostic utility designed to identify how YouTube and Google services are being restricted. It goes beyond simple pings by performing deep protocol analysis (TLS SNI Handshakes and QUIC probes) to distinguish between server issues, IP blocks, and active Deep Packet Inspection (DPI/TSPU) interference.
 
 ### Key Features
-*   **DNS Integrity Check:** Detects DNS resolution errors or potential IP spoofing.
-*   **TCP Connectivity Check:** Verifies if Google/YouTube servers are reachable on port 443.
-*   **SNI Handshake Test:** Simulates a secure connection to detect DPI interference (packet dropping when SNI is detected).
-*   **CDN Node Discovery:** Automatically finds and tests your local Google Global Cache (GGC) node.
-*   **Compact UI:** Table layout optimized for standard console windows (80 columns).
-*   **Auto-Diagnosis:** The script analyzes results and provides a final summary.
+*   **QUIC/UDP Analysis:** Probes UDP port 443 to see if modern high-speed protocols are being throttled or blocked.
+*   **SNI Handshake Test:** Specifically tests the "Server Name Indication" field to detect filters that trigger only when they "see" you visiting YouTube.
+*   **Active Reset Detection:** Identifies if a middlebox (TSPU) is actively sending `TCP RST` packets to kill your connection.
+*   **CDN Discovery:** Automatically locates your nearest Google Global Cache (GGC) node for precise video-stream testing.
+*   **Comprehensive Coverage:** Tests main UI, video servers (googlevideo), and essential APIs (googleapis).
 
 ### How to Use
-1. Download the **`YT-DPI-Check.bat`** file from the latest [release](../../releases/latest).
-2. Run it by double-clicking.
-3. The script will automatically bypass PowerShell execution policies and display the result.
-   *No additional steps or settings are required.*
+1.  Download **`YT-DPI-Check.bat`** from the [latest release](../../releases/latest).
+2.  Double-click to run. No installation or Administrator rights required.
+3.  Review the table and the final **DIAGNOSIS** summary.
 
-### Status Legend
-*   **OK**: Connection successful.
-*   **FL** (Failed): Connection error (port closed or reset).
-*   **DR** (Dropped): Packet sent, but no response received. Key indicator of DPI blocking.
-*   **--** (Skipped): Test was not performed due to previous step failure.
+---
 
-### Understanding Verdicts (Result)
-| Result | Meaning |
+### Comprehensive Status Guide
+
+#### Column: TCP / TLS
+*   **OK**: Success. The connection was established and the handshake completed.
+*   **FL (Failed)**: The port is closed or the server is completely unreachable at the network level.
+*   **DR (Dropped)**: **[DPI Alert]** The packet was sent, but the server "disappeared." This happens when DPI identifies the SNI and silently discards your packets.
+*   **RS (Reset)**: **[Active DPI Alert]** The connection was established, but as soon as the SNI was sent, a "Connection Reset" was forcibly injected by a middlebox.
+*   **--**: Skipped because a previous mandatory step (like DNS) failed.
+
+#### Column: UDP
+*   **OK**: The port is open, and a QUIC probe suggests the protocol is allowed.
+*   **BK (Blocked)**: The ISP is explicitly rejecting UDP traffic on port 443 (often used to throttle YouTube to 1080p or lower).
+*   **??**: State unknown or test timed out.
+
+#### Column: RESULT (Verdict)
+| Verdict | Meaning |
 | :--- | :--- |
-| **AVAILABLE** | Connection is fully functional. |
-| **DPI BLOCK** | SNI filtering detected (DPI-level blocking). |
-| **IP BLOCK** | The IP address is unreachable. Possible IP-level blacklist. |
-| **DNS ERROR** | Failed to resolve the domain name to an IP address. |
+| **AVAILABLE** | The service is working normally. |
+| **DPI BLOCK** | Active filtering detected. Connection is blocked based on the site name (SNI). |
+| **IP BLOCK** | The IP address itself is unreachable (IP-level blacklist). |
+| **DNS ERROR** | Your DNS provider is giving incorrect data or failing to resolve the domain. |
 
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+---
+
+### Contributing
+Contributions are accepted through GitHub pull requests. Whether it's adding new target domains or improving protocol detection, feel free to help!
+
+### Credits
+This tool is built upon the collective research of the DPI-bypass community:
+*   [youtubeUnblock](https://github.com/Waujito/youtubeUnblock) - C-based DPI bypass research.
+*   [B4](https://github.com/DanielLavrushin/b4) - Network packet processor with a friendly UI.
+*   [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI) - The industry standard for Windows DPI circumvention.
+*   [zapret](https://github.com/bol-van/zapret) - Advanced multi-platform DPI bypass techniques.
+*   [dpi-detector](https://github.com/Runnin4ik/dpi-detector) - Foundational DPI/TSPU detection techniques.
 
 ---
 *Disclaimer: This tool is for diagnostic and educational purposes only.*
