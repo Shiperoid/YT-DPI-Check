@@ -1,11 +1,20 @@
 # YT-DPI Check v1.0.1
 ![GitHub Release](https://img.shields.io/badge/release-1.0.1-red)
 ![License](https://img.shields.io/badge/license-MIT-blue)
+![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
 [[Русский язык](README_ru.md)]
 
 ### Overview
 **YT-DPI Check** is a lightweight, zero-dependency diagnostic utility designed to identify how YouTube and Google services are being restricted. It goes beyond simple pings by performing deep protocol analysis (TLS SNI Handshakes and QUIC probes) to distinguish between server issues, IP blocks, and active Deep Packet Inspection (DPI/TSPU) interference.
+
+### System Requirements
+*   **OS:** Windows 10 or Windows 11 (recommended).
+*   **Legacy OS:** Windows 7 / 8.1 are supported but require **PowerShell 5.1** and **.NET Framework 4.5+** installed.
+*   **Environment:** PowerShell 5.1 or higher.
+
+### Important Notes
+*   **TLS 1.3 Limitation:** Windows 7 does not natively support TLS 1.3. Since modern DPI/TSPU systems often target TLS 1.3 handshakes specifically, running this tool on Windows 7 may result in a "false-          positive" AVAILABLE status, even if the service is blocked for Windows 10/11 users.
 
 ### Key Features
 *   **QUIC/UDP Analysis:** Probes UDP port 443 to see if modern high-speed protocols are being throttled or blocked.
@@ -16,7 +25,7 @@
 
 ### How to Use
 1.  Download **`YT-DPI-Check.bat`** from the [latest release](../../releases/latest).
-2.  Double-click to run. No installation or Administrator rights required.
+2.  Double-click to run. **No Administrator rights required.**
 3.  Review the table and the final **DIAGNOSIS** summary.
 
 ---
@@ -44,6 +53,10 @@
 | **DNS ERROR** | Your DNS provider is giving incorrect data or failing to resolve the domain. |
 
 ---
+
+### Important Notes
+*   **Antivirus:** Some AV software may flag the script as a "Generic Downloader" or "Network Tool" because it performs manual TCP/UDP handshakes. The script is open-source; you can inspect the code in any text editor.
+*   **VPN/Proxies:** If you have a VPN or "GoodbyeDPI" active, the script will show "AVAILABLE" because it sees the bypassed connection. Turn them off for an accurate ISP test.
 
 ### Contributing
 Contributions are accepted through GitHub pull requests. Whether it's adding new target domains or improving protocol detection, feel free to help!
