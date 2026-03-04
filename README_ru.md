@@ -1,5 +1,5 @@
-# YT-DPI Check v1.0.1
-![GitHub Release](https://img.shields.io/badge/release-1.0.1-red)
+# YT-DPI Check v1.1.1
+![GitHub Release](https://img.shields.io/badge/release-1.1.1-red)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
