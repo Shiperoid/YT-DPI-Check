@@ -106,7 +106,8 @@ while ($true) {
         "googleusercontent.com", "yt3.googleusercontent.com", "googlevideo.com",
         "manifest.googlevideo.com", "redirector.googlevideo.com", "googleapis.com",
         "youtubei.googleapis.com", "youtubeembeddedplayer.googleapis.com", "youtubekids.com",
-        "nhacmp3youtube.com", "signaler-pa.youtube.com", $localCDN
+        "youtube-ui.l.google.com", "signaler-pa.youtube.com", $localCDN
+        #nhacmp3youtube.com - нестабилен заменил на новый youtube-ui.l.google.com
     )
 
     $targets = $targets | Select-Object -Unique
