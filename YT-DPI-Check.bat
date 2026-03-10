@@ -521,8 +521,4 @@ while ($true) {
         }
     }
     [System.Threading.Thread]::Sleep(100)
-<<<<<<< HEAD
 }
-=======
-}
->>>>>>> 47b3872925574ddd4f83315a496706666ad53eca
