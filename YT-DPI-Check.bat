@@ -83,7 +83,7 @@ function Get-NetworkInfo {
         $req.CachePolicy = New-Object System.Net.Cache.HttpRequestCachePolicy([System.Net.Cache.HttpRequestCacheLevel]::NoCacheNoStore)
         $req.KeepAlive = $false
         $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
-        $req.Timeout = 2000
+        $req.Timeout = 1500
         $resp = $req.GetResponse()
         $stream = New-Object System.IO.StreamReader($resp.GetResponseStream())
         $raw = $stream.ReadToEnd()
@@ -93,25 +93,33 @@ function Get-NetworkInfo {
 
     $isp = "UNKNOWN"
     $loc = "UNKNOWN"
-    try {
-        $reqGeo = [System.Net.WebRequest]::Create("http://ip-api.com/json/?fields=status,countryCode,city,isp")
-        $reqGeo.CachePolicy = New-Object System.Net.Cache.HttpRequestCachePolicy([System.Net.Cache.HttpRequestCacheLevel]::NoCacheNoStore)
-        $reqGeo.KeepAlive = $false
-        $reqGeo.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
-        $reqGeo.UserAgent = "curl/7.88.1"  # <--- ВОТ ЭТО ИСПРАВЛЯЕТ UNKNOWN
-        $reqGeo.Timeout = 3000
-        $respGeo = $reqGeo.GetResponse()
-        $streamGeo = New-Object System.IO.StreamReader($respGeo.GetResponseStream())
-        $rawGeo = $streamGeo.ReadToEnd()
-        $respGeo.Close()
+    
+    # Делаем максимум 2 быстрые попытки (на случай, если VPN меняет маршрут)
+    for ($i = 1; $i -le 2; $i++) {
+        try {
+            $reqGeo = [System.Net.WebRequest]::Create("http://ip-api.com/json/?fields=status,countryCode,city,isp")
+            $reqGeo.CachePolicy = New-Object System.Net.Cache.HttpRequestCachePolicy([System.Net.Cache.HttpRequestCacheLevel]::NoCacheNoStore)
+            $reqGeo.KeepAlive = $false
+            $reqGeo.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
+            $reqGeo.UserAgent = "curl/7.88.1" # Маскировка (без неё ip-api банит)
+            $reqGeo.Timeout = 1500
+            $respGeo = $reqGeo.GetResponse()
+            $streamGeo = New-Object System.IO.StreamReader($respGeo.GetResponseStream())
+            $rawGeo = $streamGeo.ReadToEnd()
+            $respGeo.Close()
 
-        $geo = $rawGeo | ConvertFrom-Json
-        if ($geo.status -eq "success") {
-            $isp = $geo.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC)', ''
-            if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
-            $loc = "$($geo.city), $($geo.countryCode)"
+            $geo = $rawGeo | ConvertFrom-Json
+            if ($geo.status -eq "success") {
+                $isp = $geo.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC)', ''
+                if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
+                $loc = "$($geo.city), $($geo.countryCode)"
+                break # Если успешно — сразу выходим из цикла
+            }
+        } catch {
+            # Если это первая попытка и интернета нет (VPN переключается), ждем 1 сек
+            if ($i -eq 1) { [System.Threading.Thread]::Sleep(1000) }
         }
-    } catch {}
+    }
 
     return @{ DNS = $dns; CDN = $cdn; ISP = $isp; LOC = $loc }
 }
@@ -327,6 +335,10 @@ $Worker = {
     # Итоговый RESULT
     if ($res.T12 -eq "OK" -or $res.T13 -eq "OK") {
         $res.Verdict = "AVAILABLE"; $res.Color = "Green"
+    } elseif ($Target -match "^r\d+.*\.googlevideo\.com" -and $res.T12 -eq "DRP") {
+        # Исключение для CDN: если сервер Google молча отбрасывает пакеты (Drop),
+        # скорее всего это защита GGC от чужих IP-адресов (когда включен VPN).
+        $res.Verdict = "CDN GEO-DROP (VPN?)"; $res.Color = "DarkGray"
     } elseif ($res.HTTP -eq "OK") {
         $res.Verdict = "DPI BLOCK"; $res.Color = "Yellow"
     } elseif ($res.HTTP -eq "ERR" -and $res.T12 -eq "RST" -and $res.T13 -eq "RST") {
