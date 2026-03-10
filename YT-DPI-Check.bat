@@ -37,7 +37,7 @@ Add-Type -TypeDefinition $code
 [ConsoleHelper]::DisableQuickEdit()
 
 # --- Сетка координат ---
-$X = @{ Dom=2; IP=36; HTTP=54; T12=62; T13=72; Lat=82; Ver=90 }
+$X = @{ Dom=2; IP=41; HTTP=59; T12=67; T13=77; Lat=87; Ver=95 }
 
 $BaseTargets = @(
     "google.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
@@ -197,7 +197,7 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     Out-Str 0 ($y+2) $l "DarkCyan"
 
     for($i=0; $i -lt $Targets.Count; $i++) {
-        Out-Str $X.Dom (11+$i) ($Targets[$i].PadRight(32)) "Gray"
+        Out-Str $X.Dom (11+$i) ($Targets[$i].PadRight(38)) "Gray"
         if ($ClearScreen) { 
             Out-Str $X.IP   (11+$i) ("---.---.---.---".PadRight(16)) "DarkGray"
             Out-Str $X.HTTP (11+$i) ("--".PadRight(6)) "DarkGray"
