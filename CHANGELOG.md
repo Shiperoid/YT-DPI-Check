@@ -62,11 +62,7 @@ This major update transforms YT-DPI Check from a simple one-time scanner into a 
 
 
 
-<<<<<<< HEAD
 # YT-DPI Check v2.0
-=======
-# YT-DPI Scanner v2.0
->>>>>>> 47b3872925574ddd4f83315a496706666ad53eca
 
 In version 2.0, the utility has been completely rewritten. The tool transitioned from sequential scanning to a multi-threaded architecture and features an entirely new interactive console interface. The update heavily focuses on execution speed, detailed protocol testing, and real-time network analysis.
 
@@ -97,11 +93,8 @@ In version 2.0, the utility has been completely rewritten. The tool transitioned
 ---
 
 ### Installation and Usage
-<<<<<<< HEAD
+
 1. Download the **`YT-DPI-Check.bat`** file from the Assets section below.
-=======
-1. Download the **`YT-DPI-Scanner-v2.0.bat`** file from the Assets section below.
->>>>>>> 47b3872925574ddd4f83315a496706666ad53eca
 2. Run the file (Administrator privileges are not required).
 3. Press `[ENTER]` to start scanning or `[H]` to read the help menu.
 
