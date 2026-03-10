@@ -41,8 +41,11 @@ $X = @{ Dom=2; IP=36; HTTP=54; T12=62; T13=72; Lat=82; Ver=90 }
 
 $BaseTargets = @(
     "google.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
-    "i.ytimg.com", "yt3.ggpht.com", "googlevideo.com", "manifest.googlevideo.com",
-    "googleapis.com", "youtubei.googleapis.com", "yt3.googleusercontent.com"
+        "i.ytimg.com", "i9.ytimg.com", "s.ytimg.com", "yt3.ggpht.com", "yt4.ggpht.com",
+        "googleusercontent.com", "yt3.googleusercontent.com", "googlevideo.com",
+        "manifest.googlevideo.com", "redirector.googlevideo.com", "googleapis.com",
+        "youtubei.googleapis.com", "youtubeembeddedplayer.googleapis.com", "youtubekids.com",
+        "signaler-pa.youtube.com"
 )
 
 function Out-Str($x, $y, $str, $color="White", $bg="Black") {
@@ -65,27 +68,46 @@ function Clear-KeyBuffer {
 }
 
 function Get-NetworkInfo {
+    cmd.exe /c "ipconfig /flushdns >nul 2>&1"
+    
     $dns = "UNKNOWN"
-    $wmi = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object { $_.DNSServerSearchOrder -ne $null }
-    if ($wmi) { $dns = $wmi.DNSServerSearchOrder[0] }
+    try {
+        $wmi = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | Where-Object { $_.DNSServerSearchOrder -ne $null } | Select-Object -First 1
+        if ($wmi) { $dns = $wmi.DNSServerSearchOrder[0] }
+    } catch {}
 
+    $rnd = [guid]::NewGuid().ToString().Substring(0,8)
     $cdn = "manifest.googlevideo.com"
     try {
-        $wc = New-Object System.Net.WebClient
-        $wc.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
-        $raw = $wc.DownloadString("http://redirector.googlevideo.com/report_mapping?di=no")
+        $req = [System.Net.WebRequest]::Create("http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd")
+        $req.CachePolicy = New-Object System.Net.Cache.HttpRequestCachePolicy([System.Net.Cache.HttpRequestCacheLevel]::NoCacheNoStore)
+        $req.KeepAlive = $false
+        $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
+        $req.Timeout = 2000
+        $resp = $req.GetResponse()
+        $stream = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $raw = $stream.ReadToEnd()
+        $resp.Close()
         if ($raw -match "=>\s+([\w-]+)") { $cdn = "r1.$($matches[1]).googlevideo.com" }
     } catch {}
 
     $isp = "UNKNOWN"
     $loc = "UNKNOWN"
     try {
-        # Запрашиваем countryCode (RU, US) вместо полного названия страны
-        $geo = Invoke-RestMethod -Uri "http://ip-api.com/json/?fields=status,countryCode,city,isp" -TimeoutSec 2
+        $reqGeo = [System.Net.WebRequest]::Create("http://ip-api.com/json/?fields=status,countryCode,city,isp")
+        $reqGeo.CachePolicy = New-Object System.Net.Cache.HttpRequestCachePolicy([System.Net.Cache.HttpRequestCacheLevel]::NoCacheNoStore)
+        $reqGeo.KeepAlive = $false
+        $reqGeo.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
+        $reqGeo.UserAgent = "curl/7.88.1"  # <--- ВОТ ЭТО ИСПРАВЛЯЕТ UNKNOWN
+        $reqGeo.Timeout = 3000
+        $respGeo = $reqGeo.GetResponse()
+        $streamGeo = New-Object System.IO.StreamReader($respGeo.GetResponseStream())
+        $rawGeo = $streamGeo.ReadToEnd()
+        $respGeo.Close()
+
+        $geo = $rawGeo | ConvertFrom-Json
         if ($geo.status -eq "success") {
-            # Вырезаем юридический мусор из названия провайдера
             $isp = $geo.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC)', ''
-            # Если всё равно длинное - обрезаем
             if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
             $loc = "$($geo.city), $($geo.countryCode)"
         }
@@ -96,26 +118,27 @@ function Get-NetworkInfo {
 
 function Show-HelpMenu {
     [Console]::Clear()
-    Out-Str 2 2 "=== YT-DPI ANALYZER : MINI GUIDE ===" "Cyan"
+    Out-Str 2 2 "=== YT-DPI Check : MINI GUIDE ===" "Cyan"
     
     Out-Str 2 4 "[ STATUS CODES ]" "Yellow"
     Out-Str 4 5 "OK   - Connection successful. No interference." "Green"
-    Out-Str 4 6 "RST  - Connection Reset. DPI dropped the packet." "Red"
-    Out-Str 4 7 "N/A  - Not Available (e.g., Windows 7/10 does not support TLS 1.3)." "DarkGray"
-    Out-Str 4 8 "FAIL - Connection timed out or general socket error." "Red"
+    Out-Str 4 6 "RST  - Connection Reset. DPI injected a TCP RST." "Red"
+    Out-Str 4 7 "DRP  - Connection Dropped (Blackholed during handshake)." "Red"
+    Out-Str 4 8 "N/A  - Not Available (e.g., Windows 7/10 lacking TLS 1.3)." "DarkGray"
+    Out-Str 4 9 "FAIL - Connection timed out or general socket error." "Red"
 
-    Out-Str 2 10 "[ VERDICTS ]" "Yellow"
-    Out-Str 4 11 "AVAILABLE (CLEAN)  - TLS passed. YouTube should work fine." "Green"
-    Out-Str 4 12 "DPI BLOCK DETECTED - HTTP works, but TLS is blocked by provider (Typical DPI)." "Yellow"
-    Out-Str 4 13 "FULL IP BLOCK      - Both HTTP and TLS are unreachable (Hard IP ban)." "Red"
+    Out-Str 2 11 "[ RESULT ]" "Yellow"
+    Out-Str 4 12 "AVAILABLE  - TLS passed. YouTube should work fine." "Green"
+    Out-Str 4 13 "DPI BLOCK  - HTTP works, but TLS is blocked/dropped (Typical DPI)." "Yellow"
+    Out-Str 4 14 "IP  BLOCK  - Both HTTP and TLS are unreachable (Hard IP ban)." "Red"
     
-    Out-Str 2 15 "[ COLUMNS ]" "Yellow"
-    Out-Str 4 16 "HTTP    - Port 80 (Cleartext HTTP). Used as a baseline for IP reachability." "White"
-    Out-Str 4 17 "TLS 1.2 - Port 443. The most common secure protocol for YouTube." "White"
-    Out-Str 4 18 "TLS 1.3 - Port 443. Modern protocol (harder for DPI to parse)." "White"
-    Out-Str 4 19 "LAT     - Latency (Ping) to the server during TCP handshake." "White"
+    Out-Str 2 16 "[ COLUMNS ]" "Yellow"
+    Out-Str 4 17 "HTTP    - Port 80 (Cleartext HTTP). Used as a baseline for IP reachability." "White"
+    Out-Str 4 18 "TLS 1.2 - Port 443. The most common secure protocol for YouTube." "White"
+    Out-Str 4 19 "TLS 1.3 - Port 443. Modern protocol (harder for DPI to parse)." "White"
+    Out-Str 4 20 "LAT     - Latency (Ping) to the server during TCP handshake." "White"
 
-    Out-Str 2 22 "PRESS ANY KEY TO RETURN TO SCANNER..." "Cyan"
+    Out-Str 2 23 "PRESS ANY KEY TO RETURN TO SCANNER..." "Cyan"
     Clear-KeyBuffer
     $null = [Console]::ReadKey($true)
     Clear-KeyBuffer
@@ -138,10 +161,18 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
 
     Out-Str 65 1 "> SYSTEM STATUS: [ ONLINE ]" "Green"
     Out-Str 65 2 ("> ACTIVE DNS:    " + $NetInfo.DNS).PadRight(50) "Cyan"
-    Out-Str 65 3 ("> DETECTED CDN:  " + $NetInfo.CDN).PadRight(50) "Yellow"
-    Out-Str 65 4 "> ENGINE:        dpi-ebatel 2.0" "Red"
+    Out-Str 65 3 "> ENGINE:        Barebuh 0.6" "Red"
+    Out-Str 65 4 ("> DETECTED CDN:  " + $NetInfo.CDN).PadRight(50) "Yellow"
     Out-Str 65 5 "> AUTHOR:        https://github.com/Shiperoid/" "Gray"
+    # Отрисовка телеметрии вместе с интерфейсом (защита от моргания)
+    $ram = [math]::Round((Get-Process -Id $PID).WorkingSet / 1MB)
+    $ramStr = "${ram}MB".PadRight(5)
+    $jobsCount = if ($null -ne $ActiveJobs) { $ActiveJobs.Count } else { 0 }
     
+    Out-Str 95 1 ("[ RAM: $ramStr | JOBS: $($jobsCount.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray" 
+    Out-Str 95 2 ("[ BLOCKS: $($Stats.Blocked.ToString().PadRight(2)) | RST: $($Stats.Rst.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray"
+    Out-Str 95 3 ("[ CLEAN:  $($Stats.Clean.ToString().PadRight(2)) | ERR: $($Stats.Err.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray"
+
     # Компактный вывод провайдера и города
     $ispStr = "> ISP / LOC:     $($NetInfo.ISP) ($($NetInfo.LOC))"
     Out-Str 65 6 ($ispStr.PadRight(58)) "Magenta"
@@ -174,72 +205,136 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
 $Worker = {
     param($Target)
     $res = [PSCustomObject]@{ IP="FAILED"; HTTP="FAIL"; T12="FAIL"; T13="FAIL"; Lat="0ms"; Verdict="DNS_ERR"; Color="Red" }
+    
+    # 0. DNS (Если нет интернета или VPN переключается - упадет только тут)
     try {
         $dns = [System.Net.Dns]::GetHostAddresses($Target)
         if (!$dns) { return $res }
         $res.IP = $dns[0].IPAddressToString
-        
-        # 1. HTTP
+    } catch {
+        $res.Verdict = "DNS ERROR / NO NETWORK"
+        return $res
+    }
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    
+    # 1. HTTP (Независимый блок)
+    try {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $tcp = New-Object System.Net.Sockets.TcpClient
         $asyn = $tcp.BeginConnect($res.IP, 80, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(800)) {
+        if ($asyn.AsyncWaitHandle.WaitOne(1000)) {
             $tcp.EndConnect($asyn)
+            $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
+            if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
+            
             $stream = $tcp.GetStream()
             $stream.ReadTimeout = 1000
             $stream.WriteTimeout = 1000
             $msg = "HEAD / HTTP/1.1`r`nHost: $($Target)`r`nUser-Agent: curl/7.88.1`r`nConnection: close`r`n`r`n"
             $buf = [System.Text.Encoding]::ASCII.GetBytes($msg)
-            try {
-                $stream.Write($buf, 0, $buf.Length)
-                $readBuf = New-Object byte[] 64
-                if ($stream.Read($readBuf, 0, 64) -gt 0) { $res.HTTP = "OK" }
-            } catch {}
+            $stream.Write($buf, 0, $buf.Length)
+            $readBuf = New-Object byte[] 64
+            if ($stream.Read($readBuf, 0, 64) -gt 0) { $res.HTTP = "OK" }
+        } else {
+            $res.HTTP = "DRP"
         }
         $tcp.Close()
+    } catch { $res.HTTP = "ERR" }
 
-        # 2. TLS 1.2
+        # 1. HTTP (Независимый блок + замер пинга)
+    try {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $asyn = $tcp.BeginConnect($res.IP, 80, $null, $null)
+        if ($asyn.AsyncWaitHandle.WaitOne(1000)) {
+            $tcp.EndConnect($asyn)
+            $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
+            if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
+            
+            $stream = $tcp.GetStream()
+            $stream.ReadTimeout = 1000
+            $stream.WriteTimeout = 1000
+            $msg = "HEAD / HTTP/1.1`r`nHost: $($Target)`r`nUser-Agent: curl/7.88.1`r`nConnection: close`r`n`r`n"
+            $buf = [System.Text.Encoding]::ASCII.GetBytes($msg)
+            $stream.Write($buf, 0, $buf.Length)
+            $readBuf = New-Object byte[] 64
+            if ($stream.Read($readBuf, 0, 64) -gt 0) { $res.HTTP = "OK" }
+        } else {
+            $res.HTTP = "DROP"
+        }
+        $tcp.Close()
+    } catch { $res.HTTP = "ERR" }
+
+    # 2. TLS 1.2 (Независимый блок + замер пинга)
+    try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $tcp = New-Object System.Net.Sockets.TcpClient
         $asyn = $tcp.BeginConnect($res.IP, 443, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(800)) {
-            $res.Lat = "$($sw.ElapsedMilliseconds)ms"
+        if ($asyn.AsyncWaitHandle.WaitOne(1500)) {
             $tcp.EndConnect($asyn)
-            $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
-            try {
-                $ssl.AuthenticateAsClient($Target, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false)
-                if ($ssl.IsAuthenticated) { $res.T12 = "OK" }
-            } catch { $res.T12 = "RST" }
-            $ssl.Close()
-        }
-        $tcp.Close()
+            $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
+            if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
 
-        # 3. TLS 1.3
+            $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
+            $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false, $null, $null)
+            if ($authAsync.AsyncWaitHandle.WaitOne(1500)) {
+                $ssl.EndAuthenticateAsClient($authAsync)
+                $res.T12 = "OK"
+            } else { $res.T12 = "DRP" }
+            $ssl.Close()
+        } else { $res.T12 = "DRP" }
+        $tcp.Close()
+    } catch { 
+        $errMsg = "$($_.Exception.Message) $($_.Exception.InnerException.Message)"
+        if ($errMsg -match "reset|сброшено|forcibly closed|разорвал") { 
+            $res.T12 = "RST" 
+        } else { 
+            $res.T12 = "OK" 
+        }
+    }
+
+    # 3. TLS 1.3 (Независимый блок)
+    try {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $tcp = New-Object System.Net.Sockets.TcpClient
         $asyn = $tcp.BeginConnect($res.IP, 443, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(800)) {
+        if ($asyn.AsyncWaitHandle.WaitOne(1500)) {
             $tcp.EndConnect($asyn)
-            $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
-            try {
-                $ssl.AuthenticateAsClient($Target, $null, 12288, $false)
-                if ($ssl.IsAuthenticated) { $res.T13 = "OK" }
-            } catch { 
-                $errMsg = "$($_.Exception.Message) $($_.Exception.InnerException.Message)"
-                if ($errMsg -match "not supported|algorithm|поддерживается|алгоритм|не удается") { 
-                    $res.T13 = "N/A" 
-                } else { $res.T13 = "RST" }
-            }
-            $ssl.Close()
-        }
-        $tcp.Close()
+            $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
+            if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
 
-        if ($res.T12 -eq "OK" -or $res.T13 -eq "OK") {
-            $res.Verdict = "AVAILABLE (CLEAN)"; $res.Color = "Green"
-        } elseif ($res.HTTP -eq "OK") {
-            $res.Verdict = "DPI BLOCK DETECTED"; $res.Color = "Yellow"
-        } else {
-            $res.Verdict = "FULL IP BLOCK"; $res.Color = "Red"
+            $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
+            $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, 12288, $false, $null, $null)
+            if ($authAsync.AsyncWaitHandle.WaitOne(1500)) {
+                $ssl.EndAuthenticateAsClient($authAsync)
+                $res.T13 = "OK"
+            } else { $res.T13 = "DRP" }
+            $ssl.Close()
+        } else { $res.T13 = "DRP" }
+        $tcp.Close()
+    } catch { 
+        $errMsg = "$($_.Exception.Message) $($_.Exception.InnerException.Message)"
+        if ($errMsg -match "not supported|algorithm|поддерживается|алгоритм|не удается") { 
+            $res.T13 = "N/A" 
+        } elseif ($errMsg -match "reset|сброшено|forcibly closed|разорвал") { 
+            $res.T13 = "RST" 
+        } else { 
+            $res.T13 = "OK" 
         }
-    } catch { $res.Verdict = "ERR: SOCKET" }
+    }
+
+    # Итоговый RESULT
+    if ($res.T12 -eq "OK" -or $res.T13 -eq "OK") {
+        $res.Verdict = "AVAILABLE"; $res.Color = "Green"
+    } elseif ($res.HTTP -eq "OK") {
+        $res.Verdict = "DPI BLOCK"; $res.Color = "Yellow"
+    } elseif ($res.HTTP -eq "ERR" -and $res.T12 -eq "RST" -and $res.T13 -eq "RST") {
+        $res.Verdict = "ROUTING ERROR"; $res.Color = "Red"
+    } else {
+        $res.Verdict = "IP BLOCK"; $res.Color = "Red"
+    }
+
     
     return $res
 }
@@ -248,24 +343,27 @@ $Pool = [runspacefactory]::CreateRunspacePool(1, 20); $Pool.Open()
 $f = 0
 $FirstRun = $true
 $UI_Y = 30 
+$Stats = @{ Clean = 0; Blocked = 0; Rst = 0; Err = 0 }
 
 while ($true) {
     if ($FirstRun) {
         $NetInfo = Get-NetworkInfo
-        $Targets = $BaseTargets + $NetInfo.CDN | Select-Object -Unique
+        $Targets = @($BaseTargets + $NetInfo.CDN | Select-Object -Unique)
         Draw-UI $NetInfo $Targets $true
         $UI_Y = 11 + $Targets.Count + 3
-        # Убран лишний пробел спереди
         Out-Str 2 $UI_Y ("[ READY ] [ENTER] START | [H] HELP | [Q] QUIT".PadRight(118)) "Black" "White"
         $FirstRun = $false
     }
 
     $f++
-    # Живая телеметрия вместо спиннера (обновляется каждые ~10 кадров)
-    if ($f % 10 -eq 0) { 
+    if ($f % 5 -eq 0) { 
         $ram = [math]::Round((Get-Process -Id $PID).WorkingSet / 1MB)
         $jobsCount = if ($null -ne $ActiveJobs) { $ActiveJobs.Count } else { 0 }
-        Out-Str 96 1 ("[ RAM: ${ram}MB | JOBS: $jobsCount ]".PadRight(28)) "DarkGray" 
+        $ram = [math]::Round((Get-Process -Id $PID).WorkingSet / 1MB)
+        $ramStr = "${ram}MB".PadRight(5) # Жестко фиксируем ширину под 3 цифры + MB
+        Out-Str 95 1 ("[ RAM: $ramStr | JOBS: $($ActiveJobs.Count.ToString().PadRight(1)) ]".PadRight(28)) "DarkGray"  
+        Out-Str 95 2 ("[ BLOCKS: $($Stats.Blocked.ToString().PadRight(2)) | RST: $($Stats.Rst.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray"
+        Out-Str 95 3 ("[ CLEAN:  $($Stats.Clean.ToString().PadRight(2)) | ERR: $($Stats.Err.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray"
     }
 
     if ([Console]::KeyAvailable) {
@@ -282,10 +380,11 @@ while ($true) {
         }
         
         if ($k -eq "Enter") {
+            $Stats.Clean = 0; $Stats.Blocked = 0; $Stats.Rst = 0; $Stats.Err = 0
             Out-Str 2 $UI_Y ("[ WAIT ] REFRESHING NETWORK STATE...".PadRight(118)) "Black" "Cyan"
             $NetInfo = Get-NetworkInfo
             
-            $NewTargets = $BaseTargets + $NetInfo.CDN | Select-Object -Unique
+            $NewTargets = @($BaseTargets + $NetInfo.CDN | Select-Object -Unique)
             $NeedClear = ($NewTargets.Count -ne $Targets.Count)
             $Targets = $NewTargets
             
@@ -309,6 +408,18 @@ while ($true) {
             
             while ($ActiveJobs.Count -gt 0) {
                 $f++
+
+                # --- ЖИВАЯ ТЕЛЕМЕТРИЯ ВО ВРЕМЯ СКАНА ---
+                if ($f % 5 -eq 0) { 
+                    $ram = [math]::Round((Get-Process -Id $PID).WorkingSet / 1MB)
+                    $ram = [math]::Round((Get-Process -Id $PID).WorkingSet / 1MB)
+                    $ramStr = "${ram}MB".PadRight(5) # Жестко фиксируем ширину под 3 цифры + MB
+                    Out-Str 95 1 ("[ RAM: $ramStr | JOBS: $($ActiveJobs.Count.ToString().PadRight(1)) ]".PadRight(28)) "DarkGray"  
+                    Out-Str 95 2 ("[ BLOCKS: $($Stats.Blocked.ToString().PadRight(2)) | RST: $($Stats.Rst.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray"
+                    Out-Str 95 3 ("[ CLEAN:  $($Stats.Clean.ToString().PadRight(2)) | ERR: $($Stats.Err.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray"
+                }
+                # ---------------------------------------
+
                 while ([Console]::KeyAvailable) {
                     $inkey = [Console]::ReadKey($true).Key
                     if ($inkey -eq "Q" -or $inkey -eq "Escape") { $Aborted = $true }
@@ -325,10 +436,12 @@ while ($true) {
                         if ($f % 3 -eq 0) {
                             $rnd1 = Get-Random -Min 10 -Max 255
                             $rnd2 = Get-Random -Min 10 -Max 255
-                            $fakeIP = "$rnd1.$rnd2.*.*"
+                            $rnd3 = Get-Random -Min 10 -Max 255
+                            $rnd4 = Get-Random -Min 10 -Max 255
+                            $fakeIP = "$rnd1.$rnd2.$rnd3.$rnd4"
                             Out-Str $X.IP $j.Row ($fakeIP.PadRight(16)) "DarkGray"
                             
-                            $fakeLat = "$((Get-Random -Min 10 -Max 300))ms"
+                            $fakeLat = "$((Get-Random -Min 5 -Max 99))ms"
                             Out-Str $X.Lat $j.Row ($fakeLat.PadRight(6)) "DarkGray"
                         }
                     }
@@ -348,6 +461,15 @@ while ($true) {
                     $t13Str = [string]$res.T13
                     $latStr = [string]$res.Lat
                     $verStr = [string]$res.Verdict
+
+                    # --- Подсчет статистики ---
+                    if ($verStr -match "AVAILABLE") { $Stats.Clean++ }
+                    elseif ($verStr -match "BLOCK") { $Stats.Blocked++ }
+                    elseif ($verStr -match "ERR" -or $verStr -match "CRASH") { $Stats.Err++ }
+                    
+                    if ($t12Str -eq "RST" -or $t13Str -eq "RST") { $Stats.Rst++ }
+                    # --------------------------
+
 
                     Out-Str $X.IP   $j.Row ($ipStr.PadRight(16)) "DarkGray"
                     
