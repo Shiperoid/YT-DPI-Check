@@ -7,7 +7,7 @@
 
 ### Overview
 **YT-DPI Check v2.0** is an advanced, multi-threaded diagnostic utility designed to identify how YouTube and Google services are being restricted by your ISP. It goes beyond simple pings by performing deep protocol analysis across Cleartext HTTP, TLS 1.2, and TLS 1.3 to accurately distinguish between hard IP bans, silent packet drops, and active Deep Packet Inspection (DPI/TSPU) interference.
-
+![Screenshot of a comment on a GitHub issue showing an image, added in the Markdown, of an Octocat smiling and raising a tentacle.](/img/preview-yt-dpi-2.0.png)
 ### System Requirements
 *   **OS:** Windows 10 or Windows 11 (recommended).
 *   **Legacy OS:** Windows 7 / 8.1 are supported but require **PowerShell 5.1** and **.NET Framework 4.5+** installed.
