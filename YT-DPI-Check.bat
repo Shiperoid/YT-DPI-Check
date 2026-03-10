@@ -1,6 +1,6 @@
 <# :
 @echo off
-title YT-DPI v2.0 test build
+title YT-DPI v2.0
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((Get-Content -LiteralPath '%~f0' -Encoding UTF8) -join [Environment]::NewLine)"
 exit /b
 #>
@@ -9,6 +9,32 @@ $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::CursorVisible = $false
 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+
+# --- ОТКЛЮЧЕНИЕ ВЫДЕЛЕНИЯ МЫШЬЮ (ЗАЩИТА ОТ ЗАВИСАНИЙ) ---
+$code = @"
+using System;
+using System.Runtime.InteropServices;
+public class ConsoleHelper {
+    const uint ENABLE_QUICK_EDIT = 0x0040;
+    const int STD_INPUT_HANDLE = -10;
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr GetStdHandle(int nStdHandle);
+    [DllImport("kernel32.dll")]
+    static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+    [DllImport("kernel32.dll")]
+    static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+    public static void DisableQuickEdit() {
+        IntPtr consoleHandle = GetStdHandle(STD_INPUT_HANDLE);
+        uint consoleMode;
+        if (GetConsoleMode(consoleHandle, out consoleMode)) {
+            consoleMode &= ~ENABLE_QUICK_EDIT;
+            SetConsoleMode(consoleHandle, consoleMode);
+        }
+    }
+}
+"@
+Add-Type -TypeDefinition $code
+[ConsoleHelper]::DisableQuickEdit()
 
 # --- Сетка координат ---
 $X = @{ Dom=2; IP=36; HTTP=54; T12=62; T13=72; Lat=82; Ver=90 }
@@ -51,7 +77,21 @@ function Get-NetworkInfo {
         if ($raw -match "=>\s+([\w-]+)") { $cdn = "r1.$($matches[1]).googlevideo.com" }
     } catch {}
 
-    return @{ DNS = $dns; CDN = $cdn }
+    $isp = "UNKNOWN"
+    $loc = "UNKNOWN"
+    try {
+        # Запрашиваем countryCode (RU, US) вместо полного названия страны
+        $geo = Invoke-RestMethod -Uri "http://ip-api.com/json/?fields=status,countryCode,city,isp" -TimeoutSec 2
+        if ($geo.status -eq "success") {
+            # Вырезаем юридический мусор из названия провайдера
+            $isp = $geo.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC)', ''
+            # Если всё равно длинное - обрезаем
+            if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
+            $loc = "$($geo.city), $($geo.countryCode)"
+        }
+    } catch {}
+
+    return @{ DNS = $dns; CDN = $cdn; ISP = $isp; LOC = $loc }
 }
 
 function Show-HelpMenu {
@@ -73,7 +113,7 @@ function Show-HelpMenu {
     Out-Str 4 16 "HTTP    - Port 80 (Cleartext HTTP). Used as a baseline for IP reachability." "White"
     Out-Str 4 17 "TLS 1.2 - Port 443. The most common secure protocol for YouTube." "White"
     Out-Str 4 18 "TLS 1.3 - Port 443. Modern protocol (harder for DPI to parse)." "White"
-    Out-Str 4 19 "LAT     - Latency (Ping) to the server during TLS handshake." "White"
+    Out-Str 4 19 "LAT     - Latency (Ping) to the server during TCP handshake." "White"
 
     Out-Str 2 22 "PRESS ANY KEY TO RETURN TO SCANNER..." "Cyan"
     Clear-KeyBuffer
@@ -81,11 +121,14 @@ function Show-HelpMenu {
     Clear-KeyBuffer
 }
 
-function Draw-UI ($NetInfo, $Targets) {
-    $LinesNeeded = $Targets.Count + 18
+function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
+    $LinesNeeded = $Targets.Count + 19
     if ($LinesNeeded -lt 30) { $LinesNeeded = 30 }
-    cmd /c "mode con: cols=125 lines=$LinesNeeded"
-    [Console]::Clear()
+    
+    if ($ClearScreen) {
+        cmd /c "mode con: cols=125 lines=$LinesNeeded"
+        [Console]::Clear()
+    }
     
     Out-Str 1 1 '██╗   ██╗████████╗    ██████╗ ██████╗ ██╗  _    _____    ____' 'Green'
     Out-Str 1 2 '╚██╗ ██╔╝╚══██╔══╝    ██╔══██╗██╔══██╗██║ | |  / /__ \  / __ \' 'Green'
@@ -98,8 +141,12 @@ function Draw-UI ($NetInfo, $Targets) {
     Out-Str 65 3 ("> DETECTED CDN:  " + $NetInfo.CDN).PadRight(50) "Yellow"
     Out-Str 65 4 "> ENGINE:        dpi-ebatel 2.0" "Red"
     Out-Str 65 5 "> AUTHOR:        https://github.com/Shiperoid/" "Gray"
+    
+    # Компактный вывод провайдера и города
+    $ispStr = "> ISP / LOC:     $($NetInfo.ISP) ($($NetInfo.LOC))"
+    Out-Str 65 6 ($ispStr.PadRight(58)) "Magenta"
 
-    $y = 7; $l = "=" * 121
+    $y = 8; $l = "=" * 121
     Out-Str 0 $y $l "DarkCyan"
     Out-Str $X.Dom ($y+1) "TARGET DOMAIN" "White"
     Out-Str $X.IP  ($y+1) "IP ADDRESS" "White"
@@ -111,10 +158,17 @@ function Draw-UI ($NetInfo, $Targets) {
     Out-Str 0 ($y+2) $l "DarkCyan"
 
     for($i=0; $i -lt $Targets.Count; $i++) {
-        Out-Str $X.Dom (10+$i) ($Targets[$i].PadRight(32)) "Gray"
-        Out-Str $X.Ver (10+$i) ("IDLE".PadRight(30)) "DarkGray"
+        Out-Str $X.Dom (11+$i) ($Targets[$i].PadRight(32)) "Gray"
+        if ($ClearScreen) { 
+            Out-Str $X.IP   (11+$i) ("---.---.---.---".PadRight(16)) "DarkGray"
+            Out-Str $X.HTTP (11+$i) ("--".PadRight(6)) "DarkGray"
+            Out-Str $X.T12  (11+$i) ("--".PadRight(8)) "DarkGray"
+            Out-Str $X.T13  (11+$i) ("--".PadRight(8)) "DarkGray"
+            Out-Str $X.Lat  (11+$i) ("----".PadRight(6)) "DarkGray"
+            Out-Str $X.Ver  (11+$i) ("IDLE".PadRight(30)) "DarkGray"
+        }
     }
-    Out-Str 0 (10+$Targets.Count+1) $l "DarkCyan"
+    Out-Str 0 (11+$Targets.Count+1) $l "DarkCyan"
 }
 
 $Worker = {
@@ -124,7 +178,6 @@ $Worker = {
         $dns = [System.Net.Dns]::GetHostAddresses($Target)
         if (!$dns) { return $res }
         $res.IP = $dns[0].IPAddressToString
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
         
         # 1. HTTP
         $tcp = New-Object System.Net.Sockets.TcpClient
@@ -145,12 +198,13 @@ $Worker = {
         $tcp.Close()
 
         # 2. TLS 1.2
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $tcp = New-Object System.Net.Sockets.TcpClient
         $asyn = $tcp.BeginConnect($res.IP, 443, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(1200)) {
+        if ($asyn.AsyncWaitHandle.WaitOne(800)) {
+            $res.Lat = "$($sw.ElapsedMilliseconds)ms"
             $tcp.EndConnect($asyn)
             $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
-            $res.Lat = "$($sw.ElapsedMilliseconds)ms"
             try {
                 $ssl.AuthenticateAsClient($Target, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false)
                 if ($ssl.IsAuthenticated) { $res.T12 = "OK" }
@@ -162,7 +216,7 @@ $Worker = {
         # 3. TLS 1.3
         $tcp = New-Object System.Net.Sockets.TcpClient
         $asyn = $tcp.BeginConnect($res.IP, 443, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(1200)) {
+        if ($asyn.AsyncWaitHandle.WaitOne(800)) {
             $tcp.EndConnect($asyn)
             $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
             try {
@@ -199,55 +253,67 @@ while ($true) {
     if ($FirstRun) {
         $NetInfo = Get-NetworkInfo
         $Targets = $BaseTargets + $NetInfo.CDN | Select-Object -Unique
-        Draw-UI $NetInfo $Targets
-        $UI_Y = 10 + $Targets.Count + 3
-        Out-Str 2 $UI_Y (" [ READY ] [ENTER] START | [H] HELP | [Q] QUIT ".PadRight(120)) "Black" "White"
+        Draw-UI $NetInfo $Targets $true
+        $UI_Y = 11 + $Targets.Count + 3
+        # Убран лишний пробел спереди
+        Out-Str 2 $UI_Y ("[ READY ] [ENTER] START | [H] HELP | [Q] QUIT".PadRight(118)) "Black" "White"
         $FirstRun = $false
     }
 
     $f++
-    if ($f % 5 -eq 0) { Out-Str 120 1 ("|/-\"[$f/5 % 4]) "Cyan" }
+    # Живая телеметрия вместо спиннера (обновляется каждые ~10 кадров)
+    if ($f % 10 -eq 0) { 
+        $ram = [math]::Round((Get-Process -Id $PID).WorkingSet / 1MB)
+        $jobsCount = if ($null -ne $ActiveJobs) { $ActiveJobs.Count } else { 0 }
+        Out-Str 96 1 ("[ RAM: ${ram}MB | JOBS: $jobsCount ]".PadRight(28)) "DarkGray" 
+    }
 
     if ([Console]::KeyAvailable) {
         $k = [Console]::ReadKey($true).Key
-        if ($k -eq "Q" -or $k -eq "Escape") { break }
+        
+        # Жесткий и моментальный выход из программы
+        if ($k -eq "Q" -or $k -eq "Escape") { [Environment]::Exit(0) }
         
         if ($k -eq "H") {
             Show-HelpMenu
-            Draw-UI $NetInfo $Targets
-            Out-Str 2 $UI_Y (" [ READY ] [ENTER] START | [H] HELP | [Q] QUIT ".PadRight(120)) "Black" "White"
+            Draw-UI $NetInfo $Targets $true
+            Out-Str 2 $UI_Y ("[ READY ] [ENTER] START | [H] HELP | [Q] QUIT".PadRight(118)) "Black" "White"
             continue
         }
         
         if ($k -eq "Enter") {
-            Out-Str 2 $UI_Y (" [ WAIT ] REFRESHING NETWORK STATE (DNS/CDN)... ".PadRight(120)) "Black" "Cyan"
+            Out-Str 2 $UI_Y ("[ WAIT ] REFRESHING NETWORK STATE...".PadRight(118)) "Black" "Cyan"
             $NetInfo = Get-NetworkInfo
-            $Targets = $BaseTargets + $NetInfo.CDN | Select-Object -Unique
-            Draw-UI $NetInfo $Targets
-            $UI_Y = 10 + $Targets.Count + 3
             
-            Out-Str 2 $UI_Y (" [ BUSY ] SCANNING IN PROGRESS... PRESS [Q] TO ABORT ".PadRight(120)) "Black" "Yellow"
+            $NewTargets = $BaseTargets + $NetInfo.CDN | Select-Object -Unique
+            $NeedClear = ($NewTargets.Count -ne $Targets.Count)
+            $Targets = $NewTargets
+            
+            Draw-UI $NetInfo $Targets $NeedClear
+            $UI_Y = 11 + $Targets.Count + 3
+            
+            Out-Str 2 $UI_Y ("[ BUSY ] SCANNING IN PROGRESS... PRESS [Q] TO ABORT".PadRight(118)) "Black" "Yellow"
             
             for($i=0; $i -lt $Targets.Count; $i++) { 
-                Out-Str $X.IP (10+$i) (" " * 85) 
-                Out-Str $X.Ver (10+$i) ("PREPARING...".PadRight(30)) "DarkGray"
+                Out-Str $X.Ver (11+$i) ("PREPARING...".PadRight(30)) "DarkGray"
             }
             
             $ActiveJobs = [System.Collections.ArrayList]::new()
             for($i=0; $i -lt $Targets.Count; $i++) {
                 $ps = [PowerShell]::Create().AddScript($Worker).AddArgument($Targets[$i])
                 $ps.RunspacePool = $Pool
-                [void]$ActiveJobs.Add([PSCustomObject]@{ P=$ps; H=$ps.BeginInvoke(); Row=10+$i })
+                [void]$ActiveJobs.Add([PSCustomObject]@{ P=$ps; H=$ps.BeginInvoke(); Row=11+$i })
             }
 
             $Aborted = $false
             
             while ($ActiveJobs.Count -gt 0) {
                 $f++
-                if ([Console]::KeyAvailable) {
+                while ([Console]::KeyAvailable) {
                     $inkey = [Console]::ReadKey($true).Key
-                    if ($inkey -eq "Q" -or $inkey -eq "Escape") { $Aborted = $true; break }
+                    if ($inkey -eq "Q" -or $inkey -eq "Escape") { $Aborted = $true }
                 }
+                if ($Aborted) { break }
 
                 $Completed = @()
                 foreach($j in $ActiveJobs) {
@@ -255,20 +321,27 @@ while ($true) {
                         $Completed += $j
                     } else {
                         Out-Str $X.Ver $j.Row ("SCANNING " + (Get-ScanAnim $f $j.Row)).PadRight(30) "Cyan"
+                        
+                        if ($f % 3 -eq 0) {
+                            $rnd1 = Get-Random -Min 10 -Max 255
+                            $rnd2 = Get-Random -Min 10 -Max 255
+                            $fakeIP = "$rnd1.$rnd2.*.*"
+                            Out-Str $X.IP $j.Row ($fakeIP.PadRight(16)) "DarkGray"
+                            
+                            $fakeLat = "$((Get-Random -Min 10 -Max 300))ms"
+                            Out-Str $X.Lat $j.Row ($fakeLat.PadRight(6)) "DarkGray"
+                        }
                     }
                 }
 
                 foreach($j in $Completed) {
-                    # Жесткий фильтр: забираем только нужный объект, отсекая мусор
                     $rawOutput = $j.P.EndInvoke($j.H)
                     $res = $rawOutput | Where-Object { $_ -is [PSCustomObject] -and $_.IP } | Select-Object -Last 1
                     
-                    # Защита от краша потока
                     if (!$res) {
                         $res = [PSCustomObject]@{ IP="ERROR"; HTTP="--"; T12="--"; T13="--"; Lat="--"; Verdict="THREAD_CRASH"; Color="Red" }
                     }
 
-                    # Принудительно кастуем в строку перед вызовом PadRight
                     $ipStr  = [string]$res.IP
                     $htStr  = [string]$res.HTTP
                     $t12Str = [string]$res.T12
@@ -297,14 +370,21 @@ while ($true) {
             }
             
             if ($Aborted) {
-                foreach($j in $ActiveJobs) { $j.P.Dispose() }
-                Out-Str 2 $UI_Y (" [ ABORTED ] SCAN STOPPED. [ENTER] RESTART | [H] HELP | [Q] QUIT ".PadRight(120)) "Black" "Red"
+                # Мгновенно обновляем интерфейс
+                Out-Str 2 $UI_Y ("[ ABORTED ] SCAN STOPPED. [ENTER] RESTART | [H] HELP | [Q] QUIT".PadRight(118)) "Black" "Red"
+                
+                # АСИНХРОННАЯ остановка. Мы НЕ вызываем Dispose(), чтобы не заблокировать UI!
+                # Потоки сами тихо умрут в фоне через пару секунд по таймауту сети.
+                foreach($j in $ActiveJobs) { 
+                    try { 
+                        $null = $j.P.BeginStop($null, $null)
+                    } catch {} 
+                }
             } else {
-                Out-Str 2 $UI_Y (" [ SUCCESS ] SCAN FINISHED. [ENTER] RESTART | [H] HELP | [Q] QUIT ".PadRight(120)) "Black" "Green"
+                Out-Str 2 $UI_Y ("[ SUCCESS ] SCAN FINISHED. [ENTER] RESTART | [H] HELP | [Q] QUIT".PadRight(118)) "Black" "Green"
             }
             Clear-KeyBuffer
         }
     }
     [System.Threading.Thread]::Sleep(100)
 }
-$Pool.Close(); $Pool.Dispose()
