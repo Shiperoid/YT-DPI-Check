@@ -68,7 +68,8 @@ function Clear-KeyBuffer {
 }
 
 function Get-NetworkInfo {
-    cmd.exe /c "ipconfig /flushdns >nul 2>&1"
+    #Отключение эсперементального flushdns
+    #cmd.exe /c "ipconfig /flushdns >nul 2>&1"
     
     $dns = "UNKNOWN"
     try {
