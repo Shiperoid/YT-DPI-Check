@@ -36,6 +36,18 @@ public class ConsoleHelper {
 Add-Type -TypeDefinition $code
 [ConsoleHelper]::DisableQuickEdit()
 
+
+# --- ГЛОБАЛЬНЫЕ НАСТРОЙКИ ПРОКСИ ---
+$global:ProxyConfig = @{
+    Enabled = $false
+    Type    = "HTTP"   # HTTP / HTTPS (оба работают через CONNECT)
+    Host    = ""
+    Port    = 0
+    User    = ""
+    Pass    = ""
+}
+
+
 # --- Сетка координат ---
 $X = @{ Dom=2; IP=41; HTTP=59; T12=67; T13=77; Lat=87; Ver=95 }
 
@@ -125,6 +137,47 @@ function Get-NetworkInfo {
     return @{ DNS = $dns; CDN = $cdn; ISP = $isp; LOC = $loc }
 }
 
+function Connect-ThroughProxy {
+    param($TargetHost, $TargetPort, $ProxyConfig)
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    try {
+        # Подключаемся к прокси-серверу
+        $asyn = $tcp.BeginConnect($ProxyConfig.Host, $ProxyConfig.Port, $null, $null)
+        if (-not $asyn.AsyncWaitHandle.WaitOne(2000)) { throw "Timeout connecting to proxy" }
+        $tcp.EndConnect($asyn)
+
+        $stream = $tcp.GetStream()
+        $stream.ReadTimeout = 2000
+        $stream.WriteTimeout = 2000
+
+        # Формируем CONNECT-запрос
+        $connectStr = "CONNECT $TargetHost`:$TargetPort HTTP/1.1`r`nHost: $TargetHost`:$TargetPort`r`n"
+        if ($ProxyConfig.User -and $ProxyConfig.Pass) {
+            $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($ProxyConfig.User):$($ProxyConfig.Pass)"))
+            $connectStr += "Proxy-Authorization: Basic $auth`r`n"
+        }
+        $connectStr += "Proxy-Connection: Keep-Alive`r`n`r`n"
+
+        $buf = [Text.Encoding]::ASCII.GetBytes($connectStr)
+        $stream.Write($buf, 0, $buf.Length)
+
+        # Читаем ответ прокси
+        $respBuf = New-Object byte[] 256
+        $bytesRead = $stream.Read($respBuf, 0, 256)
+        $respStr = [Text.Encoding]::ASCII.GetString($respBuf, 0, $bytesRead)
+
+        if ($respStr -match "HTTP/1.[01] 200") {
+            return $tcp, $stream   # успешно, возвращаем открытый поток
+        } else {
+            throw "Proxy refused: $respStr"
+        }
+    } catch {
+        $tcp.Close()
+        throw
+    }
+}
+
+
 function Show-HelpMenu {
     [Console]::Clear()
     Out-Str 2 2 "=== YT-DPI : MINI GUIDE ===" "Cyan"
@@ -152,6 +205,61 @@ function Show-HelpMenu {
     $null = [Console]::ReadKey($true)
     Clear-KeyBuffer
 }
+
+
+function Show-ProxyMenu {
+    [Console]::CursorVisible = $true
+    [Console]::Clear()
+
+    Write-Host "=== НАСТРОЙКИ ПРОКСИ ===" -ForegroundColor Cyan
+    Write-Host "Текущие настройки:"
+    if ($global:ProxyConfig.Enabled) {
+        Write-Host "  Включен: Да" -ForegroundColor Green
+        Write-Host "  Тип: $($global:ProxyConfig.Type)" -ForegroundColor Yellow
+        Write-Host "  Хост: $($global:ProxyConfig.Host)" -ForegroundColor Yellow
+        Write-Host "  Порт: $($global:ProxyConfig.Port)" -ForegroundColor Yellow
+        if ($global:ProxyConfig.User) { Write-Host "  Логин: $($global:ProxyConfig.User)" -ForegroundColor Yellow }
+    } else {
+        Write-Host "  Включен: Нет" -ForegroundColor Red
+    }
+
+    Write-Host "`nВведите новые настройки (или оставьте пустым для отмены):"
+
+    $type = Read-Host "Тип прокси (HTTP/HTTPS)"
+    if ($type -eq "") { 
+        [Console]::CursorVisible = $false
+        return 
+    }
+    $hostAddr = Read-Host "Адрес прокси"
+    if ($hostAddr -eq "") { 
+        [Console]::CursorVisible = $false
+        return 
+    }
+    $port = Read-Host "Порт"
+    if ($port -eq "" -or -not ($port -as [int])) { 
+        Write-Host "Неверный порт, отмена." -ForegroundColor Red
+        [Console]::CursorVisible = $false
+        return
+    }
+    $user = Read-Host "Логин (если нужен, иначе Enter)"
+    $pass = Read-Host "Пароль (если нужен, иначе Enter)"
+
+    $global:ProxyConfig.Enabled = $true
+    $global:ProxyConfig.Type = $type.ToUpper()
+    $global:ProxyConfig.Host = $hostAddr
+    $global:ProxyConfig.Port = [int]$port
+    $global:ProxyConfig.User = $user
+    $global:ProxyConfig.Pass = $pass
+
+    Write-Host "`nНастройки сохранены. Нажмите любую клавишу для возврата..." -ForegroundColor Green
+    $null = [Console]::ReadKey($true)
+    [Console]::CursorVisible = $false
+
+    # Перерисовываем главный экран
+    Draw-UI $NetInfo $Targets $true
+    Out-Str 2 $UI_Y ("[ READY ] [ENTER] START | [H] HELP | [P] PROXY | [Q] QUIT".PadRight(118)) "Black" "White"
+}
+
 
 function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     $LinesNeeded = $Targets.Count + 19
@@ -186,6 +294,14 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     $ispStr = "> ISP / LOC:     $($NetInfo.ISP) ($($NetInfo.LOC))"
     Out-Str 65 6 ($ispStr.PadRight(58)) "Magenta"
 
+    $proxyStatus = if ($global:ProxyConfig.Enabled) { 
+        "PROXY: $($global:ProxyConfig.Type) $($global:ProxyConfig.Host):$($global:ProxyConfig.Port)" 
+    } else { 
+        "PROXY: OFF" 
+    }
+    Out-Str 65 7 ($proxyStatus.PadRight(58)) "DarkYellow"
+
+
     $y = 8; $l = "=" * 121
     Out-Str 0 $y $l "DarkCyan"
     Out-Str $X.Dom ($y+1) "TARGET DOMAIN" "White"
@@ -215,6 +331,12 @@ $Worker = {
     param($Target)
     $res = [PSCustomObject]@{ IP="FAILED"; HTTP="FAIL"; T12="FAIL"; T13="FAIL"; Lat="0ms"; Verdict="DNS_ERR"; Color="Red" }
     
+     # --- ПРОВЕРКА ТИПА ПРОКСИ ---
+    if ($global:ProxyConfig.Enabled -and $global:ProxyConfig.Type -notin @("HTTP","HTTPS")) {
+        $res.Verdict = "UNSUPPORTED PROXY TYPE"
+        return $res
+    }
+
     # 0. DNS (Если нет интернета или VPN переключается - упадет только тут)
     try {
         $dns = [System.Net.Dns]::GetHostAddresses($Target)
@@ -228,49 +350,91 @@ $Worker = {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     
 
-        # 1. HTTP (Независимый блок + замер пинга)
+    # 1. HTTP (Независимый блок + замер пинга)
+    # 1. HTTP c прокси
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $asyn = $tcp.BeginConnect($res.IP, 80, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(1000)) {
-            $tcp.EndConnect($asyn)
+        $tcp = $null
+        if ($global:ProxyConfig.Enabled -and $global:ProxyConfig.Type -in @("HTTP","HTTPS")) {
+            # Подключение через прокси
+            $proxyResult = Connect-ThroughProxy -TargetHost $Target -TargetPort 80 -ProxyConfig $global:ProxyConfig
+            $tcp = $proxyResult[0]
+            $stream = $proxyResult[1]
             $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
             if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
             
-            $stream = $tcp.GetStream()
-            $stream.ReadTimeout = 1000
-            $stream.WriteTimeout = 1000
+            # Отправляем HTTP-запрос через уже открытый туннель
             $msg = "HEAD / HTTP/1.1`r`nHost: $($Target)`r`nUser-Agent: curl/7.88.1`r`nConnection: close`r`n`r`n"
             $buf = [System.Text.Encoding]::ASCII.GetBytes($msg)
             $stream.Write($buf, 0, $buf.Length)
             $readBuf = New-Object byte[] 64
-            if ($stream.Read($readBuf, 0, 64) -gt 0) { $res.HTTP = "OK" }
+            if ($stream.Read($readBuf, 0, 64) -gt 0) { $res.HTTP = "OK" } else { $res.HTTP = "ERR" }
+            $tcp.Close()
         } else {
-            $res.HTTP = "DROP"
+            # Прямое подключение (как было)
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $asyn = $tcp.BeginConnect($res.IP, 80, $null, $null)
+            if ($asyn.AsyncWaitHandle.WaitOne(1000)) {
+                $tcp.EndConnect($asyn)
+                $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
+                if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
+                
+                $stream = $tcp.GetStream()
+                $stream.ReadTimeout = 1000
+                $stream.WriteTimeout = 1000
+                $msg = "HEAD / HTTP/1.1`r`nHost: $($Target)`r`nUser-Agent: curl/7.88.1`r`nConnection: close`r`n`r`n"
+                $buf = [System.Text.Encoding]::ASCII.GetBytes($msg)
+                $stream.Write($buf, 0, $buf.Length)
+                $readBuf = New-Object byte[] 64
+                if ($stream.Read($readBuf, 0, 64) -gt 0) { $res.HTTP = "OK" }
+            } else {
+                $res.HTTP = "DROP"
+            }
+            $tcp.Close()
         }
-        $tcp.Close()
-    } catch { $res.HTTP = "ERR" }
+    } catch { 
+        $res.HTTP = "ERR" 
+    }
 
     # 2. TLS 1.2 (Независимый блок + замер пинга)
+    # 2. TLS 1.2 с прокси
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $asyn = $tcp.BeginConnect($res.IP, 443, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(1500)) {
-            $tcp.EndConnect($asyn)
+        if ($global:ProxyConfig.Enabled -and $global:ProxyConfig.Type -in @("HTTP","HTTPS")) {
+            # Через прокси
+            $proxyResult = Connect-ThroughProxy -TargetHost $Target -TargetPort 443 -ProxyConfig $global:ProxyConfig
+            $tcp = $proxyResult[0]
+            $stream = $proxyResult[1]
             $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
             if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
 
-            $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
+            $ssl = New-Object System.Net.Security.SslStream($stream, $false)
             $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false, $null, $null)
             if ($authAsync.AsyncWaitHandle.WaitOne(1500)) {
                 $ssl.EndAuthenticateAsClient($authAsync)
                 $res.T12 = "OK"
             } else { $res.T12 = "DRP" }
             $ssl.Close()
-        } else { $res.T12 = "DRP" }
-        $tcp.Close()
+            $tcp.Close()
+        } else {
+            # Прямое подключение (оригинальный код)
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $asyn = $tcp.BeginConnect($res.IP, 443, $null, $null)
+            if ($asyn.AsyncWaitHandle.WaitOne(1500)) {
+                $tcp.EndConnect($asyn)
+                $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
+                if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
+
+                $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
+                $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false, $null, $null)
+                if ($authAsync.AsyncWaitHandle.WaitOne(1500)) {
+                    $ssl.EndAuthenticateAsClient($authAsync)
+                    $res.T12 = "OK"
+                } else { $res.T12 = "DRP" }
+                $ssl.Close()
+            } else { $res.T12 = "DRP" }
+            $tcp.Close()
+        }
     } catch { 
         $errMsg = "$($_.Exception.Message) $($_.Exception.InnerException.Message)"
         if ($errMsg -match "reset|сброшено|forcibly closed|разорвал") { 
@@ -280,25 +444,47 @@ $Worker = {
         }
     }
 
-    # 3. TLS 1.3 (Независимый блок)
+    # 3. TLS 1.3 (с поддержкой прокси)
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $asyn = $tcp.BeginConnect($res.IP, 443, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(1500)) {
-            $tcp.EndConnect($asyn)
+        
+        if ($global:ProxyConfig.Enabled -and $global:ProxyConfig.Type -in @("HTTP","HTTPS")) {
+            # Подключение через прокси
+            $proxyResult = Connect-ThroughProxy -TargetHost $Target -TargetPort 443 -ProxyConfig $global:ProxyConfig
+            $tcp = $proxyResult[0]
+            $stream = $proxyResult[1]
             $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
             if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
 
-            $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
+            $ssl = New-Object System.Net.Security.SslStream($stream, $false)
             $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, 12288, $false, $null, $null)
             if ($authAsync.AsyncWaitHandle.WaitOne(1500)) {
                 $ssl.EndAuthenticateAsClient($authAsync)
                 $res.T13 = "OK"
-            } else { $res.T13 = "DRP" }
+            } else {
+                $res.T13 = "DRP"
+            }
             $ssl.Close()
-        } else { $res.T13 = "DRP" }
-        $tcp.Close()
+            $tcp.Close()
+        } else {
+            # Прямое подключение (оригинальный код)
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $asyn = $tcp.BeginConnect($res.IP, 443, $null, $null)
+            if ($asyn.AsyncWaitHandle.WaitOne(1500)) {
+                $tcp.EndConnect($asyn)
+                $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
+                if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
+
+                $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false)
+                $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, 12288, $false, $null, $null)
+                if ($authAsync.AsyncWaitHandle.WaitOne(1500)) {
+                    $ssl.EndAuthenticateAsClient($authAsync)
+                    $res.T13 = "OK"
+                } else { $res.T13 = "DRP" }
+                $ssl.Close()
+            } else { $res.T13 = "DRP" }
+            $tcp.Close()
+        }
     } catch { 
         $errMsg = "$($_.Exception.Message) $($_.Exception.InnerException.Message)"
         if ($errMsg -match "not supported|algorithm|поддерживается|алгоритм|не удается") { 
@@ -306,7 +492,7 @@ $Worker = {
         } elseif ($errMsg -match "reset|сброшено|forcibly closed|разорвал") { 
             $res.T13 = "RST" 
         } else { 
-            $res.T13 = "OK" 
+            $res.T13 = "ERR"   # Изменено с "OK" на "ERR" для единообразия
         }
     }
 
@@ -362,10 +548,19 @@ while ($true) {
         # Жесткий и моментальный выход из программы
         if ($k -eq "Q" -or $k -eq "Escape") { [Environment]::Exit(0) }
         
+        if ($k -eq "P") {
+            Show-ProxyMenu
+            # После меню перерисовываем главный экран
+            Draw-UI $NetInfo $Targets $true
+            Out-Str 2 $UI_Y ("[ READY ] [ENTER] START | [H] HELP | [P] PROXY | [Q] QUIT".PadRight(118)) "Black" "White"
+            continue
+        }
+
+
         if ($k -eq "H") {
             Show-HelpMenu
             Draw-UI $NetInfo $Targets $true
-            Out-Str 2 $UI_Y ("[ READY ] [ENTER] START | [H] HELP | [Q] QUIT".PadRight(118)) "Black" "White"
+            Out-Str 2 $UI_Y ("[ READY ] [ENTER] START | [H] HELP | [P] PROXY | [Q] QUIT".PadRight(118)) "Black" "White"
             continue
         }
         
