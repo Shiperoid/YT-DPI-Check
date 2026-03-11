@@ -227,29 +227,6 @@ $Worker = {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     
-    # 1. HTTP (Независимый блок)
-    try {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $asyn = $tcp.BeginConnect($res.IP, 80, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(1000)) {
-            $tcp.EndConnect($asyn)
-            $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
-            if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
-            
-            $stream = $tcp.GetStream()
-            $stream.ReadTimeout = 1000
-            $stream.WriteTimeout = 1000
-            $msg = "HEAD / HTTP/1.1`r`nHost: $($Target)`r`nUser-Agent: curl/7.88.1`r`nConnection: close`r`n`r`n"
-            $buf = [System.Text.Encoding]::ASCII.GetBytes($msg)
-            $stream.Write($buf, 0, $buf.Length)
-            $readBuf = New-Object byte[] 64
-            if ($stream.Read($readBuf, 0, 64) -gt 0) { $res.HTTP = "OK" }
-        } else {
-            $res.HTTP = "DRP"
-        }
-        $tcp.Close()
-    } catch { $res.HTTP = "ERR" }
 
         # 1. HTTP (Независимый блок + замер пинга)
     try {
