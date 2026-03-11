@@ -67,62 +67,66 @@ function Clear-KeyBuffer {
     while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
 }
 
+# --- УЛУЧШЕННАЯ ПРОВЕРКА СЕТИ ---
 function Get-NetworkInfo {
-    #Отключение эсперементального flushdns
-    #cmd.exe /c "ipconfig /flushdns >nul 2>&1"
-    
-    $dns = "UNKNOWN"
-    try {
-        $wmi = Get-WmiObject Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | Where-Object { $_.DNSServerSearchOrder -ne $null } | Select-Object -First 1
-        if ($wmi) { $dns = $wmi.DNSServerSearchOrder[0] }
-    } catch {}
-
-    $rnd = [guid]::NewGuid().ToString().Substring(0,8)
-    $cdn = "manifest.googlevideo.com"
-    try {
-        $req = [System.Net.WebRequest]::Create("http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd")
-        $req.CachePolicy = New-Object System.Net.Cache.HttpRequestCachePolicy([System.Net.Cache.HttpRequestCacheLevel]::NoCacheNoStore)
-        $req.KeepAlive = $false
-        $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
-        $req.Timeout = 1500
-        $resp = $req.GetResponse()
-        $stream = New-Object System.IO.StreamReader($resp.GetResponseStream())
-        $raw = $stream.ReadToEnd()
-        $resp.Close()
-        if ($raw -match "=>\s+([\w-]+)") { $cdn = "r1.$($matches[1]).googlevideo.com" }
-    } catch {}
-
-    $isp = "UNKNOWN"
-    $loc = "UNKNOWN"
-    
-    # Делаем максимум 2 быстрые попытки (на случай, если VPN меняет маршрут)
-    for ($i = 1; $i -le 2; $i++) {
-        try {
-            $reqGeo = [System.Net.WebRequest]::Create("http://ip-api.com/json/?fields=status,countryCode,city,isp")
-            $reqGeo.CachePolicy = New-Object System.Net.Cache.HttpRequestCachePolicy([System.Net.Cache.HttpRequestCacheLevel]::NoCacheNoStore)
-            $reqGeo.KeepAlive = $false
-            $reqGeo.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
-            $reqGeo.UserAgent = "curl/7.88.1" # Маскировка (без неё ip-api банит)
-            $reqGeo.Timeout = 1500
-            $respGeo = $reqGeo.GetResponse()
-            $streamGeo = New-Object System.IO.StreamReader($respGeo.GetResponseStream())
-            $rawGeo = $streamGeo.ReadToEnd()
-            $respGeo.Close()
-
-            $geo = $rawGeo | ConvertFrom-Json
-            if ($geo.status -eq "success") {
-                $isp = $geo.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC)', ''
-                if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
-                $loc = "$($geo.city), $($geo.countryCode)"
-                break # Если успешно — сразу выходим из цикла
-            }
-        } catch {
-            # Если это первая попытка и интернета нет (VPN переключается), ждем 1 сек
-            if ($i -eq 1) { [System.Threading.Thread]::Sleep(1000) }
-        }
+    $info = @{ 
+        ConfigDNS = "LOADING..."; 
+        RealDNS = "CHECKING..."; 
+        ISP = "UNKNOWN"; 
+        LOC = "UNKNOWN"; 
+        CDN = "manifest.googlevideo.com" 
     }
 
-    return @{ DNS = $dns; CDN = $cdn; ISP = $isp; LOC = $loc }
+    # 1. Локальный DNS (из настроек Windows)
+    try {
+        $wmi = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | 
+               Where-Object { $_.DNSServerSearchOrder -ne $null } | Select-Object -First 1
+        if ($wmi) { $info.ConfigDNS = $wmi.DNSServerSearchOrder[0] }
+    } catch { $info.ConfigDNS = "ERR" }
+
+    # 2. Честный DNS и GEO (через быстрый API)
+    # Используем edns.ip-api.com для определения реального резолвера
+    $urls = @(
+        "http://ip-api.com/json/?fields=status,countryCode,city,isp,query",
+        "http://edns.ip-api.com/json"
+    )
+
+    foreach ($url in $urls) {
+        try {
+            $req = [System.Net.WebRequest]::Create($url)
+            $req.Timeout = 1200 # Жесткий таймаут 1.2 сек
+            $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
+            $req.UserAgent = "curl/7.88.1"
+            
+            $resp = $req.GetResponse()
+            $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+            $raw = $reader.ReadToEnd() | ConvertFrom-Json
+            $resp.Close()
+
+            if ($raw.isp) { 
+                $info.ISP = ($raw.isp -replace '(?i)\s*(LLC|Inc|Ltd|JSC|PJSC|OOO)', '').Trim()
+                $info.LOC = "$($raw.city), $($raw.countryCode)"
+            }
+            if ($raw.dns) { 
+                # Это поле из edns.ip-api.com показывает IP DNS-сервера
+                $info.RealDNS = $raw.dns.ip 
+            }
+        } catch {}
+    }
+
+    # 3. Быстрая проверка CDN
+    try {
+        $rnd = [guid]::NewGuid().ToString().Substring(0,8)
+        $req = [System.Net.WebRequest]::Create("http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd")
+        $req.Timeout = 1000
+        $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
+        $resp = $req.GetResponse()
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        if ($reader.ReadToEnd() -match "=>\s+([\w-]+)") { $info.CDN = "r1.$($matches[1]).googlevideo.com" }
+        $resp.Close()
+    } catch {}
+
+    return $info
 }
 
 function Show-HelpMenu {
@@ -169,10 +173,15 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     Out-Str 1 5 '   ██╝      ██╝       ██████╝ ██╝     ██╝ |___//____(_)____/' 'Green'
 
     Out-Str 65 1 "> SYSTEM STATUS: [ ONLINE ]" "Green"
-    Out-Str 65 2 ("> ACTIVE DNS:    " + $NetInfo.DNS).PadRight(50) "Cyan"
-    Out-Str 65 3 "> ENGINE:        Barebuh 0.6" "Red"
-    Out-Str 65 4 ("> DETECTED CDN:  " + $NetInfo.CDN).PadRight(50) "Yellow"
-    Out-Str 65 5 "> AUTHOR:        https://github.com/Shiperoid/" "Gray"
+    # Показываем разницу между настроенным и реальным DNS
+    Out-Str 65 2 ("> OS DNS:        " + $NetInfo.ConfigDNS).PadRight(50) "Cyan"
+    Out-Str 65 3 ("> UPSTREAM DNS:  " + $NetInfo.RealDNS).PadRight(50) "Yellow" # Тот самый "честный"
+    Out-Str 65 4 ("> DETECTED CDN:  " + $NetInfo.CDN).PadRight(50) "Magenta"
+    Out-Str 65 5 "> ENGINE:        Barebuh 0.6.1-DNS" "Red"
+    
+    $ispStr = "> ISP / LOC:     $($NetInfo.ISP) ($($NetInfo.LOC))"
+    Out-Str 65 6 ($ispStr.PadRight(58)) "Gray"
+    
     # Отрисовка телеметрии вместе с интерфейсом (защита от моргания)
     $ram = [math]::Round((Get-Process -Id $PID).WorkingSet / 1MB)
     $ramStr = "${ram}MB".PadRight(5)
@@ -337,12 +346,17 @@ $Stats = @{ Clean = 0; Blocked = 0; Rst = 0; Err = 0 }
 
 while ($true) {
     if ($FirstRun) {
-        $NetInfo = Get-NetworkInfo
-        $Targets = @($BaseTargets + $NetInfo.CDN | Select-Object -Unique)
-        Draw-UI $NetInfo $Targets $true
-        $UI_Y = 11 + $Targets.Count + 3
-        Out-Str 2 $UI_Y ("[ READY ] [ENTER] START | [H] HELP | [Q] QUIT".PadRight(118)) "Black" "White"
-        $FirstRun = $false
+    # Сначала рисуем пустой интерфейс
+    $EmptyInfo = @{ ConfigDNS="..."; RealDNS="..."; ISP="..."; LOC="..."; CDN="..." }
+    Draw-UI $EmptyInfo $BaseTargets $true
+    
+    # Теперь спокойно (но быстро) собираем инфу
+    $NetInfo = Get-NetworkInfo
+    $Targets = @($BaseTargets + $NetInfo.CDN | Select-Object -Unique)
+    
+    # Перерисовываем уже с данными
+    Draw-UI $NetInfo $Targets $true
+    $FirstRun = $false
     }
 
     $f++
