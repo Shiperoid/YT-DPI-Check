@@ -131,8 +131,8 @@ function Get-NetworkInfo {
 
 function Show-HelpMenu {
     [Console]::Clear()
-    Out-Str 2 2 "=== YT-DPI Check : MINI GUIDE ===" "Cyan"
-    
+    Out-Str 2 2 "=== YT-DPI : MINI GUIDE ===" "Cyan"
+
     Out-Str 2 4 "[ STATUS CODES ]" "Yellow"
     Out-Str 4 5 "OK   - Connection successful. No interference." "Green"
     Out-Str 4 6 "RST  - Connection Reset. DPI injected a TCP RST." "Red"
