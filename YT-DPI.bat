@@ -37,7 +37,7 @@ Add-Type -TypeDefinition $code
 [ConsoleHelper]::DisableQuickEdit()
 
 # --- Сетка координат ---
-$X = @{ Dom=2; IP=41; HTTP=59; T12=67; T13=77; Lat=87; Ver=95 }
+$X = @{ Dom=2; IP=48; HTTP=68; T12=78; T13=88; Lat=98; Ver=108 }
 
 $BaseTargets = @(
     "google.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
@@ -69,62 +69,37 @@ function Clear-KeyBuffer {
 
 # --- УЛУЧШЕННАЯ ПРОВЕРКА СЕТИ ---
 function Get-NetworkInfo {
-    $info = @{ 
-        ConfigDNS = "LOADING..."; 
-        RealDNS = "CHECKING..."; 
-        ISP = "UNKNOWN"; 
-        LOC = "UNKNOWN"; 
-        CDN = "manifest.googlevideo.com" 
-    }
-
-    # 1. Локальный DNS (из настроек Windows)
+    $info = @{ ConfigDNS="UNK"; RealDNS="CHECKING..."; DoH="OFF"; ISP="UNK"; LOC="UNK"; CDN="manifest.googlevideo.com" }
+    
+    # 1. Локальный DNS (совместимо с Win 7)
     try {
-        $wmi = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | 
-               Where-Object { $_.DNSServerSearchOrder -ne $null } | Select-Object -First 1
+        $wmi = Get-WmiObject Win32_NetworkAdapterConfiguration | Where { $_.IPEnabled -and $_.DNSServerSearchOrder } | Select -First 1
         if ($wmi) { $info.ConfigDNS = $wmi.DNSServerSearchOrder[0] }
-    } catch { $info.ConfigDNS = "ERR" }
-
-    # 2. Честный DNS и GEO (через быстрый API)
-    # Используем edns.ip-api.com для определения реального резолвера
-    $urls = @(
-        "http://ip-api.com/json/?fields=status,countryCode,city,isp,query",
-        "http://edns.ip-api.com/json"
-    )
-
-    foreach ($url in $urls) {
-        try {
-            $req = [System.Net.WebRequest]::Create($url)
-            $req.Timeout = 1200 # Жесткий таймаут 1.2 сек
-            $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
-            $req.UserAgent = "curl/7.88.1"
-            
-            $resp = $req.GetResponse()
-            $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-            $raw = $reader.ReadToEnd() | ConvertFrom-Json
-            $resp.Close()
-
-            if ($raw.isp) { 
-                $info.ISP = ($raw.isp -replace '(?i)\s*(LLC|Inc|Ltd|JSC|PJSC|OOO)', '').Trim()
-                $info.LOC = "$($raw.city), $($raw.countryCode)"
-            }
-            if ($raw.dns) { 
-                # Это поле из edns.ip-api.com показывает IP DNS-сервера
-                $info.RealDNS = $raw.dns.ip 
-            }
-        } catch {}
-    }
-
-    # 3. Быстрая проверка CDN
-    try {
-        $rnd = [guid]::NewGuid().ToString().Substring(0,8)
-        $req = [System.Net.WebRequest]::Create("http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd")
-        $req.Timeout = 1000
-        $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
-        $resp = $req.GetResponse()
-        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-        if ($reader.ReadToEnd() -match "=>\s+([\w-]+)") { $info.CDN = "r1.$($matches[1]).googlevideo.com" }
-        $resp.Close()
     } catch {}
+
+    # 2. Проверка DoH (Win 11 системный или через прокси-процессы)
+    try {
+        $doh = netsh dns show encryption 2>$null | Out-String
+        if ($doh -match "Yes|Да") { $info.DoH = "SYS-DoH" }
+        elseif (Get-Process | Where { $_.Name -match "dnscrypt|cloudflared|goodcheck|stubby" }) { $info.DoH = "PROXY-DoH" }
+    } catch {}
+
+    # 3. Честный DNS и GEO (аналог dnscheck.tools через API)
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy() # Ускоряет запуск (пропуск авто-прокси)
+        
+        # Получаем ISP и внешний IP
+        $geo = $wc.DownloadString("http://ip-api.com/json/?fields=status,countryCode,city,isp,query") | ConvertFrom-Json
+        if ($geo.status -eq "success") {
+            $info.ISP = ($geo.isp -replace '(?i)\s*(LLC|Inc|Ltd|JSC|PJSC|OOO|ZAO)', '').Trim()
+            $info.LOC = "$($geo.city), $($geo.countryCode)"
+            
+            # Самое важное: Узнаем IP сервера, который реально сделал запрос (Real DNS)
+            $dnsCheck = $wc.DownloadString("http://edns.ip-api.com/json") | ConvertFrom-Json
+            $info.RealDNS = if ($dnsCheck.dns.ip) { $dnsCheck.dns.ip } else { $geo.query }
+        }
+    } catch { $info.RealDNS = "OFFLINE/DNS_ERR" }
 
     return $info
 }
@@ -159,10 +134,9 @@ function Show-HelpMenu {
 
 function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     $LinesNeeded = $Targets.Count + 19
-    if ($LinesNeeded -lt 30) { $LinesNeeded = 30 }
-    
     if ($ClearScreen) {
-        cmd /c "mode con: cols=125 lines=$LinesNeeded"
+        # Расширяем консоль до 145 символов
+        cmd /c "mode con: cols=145 lines=$LinesNeeded"
         [Console]::Clear()
     }
     
@@ -172,20 +146,31 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     Out-Str 1 4 '  ╚██╔╝     ██║ ╚════╝██║  ██║██╔═══╝ ██║ | |/ // __/_/ /_/ /' 'Green'
     Out-Str 1 5 '   ██╝      ██╝       ██████╝ ██╝     ██╝ |___//____(_)____/' 'Green'
 
+
+
+
+
+# ИНФОРМАЦИОННЫЙ БЛОК (Координаты 65)
+    $dohCol = if ($NetInfo.DoH -ne "OFF") { "Green" } else { "Gray" }
     Out-Str 65 1 "> SYSTEM STATUS: [ ONLINE ]" "Green"
-    # Показываем разницу между настроенным и реальным DNS
-    Out-Str 65 2 ("> OS DNS:        " + $NetInfo.ConfigDNS).PadRight(50) "Cyan"
-    Out-Str 65 3 ("> UPSTREAM DNS:  " + $NetInfo.RealDNS).PadRight(50) "Yellow" # Тот самый "честный"
-    Out-Str 65 4 ("> DETECTED CDN:  " + $NetInfo.CDN).PadRight(50) "Magenta"
-    Out-Str 65 5 "> ENGINE:        Barebuh 0.6.1-DNS" "Red"
+    Out-Str 65 2 ("> OS DNS:       " + $NetInfo.ConfigDNS).PadRight(40) "Cyan"
+    Out-Str 65 3 ("> UPSTREAM DNS: " + $NetInfo.RealDNS).PadRight(40) "Yellow" # Честный DNS
+    Out-Str 65 4 ("> DoH/ENCRYPT:  " + $NetInfo.DoH).PadRight(40) $dohCol
+    Out-Str 65 5 ("> DETECTED CDN: " + $NetInfo.CDN).PadRight(40) "Magenta"
+    Out-Str 65 6 ("> ISP / LOC:    $($NetInfo.ISP) ($($NetInfo.LOC))").PadRight(60) "DarkGray"
+
+
     
     $ispStr = "> ISP / LOC:     $($NetInfo.ISP) ($($NetInfo.LOC))"
     Out-Str 65 6 ($ispStr.PadRight(58)) "Gray"
     
     # Отрисовка телеметрии вместе с интерфейсом (защита от моргания)
+    # СТАТИСТИКА (Сдвинута вправо на 115, чтобы не мешать DNS)
     $ram = [math]::Round((Get-Process -Id $PID).WorkingSet / 1MB)
-    $ramStr = "${ram}MB".PadRight(5)
-    $jobsCount = if ($null -ne $ActiveJobs) { $ActiveJobs.Count } else { 0 }
+    Out-Str 115 1 "[ RAM: ${ram}MB ]" "DarkGray"
+    Out-Str 115 2 "[ CLEAN:   $($Stats.Clean) ]" "Green"
+    Out-Str 115 3 "[ BLOCKED: $($Stats.Blocked) ]" "Yellow"
+    Out-Str 115 4 "[ ERRORS:  $($Stats.Err) ]" "Red"
     
     Out-Str 95 1 ("[ RAM: $ramStr | JOBS: $($jobsCount.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray" 
     Out-Str 95 2 ("[ BLOCKS: $($Stats.Blocked.ToString().PadRight(2)) | RST: $($Stats.Rst.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray"
@@ -195,7 +180,7 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     $ispStr = "> ISP / LOC:     $($NetInfo.ISP) ($($NetInfo.LOC))"
     Out-Str 65 6 ($ispStr.PadRight(58)) "Magenta"
 
-    $y = 8; $l = "=" * 121
+    $y = 8; $l = "═" * 141
     Out-Str 0 $y $l "DarkCyan"
     Out-Str $X.Dom ($y+1) "TARGET DOMAIN" "White"
     Out-Str $X.IP  ($y+1) "IP ADDRESS" "White"
