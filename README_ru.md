@@ -1,4 +1,4 @@
-﻿# YT-DPI Check v2.0
+﻿# YT-DPI
 ![GitHub Release](https://img.shields.io/badge/release-2.0-red)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
@@ -6,7 +6,7 @@
 [[English](README.md)]
 
 ### Обзор
-**YT-DPI Check v2.0** — это продвинутая многопоточная диагностическая утилита, созданная для определения того, как именно ваш провайдер ограничивает доступ к YouTube и сервисам Google. Инструмент выполняет глубокий анализ протоколов (HTTP, TLS 1.2 и TLS 1.3), чтобы точно отличить полную блокировку по IP-адресу от активного вмешательства и "тихих" дропов систем глубокого анализа трафика (DPI/ТСПУ).
+**YT-DPI** — это продвинутая многопоточная диагностическая утилита, созданная для определения того, как именно ваш провайдер ограничивает доступ к YouTube и сервисам Google. Инструмент выполняет глубокий анализ протоколов (HTTP, TLS 1.2 и TLS 1.3), чтобы точно отличить полную блокировку по IP-адресу от активного вмешательства и "тихих" дропов систем глубокого анализа трафика (DPI/ТСПУ).
 
 ![[preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/refs/heads/master/img/preview-yt-dpi-2.0.png)](https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/refs/heads/master/img/preview-yt-dpi-2.0.png)
 
