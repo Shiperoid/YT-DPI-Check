@@ -498,21 +498,28 @@ $Worker = {
         }
     }
 
+    #!!! не пихать $certCallback = { param... return $true } внутрь потока, слоамает работу
     # 1. HTTP
+    $conn = $null
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $conn = Get-Connection 80
         $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
         if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
 
+        $conn.Stream.ReadTimeout = 2000
         $msg = [System.Text.Encoding]::ASCII.GetBytes("HEAD / HTTP/1.1`r`nHost: $($Target)`r`nUser-Agent: curl/7.88.1`r`nConnection: close`r`n`r`n")
         [void]$conn.Stream.Write($msg, 0, $msg.Length)
         $buf = New-Object byte[] 64
         if ($conn.Stream.Read($buf, 0, 64) -gt 0) { $res.HTTP = "OK" } else { $res.HTTP = "DROP" }
-        $conn.Tcp.Close()
-    } catch { $res.HTTP = if ($_.Exception.Message -match "Timeout") { "DROP" } else { "ERR" } }
+    } catch { 
+        $res.HTTP = if ($_.Exception.Message -match "Timeout") { "DROP" } else { "ERR" } 
+    } finally {
+        if ($null -ne $conn) { try { $conn.Tcp.Close(); $conn.Tcp.Dispose() } catch {} }
+    }
 
     # 2. TLS 1.2
+    $conn = $null
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $conn = Get-Connection 443
@@ -521,16 +528,22 @@ $Worker = {
 
         $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
         $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false, $null, $null)
-        if ($authAsync.AsyncWaitHandle.WaitOne(1500)) { $ssl.EndAuthenticateAsClient($authAsync); $res.T12 = "OK" } else { $res.T12 = "DRP" }
-        $ssl.Close(); $conn.Tcp.Close()
+        
+        if ($authAsync.AsyncWaitHandle.WaitOne(3500)) { 
+            $ssl.EndAuthenticateAsClient($authAsync); $res.T12 = "OK" 
+        } else { $res.T12 = "DRP" }
+        $ssl.Close()
     } catch { 
         $err = $_.Exception.Message; if ($_.Exception.InnerException) { $err += " " + $_.Exception.InnerException.Message }
         if ($err -match "certificate|сертификат|подлинности|validation") { $res.T12 = "OK" }
         elseif ($err -match "reset|сброшено|forcibly closed|разорвал") { $res.T12 = "RST" } 
         else { $res.T12 = "DRP" } 
+    } finally {
+        if ($null -ne $conn) { try { $conn.Tcp.Close(); $conn.Tcp.Dispose() } catch {} }
     }
 
     # 3. TLS 1.3
+    $conn = $null
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $conn = Get-Connection 443
@@ -539,14 +552,19 @@ $Worker = {
 
         $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
         $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, 12288, $false, $null, $null)
-        if ($authAsync.AsyncWaitHandle.WaitOne(1500)) { $ssl.EndAuthenticateAsClient($authAsync); $res.T13 = "OK" } else { $res.T13 = "DRP" }
-        $ssl.Close(); $conn.Tcp.Close()
+        
+        if ($authAsync.AsyncWaitHandle.WaitOne(3500)) { 
+            $ssl.EndAuthenticateAsClient($authAsync); $res.T13 = "OK" 
+        } else { $res.T13 = "DRP" }
+        $ssl.Close()
     } catch { 
         $err = $_.Exception.Message; if ($_.Exception.InnerException) { $err += " " + $_.Exception.InnerException.Message }
         if ($err -match "certificate|сертификат|подлинности|validation") { $res.T13 = "OK" }
         elseif ($err -match "not supported|algorithm|поддерживается|алгоритм") { $res.T13 = "N/A" } 
         elseif ($err -match "reset|сброшено|forcibly closed|разорвал") { $res.T13 = "RST" } 
         else { $res.T13 = "DRP" }
+    } finally {
+        if ($null -ne $conn) { try { $conn.Tcp.Close(); $conn.Tcp.Dispose() } catch {} }
     }
 
     if ($res.T12 -eq "OK" -or $res.T13 -eq "OK") { $res.Verdict = "AVAILABLE"; $res.Color = "Green" } 
@@ -563,7 +581,7 @@ $Worker = {
 
 $Pool = [runspacefactory]::CreateRunspacePool(1, 20); $Pool.Open()
 $f = 0; $FirstRun = $true; $UI_Y = 30 
-$NavStr = "[ READY ] [ENTER] START | [H] HELP | [P] PROXY | [T] TEST | [Q] QUIT".PadRight(121)
+$NavStr = "[ READY ] [ENTER] START | [H] HELP | [P] PROXY | [S] SAVE | [Q] QUIT".PadRight(121)
 
 while ($true) {
     if ($FirstRun) {
@@ -592,6 +610,37 @@ while ($true) {
         elseif ($k -eq "P") { Show-ProxyMenu; Draw-UI $script:NetInfo $script:Targets $true; Out-Str 2 $UI_Y $NavStr "Black" "White"; continue }
         elseif ($k -eq "T") { Test-ProxyConnection; Draw-UI $script:NetInfo $script:Targets $true; Out-Str 2 $UI_Y $NavStr "Black" "White"; continue }
         
+        elseif ($k -eq "S") { 
+            Out-Str 2 $UI_Y ("[ WAIT ] SAVING RESULTS TO FILE...".PadRight(121)) "Black" "Cyan"
+            # Используем текущую директорию консоли вместо пустой переменной скрипта
+            $logPath = Join-Path -Path (Get-Location).Path -ChildPath "YT-DPI_Report.txt"
+            $logContent = "=== YT-DPI REPORT ===`r`n"
+            $logContent += "TIME: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n"
+            $logContent += "ISP:  $($script:NetInfo.ISP) ($($script:NetInfo.LOC))`r`n"
+            $logContent += "DNS:  $($script:NetInfo.DNS)`r`n"
+            $logContent += "PROXY: $(if($global:ProxyConfig.Enabled) {"$($global:ProxyConfig.Type) $($global:ProxyConfig.Host):$($global:ProxyConfig.Port)"} else {"OFF"})`r`n"
+            $logContent += "-" * 90 + "`r`n"
+            $logContent += "{0,-38} {1,-16} {2,-6} {3,-8} {4,-8} {5,-6} {6}`r`n" -f "TARGET DOMAIN", "IP ADDRESS", "HTTP", "TLS 1.2", "TLS 1.3", "LAT", "RESULT"
+            $logContent += "-" * 90 + "`r`n"
+            
+            # Читаем данные прямо с экрана (из массива Targets)
+            # Чтобы не усложнять, мы просто парсим то, что уже протестировано
+            foreach($j in $script:ActiveJobs) {
+                if ($j.Done) {
+                    $res = $j.P.EndInvoke($j.H) | Where-Object { $_ -is [PSCustomObject] -and $null -ne $_.IP } | Select-Object -Last 1
+                    if ($res) {
+                        $ip = if($global:ProxyConfig.Enabled) {"[ PROXIED ]"} else {$res.IP}
+                        $logContent += "{0,-38} {1,-16} {2,-6} {3,-8} {4,-8} {5,-6} {6}`r`n" -f $script:Targets[$j.Row-11], $ip, $res.HTTP, $res.T12, $res.T13, $res.Lat, $res.Verdict
+                    }
+                }
+            }
+            [IO.File]::WriteAllText($logPath, $logContent)
+            Out-Str 2 $UI_Y ("[ SUCCESS ] SAVED TO: $logPath".PadRight(121)) "Black" "Green"
+            Start-Sleep -Seconds 2
+            Out-Str 2 $UI_Y $NavStr "Black" "White"
+            continue 
+        }
+
         if ($k -eq "Enter") {
             $script:Stats.Clean = 0; $script:Stats.Blocked = 0; $script:Stats.Rst = 0; $script:Stats.Err = 0
             Out-Str 2 $UI_Y ("[ WAIT ] REFRESHING NETWORK STATE...".PadRight(121)) "Black" "Cyan"
