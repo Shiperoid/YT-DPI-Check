@@ -755,7 +755,7 @@ while ($true) {
             if ($Aborted) {
                 Out-Str 2 $UI_Y ("[ ABORTED ] SCAN STOPPED. [ENTER] RESTART | [H] HELP | [P] PROXY | [T] TEST | [Q] QUIT".PadRight(121)) "Black" "Red"
             } else {
-                Out-Str 2 $UI_Y ("[ SUCCESS ] SCAN FINISHED. [ENTER] RESTART | [H] HELP | [P] PROXY | [T] TEST | [Q] QUIT".PadRight(121)) "Black" "Green"
+                Out-Str 2 $UI_Y ("[ SUCCESS ] SCAN FINISHED. [ENTER] RESTART | [H] HELP | [P] PROXY | [S] SAVE | [Q] QUIT".PadRight(121)) "Black" "Green"
             }
             Clear-KeyBuffer
         }
