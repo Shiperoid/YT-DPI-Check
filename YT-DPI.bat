@@ -1,6 +1,6 @@
 <# :
 @echo off
-title YT-DPI v2.1 (Proxy Fix)
+title YT-DPI v2.0 Proxy
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((Get-Content -LiteralPath '%~f0' -Encoding UTF8) -join [Environment]::NewLine)"
 exit /b
 #>
