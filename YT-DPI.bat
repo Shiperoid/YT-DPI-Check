@@ -6,7 +6,6 @@ exit /b
 #>
 
 $ErrorActionPreference = "SilentlyContinue"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::CursorVisible = $false
 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 

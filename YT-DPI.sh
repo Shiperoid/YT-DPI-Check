@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 
 # Проверка зависимостей
 for cmd in curl awk; do
@@ -45,7 +45,7 @@ out_str() {
     local x=$1 y=$2 w=$3 text=$4 color=$5
     local padded
     printf -v padded "%-${w}s" "$text"
-    FRAME_BUFFER+="${E}[${y};${x}H${color}${C_BLK}${padded}${C_RST}"
+    FRAME_BUFFER+="${E}[${y};${x}H${color}${padded}${C_RST}"
 }
 flush_buffer() { printf "%b" "$FRAME_BUFFER"; FRAME_BUFFER=""; }
 
@@ -247,9 +247,21 @@ worker() {
         px_args="-x $PROXY_STR"
         if [[ "$PROXY_TYPE" == "SOCKS5" ]]; then px_args="${px_args/socks5:\/\//socks5h:\/\/}"; fi
         ip="[ *PROXIED* ]"
-    else
-        if $OS_MAC; then ip=$(ping -c 1 -t 1 "$target" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
-        else ip=$(ping -c 1 -W 1 "$target" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1); fi
+        else
+        ip=""
+        # 1. Системный резолвер (Debian/Ubuntu/Orange Pi) - не требует пинга
+        if command -v getent &>/dev/null; then
+            ip=$(getent ahostsv4 "$target" 2>/dev/null | awk '{print $1}' | head -n 1)
+        fi
+        # 2. Nslookup (Если getent вырезан из системы)
+        if [ -z "$ip" ] && command -v nslookup &>/dev/null; then
+            ip=$(nslookup "$target" 2>/dev/null | awk '/^Address: / {print $2}' | grep -v ':' | head -n 1)
+        fi
+        # 3. Пинг (Резерв для macOS и OpenWrt) с принудительным английским языком
+        if [ -z "$ip" ]; then
+            if $OS_MAC; then ip=$(LC_ALL=C ping -c 1 -t 1 "$target" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+            else ip=$(LC_ALL=C ping -c 1 -W 1 "$target" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1); fi
+        fi
         
         if [ -z "$ip" ]; then echo "ERROR|FAIL|FAIL|FAIL|0ms|DNS ERROR|$C_RED" > "$TMP_DIR/$row.res"; return; fi
     fi
@@ -272,7 +284,7 @@ worker() {
     local t13_out
     t13_out=$(LC_ALL=C curl -s -m 3 $px_args -I "https://$target" --tlsv1.3 2>&1)
     if [ $? -eq 0 ]; then t13="OK"
-    elif echo "$t13_out" | grep -qiE "unsupported|not supported|unknown|unrecognized|built-in|ssl|handshake|protocol"; then t13="N/A"
+    elif echo "$t13_out" | grep -qiE "unsupported|not supported|unknown option|unrecognized option|built-in"; then t13="N/A"
     elif echo "$t13_out" | grep -qi "reset"; then t13="RST"
     else t13="DRP"
     fi
