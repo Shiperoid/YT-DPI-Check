@@ -1,5 +1,13 @@
 #!/bin/bash
 
+unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+
+if [ -x "/usr/bin/curl" ]; then
+    curl() {
+        "/usr/bin/curl" "$@"
+    }
+fi
+
 # Проверка зависимостей
 for cmd in curl awk; do
     if ! command -v $cmd &> /dev/null; then echo "Error: $cmd is required."; exit 1; fi
