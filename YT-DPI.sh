@@ -275,22 +275,22 @@ worker() {
     fi
 
     local http_out
-    http_out=$(curl -s -m 2 $px_args -I "http://$target" -A "curl/7.88.1" -w "\n%{time_connect}" 2>&1)
+    http_out=$(curl -s -m 2 $px_args -I "http://$target" -A "curl/7.88.1" -w "\n%{time_total}" 2>&1)
     if [ $? -eq 0 ]; then
-        http="OK"; lat=$(echo "$http_out" | tail -n1 | tr ',' '.' | awk '{print int($1*1000)"ms"}')
+        http="OK"; lat=$(echo "$http_out" | tail -n1 | tr ',' '.' | awk '{v=int($1*1000); if(v==0) v=1; print v"ms"}')
     else
         if echo "$http_out" | grep -qi "timeout"; then http="DROP"; else http="ERR"; fi
     fi
 
     local t12_out
-    t12_out=$(curl -s -m 3 $px_args -I "https://$target" --tls-max 1.2 2>&1)
+    t12_out=$(curl -k -s -m 3 $px_args -I "https://$target" --tls-max 1.2 2>&1)
     if [ $? -eq 0 ]; then t12="OK"
     elif echo "$t12_out" | grep -qi "reset"; then t12="RST"
     else t12="DRP"
     fi
 
     local t13_out
-    t13_out=$(LC_ALL=C curl -s -m 3 $px_args -I "https://$target" --tlsv1.3 2>&1)
+    t13_out=$(LC_ALL=C curl -k -s -m 3 $px_args -I "https://$target" --tlsv1.3 2>&1)
     if [ $? -eq 0 ]; then t13="OK"
     elif echo "$t13_out" | grep -qiE "unsupported|not supported|unknown option|unrecognized option|built-in"; then t13="N/A"
     elif echo "$t13_out" | grep -qi "reset"; then t13="RST"

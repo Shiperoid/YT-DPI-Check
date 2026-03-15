@@ -444,8 +444,8 @@ function Show-HelpMenu {
 # ====================================================================================
 
 $Worker = {
-    param($Target, $ProxyConfig)
-    $res = [PSCustomObject]@{ IP="FAILED"; HTTP="FAIL"; T12="FAIL"; T13="FAIL"; Lat="0ms"; Verdict="DNS_ERR"; Color="Red" }
+    param($Target, $ProxyConfig, $CanTls13)
+    $res = [PSCustomObject]@{ IP="FAILED"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="DNS_ERR"; Color="Red" }
     
     if (-not $ProxyConfig.Enabled) {
         try {
@@ -497,14 +497,13 @@ $Worker = {
         }
     }
 
-    #!!! не пихать $certCallback = { param... return $true } внутрь потока, слоамает работу
     # 1. HTTP
     $conn = $null
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $conn = Get-Connection 80
         $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
-        if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
+if (    $res.Lat -eq "---") { $res.Lat = "${lat}ms" }
 
         $conn.Stream.ReadTimeout = 2000
         $msg = [System.Text.Encoding]::ASCII.GetBytes("HEAD / HTTP/1.1`r`nHost: $($Target)`r`nUser-Agent: curl/7.88.1`r`nConnection: close`r`n`r`n")
@@ -523,7 +522,7 @@ $Worker = {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $conn = Get-Connection 443
         $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
-        if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
+        if ($res.Lat -eq "---") { $res.Lat = "${lat}ms" }
 
         $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
         $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false, $null, $null)
@@ -542,28 +541,32 @@ $Worker = {
     }
 
     # 3. TLS 1.3
-    $conn = $null
-    try {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $conn = Get-Connection 443
-        $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
-        if ($res.Lat -eq "0ms") { $res.Lat = "${lat}ms" }
+    if (-not $CanTls13) {
+        $res.T13 = "N/A"
+    } else {
+        $conn = $null
+        try {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $conn = Get-Connection 443
+            $lat = $sw.ElapsedMilliseconds; if ($lat -eq 0) { $lat = 1 }
+            if ($res.Lat -eq "---") { $res.Lat = "${lat}ms" }
 
-        $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
-        $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, 12288, $false, $null, $null)
-        
-        if ($authAsync.AsyncWaitHandle.WaitOne(3500)) { 
-            $ssl.EndAuthenticateAsClient($authAsync); $res.T13 = "OK" 
-        } else { $res.T13 = "DRP" }
-        $ssl.Close()
-    } catch { 
-        $err = $_.Exception.Message; if ($_.Exception.InnerException) { $err += " " + $_.Exception.InnerException.Message }
-        if ($err -match "certificate|сертификат|подлинности|validation") { $res.T13 = "OK" }
-        elseif ($err -match "not supported|algorithm|поддерживается|алгоритм") { $res.T13 = "N/A" } 
-        elseif ($err -match "reset|сброшено|forcibly closed|разорвал") { $res.T13 = "RST" } 
-        else { $res.T13 = "DRP" }
-    } finally {
-        if ($null -ne $conn) { try { $conn.Tcp.Close(); $conn.Tcp.Dispose() } catch {} }
+            $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
+            $authAsync = $ssl.BeginAuthenticateAsClient($Target, $null, 12288, $false, $null, $null)
+            
+            if ($authAsync.AsyncWaitHandle.WaitOne(3500)) { 
+                $ssl.EndAuthenticateAsClient($authAsync); $res.T13 = "OK" 
+            } else { $res.T13 = "DRP" }
+            $ssl.Close()
+        } catch { 
+            $err = $_.Exception.Message; if ($_.Exception.InnerException) { $err += " " + $_.Exception.InnerException.Message }
+            if ($err -match "certificate|сертификат|подлинности|validation") { $res.T13 = "OK" }
+            elseif ($err -match "not supported|algorithm|поддерживается|алгоритм") { $res.T13 = "N/A" } 
+            elseif ($err -match "reset|сброшено|forcibly closed|разорвал") { $res.T13 = "RST" } 
+            else { $res.T13 = "DRP" }
+        } finally {
+            if ($null -ne $conn) { try { $conn.Tcp.Close(); $conn.Tcp.Dispose() } catch {} }
+        }
     }
 
     if ($res.T12 -eq "OK" -or $res.T13 -eq "OK") { $res.Verdict = "AVAILABLE"; $res.Color = "Green" } 
@@ -581,6 +584,24 @@ $Worker = {
 $Pool = [runspacefactory]::CreateRunspacePool(1, 20); $Pool.Open()
 $f = 0; $FirstRun = $true; $UI_Y = 30 
 $NavStr = "[ READY ] [ENTER] START | [H] HELP | [P] PROXY | [S] SAVE | [Q] QUIT".PadRight(121)
+
+# --- ПРОВЕРКА ПОДДЕРЖКИ TLS 1.3 В ОС ---
+$global:Tls13Supported = $true
+try {
+    $testTcp = New-Object System.Net.Sockets.TcpClient
+    $asyn = $testTcp.BeginConnect("google.com", 443, $null, $null)
+    if ($asyn.AsyncWaitHandle.WaitOne(1500)) {
+        $testTcp.EndConnect($asyn)
+        $testSsl = New-Object System.Net.Security.SslStream($testTcp.GetStream(), $false)
+        $testSsl.AuthenticateAsClient("google.com", $null, 12288, $false)
+        $testSsl.Close()
+    }
+    $testTcp.Close()
+} catch {
+    if ($_.Exception.Message -match "not supported|algorithm|поддерживается|алгоритм") {
+        $global:Tls13Supported = $false
+    }
+}
 
 while ($true) {
     if ($FirstRun) {
@@ -656,7 +677,7 @@ while ($true) {
             
             $script:ActiveJobs = @()
             for($i=0; $i -lt $script:Targets.Count; $i++) {
-                $ps = [PowerShell]::Create().AddScript($Worker).AddArgument($script:Targets[$i]).AddArgument($global:ProxyConfig)
+                $ps = [PowerShell]::Create().AddScript($Worker).AddArgument($script:Targets[$i]).AddArgument($global:ProxyConfig).AddArgument($global:Tls13Supported)
                 $ps.RunspacePool = $Pool
                 $script:ActiveJobs += [PSCustomObject]@{ P=$ps; H=$ps.BeginInvoke(); Row=(11+$i); Done=$false }
             }
@@ -709,20 +730,25 @@ while ($true) {
                         $latStr = [string]$res.Lat
 
                         Out-Str $X.IP   $j.Row ($ipStr.PadRight(16)) "DarkGray"
-                        
-                        $hCol = if($htStr -eq "OK") {"Green"} else {"Red"}
+
+                        # Цвета: OK - Green, ---/NA - DarkGray, ошибки - Red
+                        $hCol = if($htStr -eq "OK") {"Green"} elseif($htStr -eq "---") {"DarkGray"} else {"Red"}
                         Out-Str $X.HTTP $j.Row ($htStr.PadRight(6)) $hCol
-                        
-                        $t12Col = if($t12Str -eq "OK") {"Green"} else {"Red"}
+
+                        $t12Col = if($t12Str -eq "OK") {"Green"} elseif($t12Str -eq "---") {"DarkGray"} else {"Red"}
                         Out-Str $X.T12  $j.Row ($t12Str.PadRight(8)) $t12Col
-                        
-                        $t13Col = if($t13Str -eq "OK") {"Green"} elseif($t13Str -eq "N/A") {"Gray"} else {"Red"}
+
+                        # Для совместимости с Win7 заменим -in на простое сравнение
+                        $t13Col = if($t13Str -eq "OK") {"Green"} elseif($t13Str -eq "N/A" -or $t13Str -eq "---") {"DarkGray"} else {"Red"}
                         Out-Str $X.T13  $j.Row ($t13Str.PadRight(8)) $t13Col
+
+                        $latCol = if($latStr -eq "---") {"DarkGray"} else {"Cyan"}
+                        Out-Str $X.Lat  $j.Row ($latStr.PadRight(6)) $latCol
                         
-                        Out-Str $X.Lat  $j.Row ($latStr.PadRight(6)) "Cyan"
+                        # ВОТ ЭТА СТРОКА ОБЯЗАТЕЛЬНА, чтобы SCANNING исчез:
                         Out-Str $X.Ver  $j.Row ($v.PadRight(30)) $res.Color
                         
-                        $j.Done = $true 
+                        $j.Done = $true  
                     } else {
                         Out-Str $X.Ver $j.Row ("SCANNING " + (Get-ScanAnim $f $j.Row)).PadRight(30) "Cyan"
                         if ($f % 4 -eq 0) {
