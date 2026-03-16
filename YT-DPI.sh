@@ -38,9 +38,33 @@ export PROXY_STR=""
 STATS_CLEAN=0; STATS_BLOCKED=0; STATS_RST=0; STATS_ERR=0
 
 BASE_TARGETS=(
-    "google.com" "youtube.com" "youtu.be" "i.ytimg.com" "yt3.ggpht.com"
-    "manifest.googlevideo.com" "redirector.googlevideo.com"
-    "youtubei.googleapis.com" "signaler-pa.youtube.com"
+    # 1. Основные интерфейсы
+    "youtube.com" 
+    "www.youtube.com"         # Часто блокируют именно поддомен www
+    "m.youtube.com"           # Мобильная версия сайта
+    "youtu.be"                # Короткие ссылки
+
+    # 2. Видео-трафик (Google Cash серверы)
+    "manifest.googlevideo.com" 
+    "redirector.googlevideo.com"
+
+    # 3. Контент и оформление
+    "i.ytimg.com"             # Превью (thumbnails)
+    "s.ytimg.com"             # Статические файлы (JS/CSS)
+    "yt3.ggpht.com"           # Аватарки каналов
+    "yt4.ggpht.com"           # Альтернативный сервер аватарок
+    "www.youtube-nocookie.com" # Embed плеер
+
+    # 4. API и сервисы
+    "youtubei.googleapis.com" 
+    "s.youtube.com"           # Статистика/история
+    "video.google.com"        # Старый сервис
+    "youtubeembeddedplayer.googleapis.com" # API плеера
+
+    # 5. Служебный трафик
+    "signaler-pa.youtube.com"
+    "play.google.com"         # Лицензии
+    "googleapis.com"          # Общие либы
 )
 
 X_DOM=2; X_IP=41; X_HTTP=59; X_T12=67; X_T13=77; X_LAT=87; X_VER=95
@@ -88,13 +112,13 @@ draw_ui() {
     out_str 1 5 0 '   ██╝      ██╝       ██████╝ ██╝     ██╝ |___//____(_)____/' "$C_GRN"
 
     out_str 65 1 0 "> SYSTEM STATUS: [ ONLINE ]" "$C_GRN"
-    out_str 65 2 50 "> ACTIVE DNS:    $DNS" "$C_CYA"
-    out_str 65 3 0 "> ENGINE:        Cherkash 1.3 (Cross-Platform)" "$C_RED"
-    out_str 65 4 50 "> DETECTED CDN:  $CDN" "$C_YEL"
-    out_str 65 5 0 "> AUTHOR:        https://github.com/Shiperoid/" "$C_GRY"
-    out_str 65 6 58 "> ISP / LOC:     $ISP ($LOC)" "$C_MAG"
+    out_str 65 2 50 "> ACTIVE DNS: $DNS" "$C_CYA"
+    out_str 65 3 0 "> ENGINE: Potato 1.1-stable " "$C_RED"
+    out_str 65 4 50 "> DETECTED CDN: $CDN" "$C_YEL"
+    out_str 65 5 0 "> AUTHOR: github.com/Shiperoid" "$C_GRY"
+    out_str 65 6 58 "> ISP / LOC: $ISP ($LOC)" "$C_MAG"
 
-    if $PROXY_ENABLED; then px_stat="PROXY: $PROXY_TYPE $PROXY_HOST:$PROXY_PORT"; else px_stat="PROXY: OFF"; fi
+    if $PROXY_ENABLED; then px_stat="> PROXY: $PROXY_TYPE $PROXY_HOST:$PROXY_PORT"; else px_stat="> PROXY: OFF"; fi
     out_str 65 7 58 "$px_stat" "$C_YEL"
 
     local l="========================================================================================================================="
@@ -337,7 +361,7 @@ while true; do
             echo "TIME: $(date '+%Y-%m-%d %H:%M:%S')"
             echo "ISP:  $ISP ($LOC)"
             echo "DNS:  $DNS"
-            if $PROXY_ENABLED; then echo "PROXY: $PROXY_TYPE $PROXY_HOST:$PROXY_PORT"; else echo "PROXY: OFF"; fi
+            if $PROXY_ENABLED; then echo "PROXY: $PROXY_TYPE $PROXY_HOST:$PROXY_PORT"; else echo "> PROXY: [ OFF ]"; fi
             echo "------------------------------------------------------------------------------------------"
             printf "%-38s %-16s %-6s %-8s %-8s %-6s %s\n" "TARGET DOMAIN" "IP ADDRESS" "HTTP" "TLS 1.2" "TLS 1.3" "LAT" "RESULT"
             echo "------------------------------------------------------------------------------------------"
@@ -372,7 +396,7 @@ while true; do
             row=$((12 + i))
             out_str $X_VER $row 30 "PREPARING..." "$C_GRY"
             JOB_STATE[$i]=1
-            worker "${TARGETS[$i]}" "$row" &
+            worker "${TARGETS[$i]}" "$row" < /dev/null &
         done
         flush_buffer
 

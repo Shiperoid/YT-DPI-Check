@@ -48,35 +48,34 @@ $X = @{ Dom=2; IP=41; HTTP=59; T12=67; T13=77; Lat=87; Ver=95 }
 # ====================================================================================
 
 $BaseTargets = @(
-    # 1. Базовая проверка связи (обычно не блокируется)
-    "google.com", 
-    
-    # 2. Сам сайт и короткие ссылки
-    "youtube.com", "youtu.be", 
-    
-    # 3. Серверы картинок (превью видео, аватарки каналов)
-    "i.ytimg.com", "yt3.ggpht.com", 
-    
-    # 4. Ядро плеера (если они в блоке - видео будет бесконечно грузиться)
-    "manifest.googlevideo.com", "redirector.googlevideo.com", 
-    
-    # 5. API Ютуба (отвечает за работу мобильных приложений, Smart TV и комментарии)
+    # 1. Основные интерфейсы (если в блоке — сайт не откроется вообще)
+    "youtube.com", 
+    "www.youtube.com",         # Часто блокируют именно поддомен www
+    "m.youtube.com",           # Мобильная версия сайта
+    "youtu.be",                # Короткие ссылки
+
+    # 2. Видео-трафик (Google Cash серверы)
+    "manifest.googlevideo.com", 
+    "redirector.googlevideo.com",
+
+    # 3. Контент и оформление (картинки, стили, скрипты)
+    "i.ytimg.com",             # Превью (thumbnails)
+    "s.ytimg.com",             # Статические файлы (JS/CSS сайта)
+    "yt3.ggpht.com",           # Аватарки каналов и баннеры
+    "yt4.ggpht.com",           # Альтернативный сервер для аватарок
+    "www.youtube-nocookie.com",# Плеер для вставки на сторонние сайты (Embed)
+
+    # 4. API и сервисы (без них не работают подписки, лайки, история)
     "youtubei.googleapis.com", 
-    
-    # 6. Авторизация и служебный трафик
-    "signaler-pa.youtube.com"
+    "s.youtube.com",           # Сбор статистики и история просмотров (если блок - видео "не досмотрено")
+    "video.google.com",        # Старый сервис, иногда используется для поиска
+    "youtubeembeddedplayer.googleapis.com", # API встроенного плеера
+
+    # 5. Служебный трафик и авторизация
+    "signaler-pa.youtube.com",
+    "play.google.com",         # Иногда используется для проверки лицензий (платные фильмы)
+    "googleapis.com"           # Общие библиотеки Google
 )
-
-
-
-#$BaseTargets = @(
-#    "google.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
-#    "i.ytimg.com", "i9.ytimg.com", "s.ytimg.com", "yt3.ggpht.com", "yt4.ggpht.com",
-#    "googleusercontent.com", "yt3.googleusercontent.com", "googlevideo.com",
-#    "manifest.googlevideo.com", "redirector.googlevideo.com", "googleapis.com",
-#    "youtubei.googleapis.com", "youtubeembeddedplayer.googleapis.com", "youtubekids.com",
-#    "signaler-pa.youtube.com"
-#)
 
 # ====================================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И UI
@@ -116,11 +115,11 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     Out-Str 1 4 '  ╚██╔╝     ██║ ╚════╝██║  ██║██╔═══╝ ██║ | |/ // __/_/ /_/ /' 'Green'
     Out-Str 1 5 '   ██╝      ██╝       ██████╝ ██╝     ██╝ |___//____(_)____/' 'Green'
 
-    Out-Str 65 1 "> SYSTEM STATUS: [ ONLINE ]" "Green"
-    Out-Str 65 2 ("> ACTIVE DNS:    " + $NetInfo.DNS).PadRight(50) "Cyan"
-    Out-Str 65 3 "> ENGINE:        Cherkash 1.3" "Red"
-    Out-Str 65 4 ("> DETECTED CDN:  " + $NetInfo.CDN).PadRight(50) "Yellow"
-    Out-Str 65 5 "> AUTHOR:        https://github.com/Shiperoid/" "Gray"
+    Out-Str 65 1 "> SYS STATUS: [ ONLINE ]" "Green"
+    Out-Str 65 2 ("> LOCAL DNS: " + $NetInfo.DNS).PadRight(50) "Cyan"
+    Out-Str 65 3 "> ENGINE: Potato 1.3-stable" "Red"
+    Out-Str 65 4 ("> CDN NODE: " + $NetInfo.CDN).PadRight(50) "Yellow"
+    Out-Str 65 5 "> AUTHOR: github.com/Shiperoid" "Green"
     
     $ram = [math]::Round((Get-Process -Id $PID).WorkingSet / 1MB)
     $ramStr = "${ram}MB".PadRight(5)
@@ -130,10 +129,10 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     Out-Str 95 2 ("[ BLOCKS: $($script:Stats.Blocked.ToString().PadRight(2)) | RST: $($script:Stats.Rst.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray"
     Out-Str 95 3 ("[ CLEAN:  $($script:Stats.Clean.ToString().PadRight(2)) | ERR: $($script:Stats.Err.ToString().PadRight(2)) ]".PadRight(28)) "DarkGray"
 
-    $ispStr = "> ISP / LOC:     $($NetInfo.ISP) ($($NetInfo.LOC))"
+    $ispStr = "> ISP / LOC: $($NetInfo.ISP) ($($NetInfo.LOC))"
     Out-Str 65 6 ($ispStr.PadRight(58)) "Magenta"
 
-    $proxyStatus = if ($global:ProxyConfig.Enabled) { "PROXY: $($global:ProxyConfig.Type) $($global:ProxyConfig.Host):$($global:ProxyConfig.Port)" } else { "PROXY: OFF" }
+    $proxyStatus = if ($global:ProxyConfig.Enabled) { "> PROXY: $($global:ProxyConfig.Type) $($global:ProxyConfig.Host):$($global:ProxyConfig.Port) Connected" } else { "> PROXY: [ OFF ]" }
     Out-Str 65 7 ($proxyStatus.PadRight(58)) "DarkYellow"
 
     $y = 8; $l = "=" * 121
