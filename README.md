@@ -4,7 +4,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 
-[[Русский](README_ru.md)]
+[[Русский](README_ru.md)] [[telegram](https://t.me/YT-DPI)]
 
 ### Overview
 **YT-DPI** — Is an advanced, multi-threaded diagnostic utility designed to identify how YouTube and Google services are being restricted by your ISP. It goes beyond simple pings by performing deep protocol analysis across Cleartext HTTP, TLS 1.2, and TLS 1.3 to accurately distinguish between hard IP bans, silent packet drops, and active Deep Packet Inspection (DPI/TSPU) interference.
