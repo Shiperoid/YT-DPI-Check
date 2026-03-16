@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
 
+# --- ФИКС 1: Отключаем эхо ввода и включаем Alternate Screen Buffer ---
+# Это предотвратит "сдвиг" строк при нажатии Enter и скроллинг
+stty -echo
+printf "\033[?1049h" # Enter Alt Buffer
+printf "\033[?25l"   # Hide Cursor
+
+# Функция восстановления при выходе (Ctrl+C или Q)
+cleanup() {
+    stty echo
+    printf "\033[?1049l" # Exit Alt Buffer
+    printf "\033[?25h"   # Show Cursor
+    rm -rf "$TMP_DIR"
+    exit
+}
+
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 
 if [ -x "/usr/bin/curl" ]; then
@@ -10,21 +25,20 @@ fi
 
 # Проверка зависимостей
 for cmd in curl awk; do
-    if ! command -v $cmd &> /dev/null; then echo "Error: $cmd is required."; exit 1; fi
+    if ! command -v $cmd &> /dev/null; then 
+        stty echo; printf "\033[?1049l"; echo "Error: $cmd is required."; exit 1; 
+    fi
 done
 
-# Определение macOS и версии Bash
 OS_MAC=false
 if [[ "$OSTYPE" == "darwin"* ]]; then OS_MAC=true; fi
 
-# Режим совместимости для старого Bash 3.2 (macOS)
 READ_TIMEOUT="0.05"
 if (( BASH_VERSINFO[0] < 4 )); then READ_TIMEOUT="1"; fi
 
 TMP_DIR=$(mktemp -d)
 E=$'\033'
-trap 'printf "%s[?25h" "$E"; clear; rm -rf "$TMP_DIR"; exit' INT TERM EXIT
-printf "%s[?25l" "$E"
+trap 'cleanup' INT TERM EXIT
 
 # --- ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
 export PROXY_ENABLED=false
@@ -37,34 +51,35 @@ export PROXY_STR=""
 
 STATS_CLEAN=0; STATS_BLOCKED=0; STATS_RST=0; STATS_ERR=0
 
+# --- ТВОЙ НОВЫЙ СПИСОК (BASH ARRAY FORMAT) ---
 BASE_TARGETS=(
     # 1. Основные интерфейсы
     "youtube.com" 
-    "www.youtube.com"         # Часто блокируют именно поддомен www
-    "m.youtube.com"           # Мобильная версия сайта
-    "youtu.be"                # Короткие ссылки
+    "www.youtube.com"
+    "m.youtube.com"
+    "youtu.be"
 
-    # 2. Видео-трафик (Google Cash серверы)
+    # 2. Видео-трафик
     "manifest.googlevideo.com" 
     "redirector.googlevideo.com"
 
     # 3. Контент и оформление
-    "i.ytimg.com"             # Превью (thumbnails)
-    "s.ytimg.com"             # Статические файлы (JS/CSS)
-    "yt3.ggpht.com"           # Аватарки каналов
-    "yt4.ggpht.com"           # Альтернативный сервер аватарок
-    "www.youtube-nocookie.com" # Embed плеер
+    "i.ytimg.com"
+    "s.ytimg.com"
+    "yt3.ggpht.com"
+    "yt4.ggpht.com"
+    "www.youtube-nocookie.com"
 
     # 4. API и сервисы
     "youtubei.googleapis.com" 
-    "s.youtube.com"           # Статистика/история
-    "video.google.com"        # Старый сервис
-    "youtubeembeddedplayer.googleapis.com" # API плеера
+    "s.youtube.com"
+    "video.google.com"
+    "youtubeembeddedplayer.googleapis.com"
 
     # 5. Служебный трафик
     "signaler-pa.youtube.com"
-    "play.google.com"         # Лицензии
-    "googleapis.com"          # Общие либы
+    "play.google.com"
+    "googleapis.com"
 )
 
 X_DOM=2; X_IP=41; X_HTTP=59; X_T12=67; X_T13=77; X_LAT=87; X_VER=95
@@ -147,7 +162,7 @@ draw_ui() {
 }
 
 show_help() {
-    printf "%s[?25h" "$E"; clear
+    clear
     echo -e "${C_CYA}=== YT-DPI : MINI GUIDE ===${C_RST}"
     echo -e "\n${C_YEL}[ STATUS CODES ]${C_RST}"
     echo -e "  ${C_GRN}OK   - Connection successful.${C_RST}"
@@ -162,16 +177,13 @@ show_help() {
     echo -e "  ${C_RED}IP  BLOCK     - Both HTTP and TLS are unreachable.${C_RST}"
     echo -e "  ${C_RED}ROUTING ERROR - Network issues, proxy failure, or bad routing.${C_RST}"
 
-    echo -e "\n${C_YEL}[ PROXY MODE ]${C_RST}"
-    echo -e "  ${C_CYA}[ *PROXIED* ] - DNS resolution is safely handled by the remote proxy.${C_RST}"
-
     echo -ne "\n${C_CYA}PRESS ANY KEY TO RETURN TO SCANNER...${C_RST}"
     read -r -n 1 -s
-    printf "%s[?25l" "$E"
 }
 
 show_proxy_menu() {
-    printf "%s[?25h" "$E"; clear
+    stty echo # Включаем эхо временно для ввода
+    clear
     echo -e "${C_CYA}=== НАСТРОЙКИ ПРОКСИ ===${C_RST}"
     
     if $PROXY_ENABLED; then
@@ -192,14 +204,15 @@ show_proxy_menu() {
 
     echo -ne "\n${C_YEL}> Введите прокси: ${C_RST}"
     read -r px_input
+    stty -echo # Выключаем эхо обратно
 
-    if [[ -z "$px_input" ]]; then printf "%s[?25l" "$E"; return; fi
+    if [[ -z "$px_input" ]]; then return; fi
     
     if [[ "$px_input" == "0" || "$px_input" == "off" || "$px_input" == "OFF" ]]; then
         PROXY_ENABLED=false
         PROXY_TYPE="HTTP"; PROXY_HOST=""; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""; PROXY_STR=""
         echo -e "\n${C_GRN}[V] Прокси успешно отключен.${C_RST}"; sleep 1
-        printf "%s[?25l" "$E"; return
+        return
     fi
 
     local re="^((http|https|socks5)://)?(([^:]+):([^@]+)@)?([^:/]+|\[[a-fA-F0-9:]+\]):([0-9]{1,5})$"
@@ -212,7 +225,7 @@ show_proxy_menu() {
         local h="${BASH_REMATCH[6]}"; local p="${BASH_REMATCH[7]}"
 
         if (( p <= 0 || p > 65535 )); then
-            echo -e "\n${C_RED}[x] Ошибка: Неверный порт!${C_RST}"; sleep 2; printf "%s[?25l" "$E"; return
+            echo -e "\n${C_RED}[x] Ошибка: Неверный порт!${C_RST}"; sleep 2; return
         fi
 
         local userpass_str=""
@@ -250,7 +263,6 @@ show_proxy_menu() {
         shopt -u nocasematch
         echo -e "\n${C_RED}[x] Ошибка: Неверный формат! Попробуйте снова.${C_RST}"; sleep 2
     fi
-    printf "%s[?25l" "$E"
 }
 
 test_proxy() {
@@ -281,15 +293,12 @@ worker() {
         ip="[ *PROXIED* ]"
         else
         ip=""
-        # 1. Системный резолвер (Debian/Ubuntu/Orange Pi) - не требует пинга
         if command -v getent &>/dev/null; then
             ip=$(getent ahostsv4 "$target" 2>/dev/null | awk '{print $1}' | head -n 1)
         fi
-        # 2. Nslookup (Если getent вырезан из системы)
         if [ -z "$ip" ] && command -v nslookup &>/dev/null; then
             ip=$(nslookup "$target" 2>/dev/null | awk '/^Address: / {print $2}' | grep -v ':' | head -n 1)
         fi
-        # 3. Пинг (Резерв для macOS и OpenWrt) с принудительным английским языком
         if [ -z "$ip" ]; then
             if $OS_MAC; then ip=$(LC_ALL=C ping -c 1 -t 1 "$target" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
             else ip=$(LC_ALL=C ping -c 1 -W 1 "$target" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1); fi
@@ -396,6 +405,7 @@ while true; do
             row=$((12 + i))
             out_str $X_VER $row 30 "PREPARING..." "$C_GRY"
             JOB_STATE[$i]=1
+            # --- ФИКС 2: Блокируем stdin для фоновых процессов ---
             worker "${TARGETS[$i]}" "$row" < /dev/null &
         done
         flush_buffer
