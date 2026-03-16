@@ -4,7 +4,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 
-[[English](README.md)]
+[[English](README.md)] [[Телеграмчик](https://t.me/YT-DPI)]
 
 ### Обзор
 **YT-DPI** — это продвинутая многопоточная диагностическая утилита, созданная для определения того, как именно ваш провайдер ограничивает доступ к YouTube и сервисам Google. Инструмент выполняет глубокий анализ протоколов (HTTP, TLS 1.2 и TLS 1.3), чтобы точно отличить полную блокировку по IP-адресу от активного вмешательства и "тихих" дропов систем глубокого анализа трафика (DPI/ТСПУ).
