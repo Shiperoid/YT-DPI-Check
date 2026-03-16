@@ -2,6 +2,7 @@
 ![GitHub Release](https://img.shields.io/badge/release-2.0-red)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
+[![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 
 [[English](README.md)]
 
