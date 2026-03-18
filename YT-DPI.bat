@@ -39,14 +39,25 @@ Add-Type -TypeDefinition $code
 # --- Сетка координат ---
 $X = @{ Dom=2; IP=41; HTTP=59; T12=67; T13=77; Lat=87; Ver=95 }
 
-$BaseTargets = @(
-    "google.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
+# --- ПОДТЯЖКА ЦЕЛЕЙ ИЗ ФАЙЛА ---
+$TargetsFile = "$PSScriptRoot\targets.txt"
+if (Test-Path $TargetsFile) {
+    try {
+        $BaseTargets = Get-Content $TargetsFile | Where-Object { $_ -match '\.' }
+    } catch {
+        $BaseTargets = @("youtube.com", "google.com") # Фолбек, если файл битый
+    }
+} else {
+    # Если файла нет, используем дефолтный список
+    $BaseTargets = @(
+        "google.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be",
         "i.ytimg.com", "i9.ytimg.com", "s.ytimg.com", "yt3.ggpht.com", "yt4.ggpht.com",
         "googleusercontent.com", "yt3.googleusercontent.com", "googlevideo.com",
         "manifest.googlevideo.com", "redirector.googlevideo.com", "googleapis.com",
         "youtubei.googleapis.com", "youtubeembeddedplayer.googleapis.com", "youtubekids.com",
         "signaler-pa.youtube.com"
-)
+    )
+}
 
 function Out-Str($x, $y, $str, $color="White", $bg="Black") {
     try {
