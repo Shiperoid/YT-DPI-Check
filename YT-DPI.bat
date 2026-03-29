@@ -1549,8 +1549,8 @@ function Test-ProxyConnection {
     Write-Host " $line" -ForegroundColor Gray
 
     if (-not $global:ProxyConfig.Enabled) {
-        Write-Host "`n [!] ОШИБКА: Прокси не настроен или отключен." -ForegroundColor Red
-        Write-Host " Настройте прокси через меню [P] перед тестированием." -ForegroundColor Gray
+        Write-Host "`n  [!] ОШИБКА: Прокси не настроен." -ForegroundColor Red
+        Write-Host "  Сначала включите его в меню [P]." -ForegroundColor Gray
         Start-Sleep -Seconds 3
         return
     }
@@ -1559,44 +1559,52 @@ function Test-ProxyConnection {
     Write-Host "`n  КОНФИГУРАЦИЯ:" -ForegroundColor White
     Write-Host "  > ТИП:    $($global:ProxyConfig.Type)" -ForegroundColor Gray
     Write-Host "  > АДРЕС:  $($global:ProxyConfig.Host):$($global:ProxyConfig.Port)" -ForegroundColor Gray
-    if ($global:ProxyConfig.User) { Write-Host "  > АВТОР:  $($global:ProxyConfig.User) (Basic Auth)" -ForegroundColor Gray }
     Write-Host "`n $dash" -ForegroundColor Gray
 
     $steps = @(
-        @{ Title = "Подключение к прокси-серверу  "; Result = "WAIT"; Color = "Yellow" },
-        @{ Title = "Авторизация и рукопожатие   "; Result = "WAIT"; Color = "Yellow" },
-        @{ Title = "Соединение с google.com:80  "; Result = "WAIT"; Color = "Yellow" },
-        @{ Title = "Получение HTTP-заголовков   "; Result = "WAIT"; Color = "Yellow" }
+        @{ Title = "Подключение к прокси-серверу  " },
+        @{ Title = "Авторизация и рукопожатие   " },
+        @{ Title = "Соединение с google.com:80  " },
+        @{ Title = "Получение HTTP-заголовков   " }
     )
 
-    function Update-Step($idx, $status, $color) {
-        [Console]::SetCursorPosition(2, 12 + $idx)
+    # Внутренняя функция для отрисовки шага без PadBoth
+    function Update-ProxyStep($idx, $status, $color) {
+        [Console]::SetCursorPosition(2, 11 + $idx)
+        
+        # Ручное центрирование статуса в поле из 6 символов
+        $spaces = 6 - $status.Length
+        $left = [Math]::Floor($spaces / 2)
+        $right = $spaces - $left
+        $statusStr = (" " * $left) + $status + (" " * $right)
+
         Write-Host "  [ " -NoNewline -ForegroundColor Gray
-        Write-Host ($status.PadBoth(6)) -ForegroundColor $color -NoNewline
+        Write-Host $statusStr -ForegroundColor $color -NoNewline
         Write-Host " ] $($steps[$idx].Title)" -ForegroundColor White
     }
 
     # Отрисовка начальных шагов
-    for($i=0; $i -lt $steps.Count; $i++) { Update-Step $i "WAIT" "Yellow" }
+    for($i=0; $i -lt $steps.Count; $i++) { Update-ProxyStep $i "WAIT" "Yellow" }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $success = $false
     $latency = 0
+    $errorMessage = ""
 
     try {
-        # Шаг 1: Socket
+        # Шаг 1: Соединение
         $tcp = New-Object System.Net.Sockets.TcpClient
         $asyn = $tcp.BeginConnect($global:ProxyConfig.Host, $global:ProxyConfig.Port, $null, $null)
-        if (-not $asyn.AsyncWaitHandle.WaitOne(3000)) { throw "Proxy Host Unreachable" }
+        if (-not $asyn.AsyncWaitHandle.WaitOne(3000)) { throw "Host Unreachable" }
         $tcp.EndConnect($asyn)
-        Update-Step 0 " OK " "Green"
+        Update-ProxyStep 0 " OK " "Green"
 
-        # Шаг 2: Handshake (через существующую функцию)
+        # Шаг 2 & 3: Прокси-рукопожатие
         $conn = Connect-ThroughProxy "google.com" 80 $global:ProxyConfig
-        Update-Step 1 " OK " "Green"
-        Update-Step 2 " OK " "Green"
+        Update-ProxyStep 1 " OK " "Green"
+        Update-ProxyStep 2 " OK " "Green"
 
-        # Шаг 3: HTTP Request
+        # Шаг 4: Запрос
         $req = [Text.Encoding]::ASCII.GetBytes("HEAD / HTTP/1.1`r`nHost: google.com`r`nConnection: close`r`n`r`n")
         $conn.Stream.Write($req, 0, $req.Length)
         
@@ -1604,20 +1612,20 @@ function Test-ProxyConnection {
         $read = $conn.Stream.Read($buf, 0, 128)
         if ($read -gt 0) {
             $latency = $sw.ElapsedMilliseconds
-            Update-Step 3 " OK " "Green"
+            Update-ProxyStep 3 " OK " "Green"
             $success = $true
-        } else { throw "No HTTP Response" }
+        } else { throw "No Response" }
 
         $conn.Tcp.Close()
     } catch {
-        $err = $_.Exception.Message
-        if ($err.Length -gt 40) { $err = $err.Substring(0, 37) + "..." }
-        Write-Host "`n  [!] КРИТИЧЕСКАЯ ОШИБКА: $($err)" -ForegroundColor Red
-        Write-DebugLog "Test-Proxy Error: $($err)"
+        $errorMessage = $_.Exception.Message
+        if ($errorMessage.Length -gt 50) { $errorMessage = $errorMessage.Substring(0, 47) + "..." }
+        Write-DebugLog "Test-Proxy Error: $($errorMessage)"
     }
 
-    # Финальная карточка
-    Write-Host "`n $dash" -ForegroundColor Gray
+    # Итог
+    [Console]::SetCursorPosition(0, 16)
+    Write-Host " $dash" -ForegroundColor Gray
     if ($success) {
         Write-Host "  СТАТУС:    " -NoNewline -ForegroundColor White
         Write-Host "РАБОТАЕТ" -ForegroundColor Green
@@ -1625,7 +1633,9 @@ function Test-ProxyConnection {
         Write-Host "$($latency) ms" -ForegroundColor Cyan
     } else {
         Write-Host "  СТАТУС:    " -NoNewline -ForegroundColor White
-        Write-Host "НЕИСПРАВЕН" -ForegroundColor Red
+        Write-Host "ОШИБКА" -ForegroundColor Red
+        Write-Host "  ДЕТАЛИ:    " -NoNewline -ForegroundColor White
+        Write-Host $errorMessage -ForegroundColor Gray
     }
     Write-Host " $line" -ForegroundColor Gray
 
