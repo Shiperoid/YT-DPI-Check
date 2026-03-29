@@ -409,7 +409,7 @@ function Get-Targets {
 }
 
 if ($shouldPrompt) {
-    $newVersion = Check-UpdateVersion -Repo "Shiperoid/YT-DPI-Check" -LastCheckedVersion $config.LastCheckedVersion
+    $newVersion = Check-UpdateVersion -Repo "Shiperoid/YT-DPI" -LastCheckedVersion $config.LastCheckedVersion
     if ($newVersion) {
         [Console]::Clear()
         Write-Host "=== ОБНОВЛЕНИЕ ===" -ForegroundColor Cyan
@@ -418,7 +418,7 @@ if ($shouldPrompt) {
         if ($key -eq 'y' -or $key -eq 'Y') {
             Write-DebugLog "Пользователь согласился обновиться"
             $currentFile = $script:OriginalFilePath
-            $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/master/YT-DPI.bat"
+            $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.bat"
             Start-Updater $currentFile $downloadUrl
             exit
         } else {
@@ -675,7 +675,7 @@ function Write-ResultLine($row, $result) {
 
 function Check-UpdateVersion {
     param(
-        [string]$Repo = "Shiperoid/YT-DPI-Check",
+        [string]$Repo = "Shiperoid/YT-DPI",
         [string]$LastCheckedVersion = "",
         [switch]$IgnoreLastChecked = $false,
         [switch]$ManualMode = $false # Флаг ручного нажатия 'U'
@@ -1111,7 +1111,7 @@ function Invoke-Update {
         $key = [Console]::ReadKey($true).KeyChar
         if ($key -eq 'y' -or $key -eq 'Y') {
             $currentFile = $script:OriginalFilePath
-            $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/master/YT-DPI.bat"
+            $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.bat"
             Start-Updater $currentFile $downloadUrl
             exit
         }
@@ -2378,7 +2378,7 @@ $script:CurrentWindowHeight = 0
 $shouldPrompt = ($script:Config.RunCount - $script:Config.LastPromptRun) -ge 5
 if ($shouldPrompt) {
     Write-DebugLog "--- ПЛАНОВАЯ ПРОВЕРКА ОБНОВЛЕНИЙ ---" "INFO"
-    $newVer = Check-UpdateVersion -Repo "Shiperoid/YT-DPI-Check" -LastCheckedVersion $script:Config.LastCheckedVersion
+    $newVer = Check-UpdateVersion -Repo "Shiperoid/YT-DPI" -LastCheckedVersion $script:Config.LastCheckedVersion
     if ($newVer) {
         [Console]::Clear()
         Write-Host "`n  === ДОСТУПНО ОБНОВЛЕНИЕ ===" -ForegroundColor Cyan
@@ -2388,7 +2388,7 @@ if ($shouldPrompt) {
         if ($key -eq 'y' -or $key -eq 'Y') {
             Write-DebugLog "Обновление подтверждено: $newVer"
             $currentFile = $script:OriginalFilePath
-            $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/master/YT-DPI.bat"
+            $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.bat"
             Start-Updater $currentFile $downloadUrl
             exit
         } else {
@@ -2573,7 +2573,7 @@ while ($true) {
         }
         elseif ($k -eq "U") { 
             Write-DebugLog "Запуск обновления"
-            Invoke-Update -Repo "Shiperoid/YT-DPI-Check" -Config $config
+            Invoke-Update -Repo "Shiperoid/YT-DPI" -Config $config
             
             # Вместо полной перерисовки Draw-UI просто восстанавливаем статус-бар
             Draw-StatusBar 

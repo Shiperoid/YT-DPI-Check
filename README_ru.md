@@ -7,7 +7,7 @@
 
 **YT-DPI** — это профессиональный диагностический фреймворк, предназначенный для детального анализа вмешательства систем DPI и ТСПУ в ваш трафик. В отличие от обычных чекеров, YT-DPI имитирует реальное поведение браузера (TLS Handshake) и проводит анализ на уровне L4, чтобы точно определить метод и место блокировки.
 
-![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/refs/heads/master/img/YT-DPI-v2.1.3.png)
+![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI/refs/heads/master/img/YT-DPI-v2.1.3.png)
 
 ## 🚀 Основные возможности (v2.1+)
 

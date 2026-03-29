@@ -8,7 +8,7 @@
 
 **YT-DPI** is a professional forensic network diagnostic framework designed to dissect and identify Deep Packet Inspection (DPI) and TSPU interference. While standard tools just "ping", YT-DPI simulates browser-level TLS handshakes and performs L4-layer analysis to pinpoint exactly where and how your traffic is being manipulated.
 
-![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/refs/heads/master/img/YT-DPI-v2.1.3.png)
+![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI/refs/heads/master/img/YT-DPI-v2.1.3.png)
 
 ## 🚀 Key Evolutionary Features (v2.1+)
 
