@@ -1,76 +1,51 @@
-﻿# YT-DPI
-![GitHub Release](https://img.shields.io/badge/release-2.0-red)
+﻿# YT-DPI v2.1.3
+![GitHub Release](https://img.shields.io/badge/release-2.1.3-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 
-[[Русский](README_ru.md)] [[Telegram](https://t.me/YT-DPI)]
+[[Русский](README_ru.md)] | [[Telegram](https://t.me/YT-DPI)]
 
-### Overview
-**YT-DPI** — Is an advanced, multi-threaded diagnostic utility designed to identify how YouTube and Google services are being restricted by your ISP. It goes beyond simple pings by performing deep protocol analysis across Cleartext HTTP, TLS 1.2, and TLS 1.3 to accurately distinguish between hard IP bans, silent packet drops, and active Deep Packet Inspection (DPI/TSPU) interference.
-![[preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/refs/heads/master/img/preview-yt-dpi-2.0.png)](https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/refs/heads/master/img/preview-yt-dpi-2.0.png)
-### System Requirements
-*   **OS:** Windows 10 or Windows 11 (recommended).
-*   **Legacy OS:** Windows 7 / 8.1 are supported but require **PowerShell 5.1** and **.NET Framework 4.5+** installed.
-*   **Environment:** PowerShell 5.1 or higher. No external dependencies.
+**YT-DPI** is a professional forensic network diagnostic framework designed to dissect and identify Deep Packet Inspection (DPI) and TSPU interference. While standard tools just "ping", YT-DPI simulates browser-level TLS handshakes and performs L4-layer analysis to pinpoint exactly where and how your traffic is being manipulated.
 
-### Key Features
-*   **Active RST & DRP Detection:** Monitors for forged `TCP RST` (Reset) packets actively injected by middleboxes (TSPU/DPI), as well as silent `DRP` (Drops/Blackholes) where the connection simply times out during the TLS handshake upon detecting restricted SNI.
-*   **IP Blacklist vs. Deep Inspection:** Compares Cleartext HTTP (Port 80) reachability against TLS (Port 443) to definitively separate hard IP routing bans (blackholes) from surgical DPI traffic filtering.
-*   **Granular Protocol Testing:** Separately tests Port 443 across different encryption standards (TLS 1.2 & TLS 1.3), as modern DPI algorithms often apply different filtering rules based on the protocol version.
-*   **Network Intelligence & Localization:** Auto-detects your active DNS, ISP name, City, and dynamically resolves the nearest Google Global Cache (CDN) node for precise, localized video-stream testing.
-*   **Multi-Threaded Engine:** Utilizes PowerShell `RunspacePools` for lightning-fast, concurrent scanning of multiple domains without blocking the main execution thread.
-*   **Smart OS Detection:** Automatically detects if your OS lacks native TLS 1.3 support (e.g., Windows 7/older Win10) to prevent false-positive block reports.
-*   **Live Telemetry & Cyberpunk UI:** Interactive console with dynamic hex-decoding animations, real-time ping tracking, RAM usage, live packet-drop counters, and instant abort capabilities.
+![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI-Check/refs/heads/master/img/YT-DPI-v2.1.3.png)
 
-### How to Use
-1.  Download the latest `.bat` file from the [Releases](../../releases/latest) page.
-2.  Double-click to run. **No Administrator rights required.**
-3.  Press `[ENTER]` to start the scan.
-4.  Press `[H]` at any time to open the built-in mini-guide and legend.
-5.  Press `[Q]` or `[ESC]` to instantly abort the scan or exit the tool.
+## 🚀 Key Evolutionary Features (v2.1+)
 
----
+*   **Persistent Analytics Core:** Stores network state, ISP metadata, and high-speed DNS mappings in `%LOCALAPPDATA%`. Launch time is reduced to <1s.
+*   **Multi-Protocol Engine:** Independent testing of Port 80 (HTTP), Port 443 (TLS 1.2), and Port 443 (TLS 1.3) to find the specific layer of censorship.
+*   **Smart Dual-Stack:** Native IPv6 diagnostic support. Automatically detects global IPv6 availability and prioritizes it to find "holes" in IPv4-only ISP filters.
+*   **Forensic Deep Trace:** Custom L4 TCP Traceroute. Unlike standard ICMP trace, this tool identifies the specific network hop where the DPI middlebox injects RST packets or drops traffic.
+*   **Universal Proxy Tunneling:** Full SOCKS5/HTTP support with auto-negotiation. Validate your bypass tools (GoodbyeDPI, Zapret, etc.) with objective TLS metrics.
 
-### Comprehensive Status Guide
+## 🧠 The Knowledge Base: Why YouTube Lags?
 
-#### The Columns
-*   **HTTP (Port 80):** Sends a cleartext baseline request. Used to check if the IP is reachable at all.
-*   **TLS 1.2 (Port 443):** The most common secure protocol for YouTube. Tests if the ISP drops or resets the connection after seeing the SNI (Server Name Indication).
-*   **TLS 1.3 (Port 443):** Modern, more secure protocol. Harder for some DPIs to parse, but heavily targeted by modern TSPU filters.
-*   **LAT (Latency):** Real TCP handshake latency (ping) to the server.
+| Problem | Technical Explanation | Solution |
+| :--- | :--- | :--- |
+| **SNI Filtering** | ISP "reads" the hostname (youtube.com) in cleartext before encryption starts. | Use [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI) or [Zapret](https://github.com/bol-van/zapret). |
+| **QUIC Blocking** | ISPs often block UDP Port 443 entirely. Browsers use QUIC by default. | Disable QUIC in `chrome://flags/#enable-quic`. |
+| **Kyber Algorithm** | Modern TLS 1.3 use large Post-Quantum packets that break old DPI parsers. | Disable Kyber in `chrome://flags/#enable-tls13-kyber`. |
+| **GGC Throttling** | Artificial speed limits applied to local Google Global Cache nodes. | Use a Proxy/VPN or advanced fragmentation. |
 
-#### Status Codes
-*   **OK**: Success. The connection was established and the handshake completed without interference.
-*   **RST**: Connection Reset. The DPI/TSPU explicitly intercepted the packet and injected a TCP Reset to kill your connection.
-*   **DRP**: Connection Dropped. The packet was silently discarded (blackholed) by the DPI or firewall, causing the TLS handshake to time out.
-*   **N/A**: Not Available. Your operating system does not support this protocol natively (usually seen in the TLS 1.3 column on Windows 7/10).
-*   **FAIL**: Connection timed out completely or a general socket/routing error occurred before the handshake could even begin.
+## 🛠 Usage & Hotkeys
 
-#### RESULT (Verdict)
-| Verdict | Meaning |
-| :--- | :--- |
-| **AVAILABLE** | TLS handshake passed. YouTube should work fine on this domain. |
-| **DPI BLOCK** | HTTP works (the server is reachable), but the secure TLS connection is actively blocked or dropped by the provider (Typical DPI behavior). |
-| **IP BLOCK** | Both HTTP and TLS are unreachable. The IP address itself is blacklisted or routed to a blackhole. |
-| **DNS_ERR** | Your DNS provider is giving incorrect data or failing to resolve the domain entirely. |
+1.  **Run `YT-DPI.bat`** (No installation required).
+2.  **[ENTER]** — Start global multi-threaded scan.
+3.  **[D]** — Deep Trace: Pinpoint the censorship node by domain index.
+4.  **[P]** — Configure Proxy (`127.0.0.1:1080`). Auto-detects protocol.
+5.  **[T]** — Proxy Health Check (Latency & Header validation).
+6.  **[S]** — Export forensic report to `YT-DPI_Report.txt`.
+
+## 🔗 Community & Credits
+This project stands on the shoulders of giants in the DPI-circumvention scene:
+*   [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI) — The definitive Windows bypasser by ValdikSS.
+*   [Zapret](https://github.com/bol-van/zapret) — Powerful multi-platform bypass engine by bol-van.
+*   [B4](https://github.com/DanielLavrushin/b4) — Advanced network diagnostic tool by Daniel Lavrushin.
+*   [dpi-detector](https://github.com/Runnin4ik/dpi-detector) — Research on TSPU/DPI detection.
+*   [youtubeUnblock](https://github.com/Waujito/youtubeUnblock) — C-based bypass techniques.
+
+## ⚖️ License & Disclaimer
+Licensed under **MIT**. This tool is for **diagnostic and educational purposes only**. It does not provide bypass capabilities but helps you configure them correctly.
 
 ---
-
-### Important Notes
-*   **Antivirus:** Some AV software may flag the script as a "Generic Downloader" or "Network Tool" because it performs manual TCP socket connections. The script is open-source; you can inspect the code in any text editor.
-*   **VPN/Proxies & Bypassers:** If you have a VPN or DPI-bypass software (like GoodbyeDPI or Zapret) running, the script will show "AVAILABLE (CLEAN)" because the traffic is successfully circumventing the ISP filter. Turn them off for an accurate "raw" ISP test.
-
-### Contributing
-Contributions are accepted through GitHub pull requests. Whether it's adding new target domains, optimizing the Runspace pool, or improving protocol detection, feel free to help!
-
-### Credits
-This tool is built upon the collective research of the DPI-bypass community:
-*   [youtubeUnblock](https://github.com/Waujito/youtubeUnblock) - C-based DPI bypass research.
-*   [B4](https://github.com/DanielLavrushin/b4) - Network packet processor with a friendly UI.
-*   [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI) - The industry standard for Windows DPI circumvention.
-*   [zapret](https://github.com/bol-van/zapret) - Advanced multi-platform DPI bypass techniques.
-*   [dpi-detector](https://github.com/Runnin4ik/dpi-detector) - Foundational DPI/TSPU detection techniques.
-
----
-*Disclaimer: This tool is for diagnostic and educational purposes only.*
+*Developed with ❤️ for the open internet.*

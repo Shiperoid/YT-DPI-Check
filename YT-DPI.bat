@@ -394,8 +394,6 @@ $BaseTargets = @(
     "www.youtube-nocookie.com",
     "signaler-pa.youtube.com",
     "redirector.googlevideo.com",
-    "googleads.g.doubleclick.net",
-    "pagead2.googlesyndication.com",
     "youtubeembeddedplayer.googleapis.com"
 )
 

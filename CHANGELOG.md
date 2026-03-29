@@ -99,3 +99,26 @@ In version 2.0, the utility has been completely rewritten. The tool transitioned
 3. Press `[ENTER]` to start scanning or `[H]` to read the help menu.
 
 *Disclaimer: This tool is intended exclusively for diagnostic and educational purposes. It helps identify blocking methods but is not a bypass tool in itself.*
+
+
+# YT-DPI v2.1.3
+
+This major update elevates YT-DPI from a simple multi-threaded scanner to a professional-grade network diagnostic framework. Version 2.1.3 introduces persistent state management, advanced proxy capabilities, and a lightning-fast launch sequence.
+
+### 🚀 Performance & Core Engine
+*   **Persistent Caching System:** All network data (ISP, CDN, DNS records) is now cached in `%LOCALAPPDATA%`. Subsequent launches are now **near-instant** (< 1 sec) as the UI renders from cache while updating in the background.
+*   **Ticks-Based Timing:** Transitioned from string-based timestamps to high-precision Ticks. This eliminates "Invalid DateTime" errors across different Windows locales and OS versions.
+*   **Zero-Flicker Rendering:** UI logic rewritten to perform a single-pass draw. The annoying screen flickering during scan initialization has been completely eliminated.
+*   **Smart Dual-Stack Support:** Added full IPv6 diagnostic capabilities. The engine now detects if your system has a global IPv6 address and prioritizes it, identifying ISPs that only block YouTube on IPv4.
+
+### 🛡️ Connectivity & Proxy Analysis
+*   **Universal Proxy Engine:** Full support for **SOCKS5** and **HTTP** proxies. 
+*   **Intelligent Auto-Detection:** You no longer need to specify the protocol. Simply enter `IP:PORT` (e.g., `127.0.0.1:1080`), and the script will automatically negotiate the handshake.
+*   **Truthful Proxy Diagnostics:** Fixed a critical bug where "PROXIED" results were always marked as green. The engine now strictly validates the TLS handshake through the tunnel, giving you an honest report on your bypass tool's effectiveness.
+*   **Dedicated Proxy Tester:** Press `[T]` to run a step-by-step diagnostic of your proxy's health, including latency and HTTP header validation.
+
+### 🛠️ Stability & Tools
+*   **Redesigned Auto-Updater:** A new, robust update mechanism that uses isolated PowerShell background processes. This prevents file locking issues and ensures 100% integrity during code replacement.
+*   **Deep Trace (L4 Traceroute):** Advanced TCP-level traceroute to find the exact "Censorship Point" (TSPU/DPI) on your network path by incrementing TTL values.
+*   **Thread-Safe DNS Cache:** Scanned IP addresses are now stored in a synchronized hashtable, allowing all 20+ worker threads to share data instantly, reducing DNS overhead to zero during re-scans.
+*   **Professional Documentation:** The internal help menu `[H]` has been rewritten as a technical manual, covering QUIC, SNI, Kyber encryption, and GGC throttling.
