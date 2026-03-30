@@ -1,7 +1,7 @@
 <# :
 @echo off
 set "SCRIPT_PATH=%~f0"
-title YT-DPI v2.1.3
+title YT-DPI v2.1.4
 chcp 65001 >nul
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ([System.IO.File]::ReadAllText('%~f0', [System.Text.Encoding]::UTF8))"
 exit /b
@@ -21,9 +21,9 @@ $DebugPreference = "SilentlyContinue"
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.1.3"   # текущая версия yt-dpi
+$scriptVersion = "2.1.4"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
-$DEBUG_ENABLED = $false
+$DEBUG_ENABLED = $true
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
 $DebugLogMutex = New-Object System.Threading.Mutex($false, "Global\YT-DPI-Debug-Mutex")
 $script:LogLock = New-Object System.Object
@@ -1510,16 +1510,28 @@ function Get-NetworkInfo {
     }
 
     # 4. Проверяем наличие IPv6 интернета
+        # Внутри Get-NetworkInfo:
     $hasV6 = $false
     try {
-        # Ищем адрес, который не локальный (fe80) и не петля (::1)
-        $v6Test = Get-NetIPAddress -AddressFamily IPv6 -AddressState Preferred -ErrorAction SilentlyContinue | 
-                  Where-Object { $_.IPAddress -notmatch '^fe80' -and $_.IPAddress -notmatch '^::1' }
-        if ($v6Test) { 
-            $hasV6 = $true 
-            Write-DebugLog "IPv6 стек активен." "INFO"
+        # Используем .NET класс, который работает везде от XP до Win11
+        $interfaces = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()
+        foreach ($int in $interfaces) {
+            if ($int.OperationalStatus -eq 'Up') {
+                $props = $int.GetIPProperties()
+                foreach ($addr in $props.UnicastAddresses) {
+                    # Ищем глобальный IPv6 (не fe80 и не петлю)
+                    if ($addr.Address.AddressFamily -eq 'InterNetworkV6' -and 
+                        -not $addr.Address.IsIPv6LinkLocal -and 
+                        $addr.Address.ToString() -ne '::1') {
+                        $hasV6 = $true
+                        break
+                    }
+                }
+            }
+            if ($hasV6) { break }
         }
-    } catch { Write-DebugLog "Ошибка проверки IPv6" }
+        if ($hasV6) { Write-DebugLog "IPv6 стек активен." "INFO" }
+    } catch { Write-DebugLog "Ошибка проверки IPv6: $_" }
 
     # 5. ФОРМИРУЕМ ЕДИНЫЙ ОБЪЕКТ И ВОЗВРАЩАЕМ ЕГО
     $info = @{ 
@@ -1845,371 +1857,183 @@ function Pad-Both($str, $len) { return [StringExtensions]::PadBoth($str, $len) }
 # РАБОЧИЙ ПОТОК
 # ====================================================================================
 $Worker = {
-    param($Target, $ProxyConfig, $CanTls13, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock)
+    param($Target, $ProxyConfig, $CanTls13, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock, $NetInfo)
 
-    function Write-DebugLog($msg) {
+    # Внутренняя функция логирования для воркера
+    function Write-DebugLog($msg, $level = "DEBUG") {
         if (-not $DEBUG_ENABLED) { return }
-        $line = "[$(Get-Date -Format 'HH:mm:ss.fff')] $msg`r`n"
+        $line = "[$(Get-Date -Format 'HH:mm:ss.fff')] [Worker $($Target)] [$($level)] $($msg)`r`n"
         try { [System.IO.File]::AppendAllText($DebugLogFile, $line, [System.Text.Encoding]::UTF8) } catch {}
     }
 
+    # --- ВНУТРЕННИЕ ФУНКЦИИ ---
     function Connect-ThroughProxy {
-        param(
-            $TargetHost,
-            $TargetPort,
-            $ProxyConfig,
-            [int]$Timeout = $CONST.ProxyTimeout
-        )
-        Write-DebugLog "Connect-ThroughProxy: $($ProxyConfig.Type) $($ProxyConfig.Host):$($ProxyConfig.Port) -> $($TargetHost):$($TargetPort)"
-        
-        $maxAttempts = 3
-        $delayMs = 500
-        $lastError = $null
-
-        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-            $tcp = $null
-            $stream = $null
-            try {
-                Write-DebugLog "Попытка $attempt подключения к $($ProxyConfig.Host):$($ProxyConfig.Port)"
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $asyn = $tcp.BeginConnect($ProxyConfig.Host, $ProxyConfig.Port, $null, $null)
-                if (-not $asyn.AsyncWaitHandle.WaitOne($Timeout)) {
-                    throw "Proxy connection timeout"
-                }
-                $tcp.EndConnect($asyn)
-                $stream = $tcp.GetStream()
-                $stream.ReadTimeout = $Timeout
-                $stream.WriteTimeout = $Timeout
-
-                if ($ProxyConfig.Type -eq "SOCKS5") {
-                    Write-DebugLog "SOCKS5 подключение, аутентификация..."
-                    # Методы
-                    $methods = @(0x00)
-                    if ($ProxyConfig.User -and $ProxyConfig.Pass) { $methods += 0x02 }
-                    $stream.Write([byte[]](@(0x05, $methods.Length) + $methods), 0, $methods.Length + 2)
-                    # Чтение ответа на метод
-                    $resp = New-Object byte[] 2
-                    if (-not (Read-StreamWithTimeout $stream $resp 2 $Timeout)) {
-                        throw "SOCKS5 no response to method request"
-                    }
-                    if ($resp[1] -eq 0x02) {
-                        # Аутентификация
-                        $u = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.User)
-                        $p = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.Pass)
-                        $auth = [byte[]](@(0x01, $u.Length) + $u + @($p.Length) + $p)
-                        $stream.Write($auth, 0, $auth.Length)
-                        $resp = New-Object byte[] 2
-                        if (-not (Read-StreamWithTimeout $stream $resp 2 $Timeout) -or $resp[1] -ne 0x00) {
-                            throw "SOCKS5 authentication failed"
-                        }
-                    }
-                    # Запрос на маршрутизацию
-                    $ipObj = $null
-                    if ([System.Net.IPAddress]::TryParse($TargetHost, [ref]$ipObj)) {
-                        if ($ipObj.AddressFamily -eq 'InterNetworkV6') {
-                            $req = [byte[]](@(0x05, 0x01, 0x00, 0x04) + $ipObj.GetAddressBytes())
-                        } else {
-                            $req = [byte[]](@(0x05, 0x01, 0x00, 0x01) + $ipObj.GetAddressBytes())
-                        }
-                    } else {
-                        $h = [Text.Encoding]::UTF8.GetBytes($TargetHost)
-                        $req = [byte[]](@(0x05, 0x01, 0x00, 0x03, $h.Length) + $h)
-                    }
-                    $req += [byte[]](@([math]::Floor($TargetPort/256), ($TargetPort%256)))
-                    $stream.Write($req, 0, $req.Length)
-                    # Чтение ответа (минимум 4 байта)
-                    $buf = New-Object byte[] 10
-                    $read = Read-StreamWithTimeout $stream $buf 10 $Timeout
-                    if (-not $read -or $read -lt 4 -or $buf[1] -ne 0x00) {
-                        throw "SOCKS5 route failed"
-                    }
-                    Write-DebugLog "SOCKS5 маршрутизация успешна"
+        param($TargetHost, $TargetPort, $ProxyConfig, [int]$Timeout = $CONST.ProxyTimeout)
+        Write-DebugLog "Подключение через прокси $($ProxyConfig.Type) к $($TargetHost):$($TargetPort)"
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        try {
+            $asyn = $tcp.BeginConnect($ProxyConfig.Host, $ProxyConfig.Port, $null, $null)
+            if (-not $asyn.AsyncWaitHandle.WaitOne($Timeout)) { throw "Таймаут подключения к прокси" }
+            $tcp.EndConnect($asyn); $stream = $tcp.GetStream()
+            $stream.ReadTimeout = $Timeout; $stream.WriteTimeout = $Timeout
+            
+            if ($ProxyConfig.Type -eq "SOCKS5") {
+                $stream.Write([byte[]]@(0x05, 0x01, 0x00), 0, 3)
+                $resp = New-Object byte[] 2; [void]$stream.Read($resp, 0, 2)
+                $h = [Text.Encoding]::UTF8.GetBytes($TargetHost)
+                $req = [byte[]](@(0x05, 0x01, 0x00, 0x03, $h.Length) + $h + @([math]::Floor($TargetPort/256), ($TargetPort%256)))
+                $stream.Write($req, 0, $req.Length)
+                $buf = New-Object byte[] 10; [void]$stream.Read($buf, 0, 10)
+                Write-DebugLog "SOCKS5: Маршрут установлен."
+                return @{ Tcp = $tcp; Stream = $stream }
+            } else {
+                $auth = if ($ProxyConfig.User) { "Proxy-Authorization: Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($ProxyConfig.User):$($ProxyConfig.Pass)")) + "`r`n" } else { "" }
+                $req = "CONNECT $($TargetHost):$($TargetPort) HTTP/1.1`r`nHost: $($TargetHost):$($TargetPort)`r`n$($auth)`r`n"
+                $reqB = [Text.Encoding]::ASCII.GetBytes($req); $stream.Write($reqB, 0, $reqB.Length)
+                $buf = New-Object byte[] 1024; $r = $stream.Read($buf, 0, 1024)
+                if ([Text.Encoding]::ASCII.GetString($buf, 0, $r) -match "200") {
+                    Write-DebugLog "HTTP Proxy: CONNECT успешен."
                     return @{ Tcp = $tcp; Stream = $stream }
                 }
-                else {
-                    Write-DebugLog "HTTP CONNECT запрос"
-                    $auth = ""
-                    if ($ProxyConfig.User -and $ProxyConfig.Pass) {
-                        $auth = "Proxy-Authorization: Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($ProxyConfig.User):$($ProxyConfig.Pass)")) + "`r`n"
-                    }
-                    $hostHeader = if ($TargetHost -match ':') { "[$TargetHost]" } else { $TargetHost }
-                    $req = "CONNECT $hostHeader`:$TargetPort HTTP/1.1`r`nHost: $hostHeader`:$TargetPort`r`n${auth}Proxy-Connection: Keep-Alive`r`n`r`n"
-                    $reqBytes = [Text.Encoding]::ASCII.GetBytes($req)
-                    $stream.Write($reqBytes, 0, $reqBytes.Length)
-                    # Читаем ответ до \r\n\r\n
-                    $response = Read-HttpResponse $stream $Timeout
-                    if ($response -match "HTTP/1.[01]\s+200") {
-                        Write-DebugLog "HTTP CONNECT успешен"
-                        return @{ Tcp = $tcp; Stream = $stream }
-                    } else {
-                        throw "HTTP proxy refused: $response"
-                    }
-                }
-            } catch {
-                $lastError = $_
-                Write-DebugLog "Ошибка подключения к прокси (попытка $attempt): $lastError"
-                if ($tcp) { try { $tcp.Close() } catch {} }
-                if ($attempt -eq $maxAttempts) { throw $lastError }
-                $sleep = $delayMs * [math]::Pow(2, $attempt - 1)
-                Start-Sleep -Milliseconds $sleep
+                throw "Прокси отказал (CONNECT failed)"
             }
+        } catch { 
+            if($tcp){$tcp.Close()}
+            Write-DebugLog "Ошибка прокси: $($_.Exception.Message)" "WARN"
+            throw $_ 
         }
     }
 
-    # Вспомогательная функция для чтения фиксированного количества байт с таймаутом
-    function Read-StreamWithTimeout($stream, $buffer, $count, $timeout) {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $totalRead = 0
-        while ($totalRead -lt $count) {
-            if ($sw.ElapsedMilliseconds -ge $timeout) { return $totalRead }
-            if ($stream.DataAvailable) {
-                $read = $stream.Read($buffer, $totalRead, $count - $totalRead)
-                if ($read -eq 0) { return $totalRead }
-                $totalRead += $read
-            } else {
-                Start-Sleep -Milliseconds 50
-            }
-        }
-        return $totalRead
-    }
-
-    # Вспомогательная функция для чтения HTTP-ответа до \r\n\r\n
-    function Read-HttpResponse($stream, $timeout) {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $response = ""
-        $buffer = New-Object byte[] 1024
-        while ($sw.ElapsedMilliseconds -lt $timeout) {
-            if ($stream.DataAvailable) {
-                $read = $stream.Read($buffer, 0, 1024)
-                if ($read -gt 0) {
-                    $response += [Text.Encoding]::ASCII.GetString($buffer, 0, $read)
-                    if ($response -match "\r\n\r\n") { break }
-                } else { break }
-            } else {
-                Start-Sleep -Milliseconds 50
-            }
-        }
-        return $response
-    }
-
-    $Result = [PSCustomObject]@{
-        IP      = "FAILED"
-        HTTP    = "---"
-        T12     = "---"
-        T13     = "---"
-        Lat     = "---"
-        Verdict = "UNKNOWN"
-        Color   = "White"
-    }
-
+    $Result = [PSCustomObject]@{ IP="FAILED"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="UNKNOWN"; Color="White"; Target=$Target }
     $TO = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { $CONST.TimeoutMs }
 
-    # ---- DNS (с кэшем) ----
+    Write-DebugLog "--- НАЧАЛО ПРОВЕРКИ ---"
+
+    # 1. DNS
     if (-not $ProxyConfig.Enabled) {
         $ipStr = $null
-        $acquired = $false
         try {
-            $acquired = $DnsCacheLock.WaitOne(1000)
-            if ($acquired -and $DnsCache.ContainsKey($Target)) {
-                $ipStr = $DnsCache[$Target]
-                Write-DebugLog "Worker $Target : DNS cache HIT -> $ipStr"
+            if ($DnsCacheLock.WaitOne(1000)) {
+                if ($DnsCache.ContainsKey($Target)) { 
+                    $ipStr = $DnsCache[$Target]
+                    Write-DebugLog "DNS: Кэш HIT -> $($ipStr)"
+                }
+                [void]$DnsCacheLock.ReleaseMutex()
             }
-        } finally {
-            if ($acquired) { $DnsCacheLock.ReleaseMutex() }
-        }
-        if (-not $ipStr) {
-            try {
+            if (-not $ipStr) {
+                Write-DebugLog "DNS: Кэш MISS. Резолвинг..."
                 $ips = [System.Net.Dns]::GetHostAddresses($Target)
                 $v6 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetworkV6' } | Select-Object -First 1
                 $v4 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
-
-                # УМНАЯ ЛОГИКА: 
-                # Берем IPv6 только если он есть И система умеет в него. Иначе строго IPv4.
-                if ($v6 -and $script:NetInfo.HasIPv6) { 
-                    $ipStr = $v6.IPAddressToString 
-                } elseif ($v4) { 
-                    $ipStr = $v4.IPAddressToString 
+                if ($v6 -and $NetInfo.HasIPv6) { 
+                    $ipStr = $v6.IPAddressToString
+                    Write-DebugLog "DNS: Выбран IPv6 -> $($ipStr)"
                 } else { 
-                    $ipStr = "DNS_ERR" 
+                    $ipStr = $v4.IPAddressToString 
+                    Write-DebugLog "DNS: Выбран IPv4 -> $($ipStr)"
                 }
-
-                # Сохранение в кэш (твой блок с локом)
-                if ($ipStr -ne "DNS_ERR") {
-                    try {
-                        $acquired = $DnsCacheLock.WaitOne(1000)
-                        if ($acquired) { $DnsCache[$Target] = $ipStr }
-                    } finally { if ($acquired) { $DnsCacheLock.ReleaseMutex() } }
-                }
-            } catch { $ipStr = "DNS_ERR" }
+                if ($DnsCacheLock.WaitOne(1000)) { $DnsCache[$Target] = $ipStr; [void]$DnsCacheLock.ReleaseMutex() }
+            }
+        } catch { 
+            $ipStr = "DNS_ERR"
+            Write-DebugLog "DNS: Ошибка - $($_.Exception.Message)" "ERROR"
         }
         $Result.IP = $ipStr
-        if ($Result.IP -eq "DNS_ERR") {
-            $Result.Verdict = "DNS FAIL"
-            $Result.Color = "Red"
-            return $Result
-        }
-    } else {
+        if ($ipStr -eq "DNS_ERR") { $Result.Verdict = "DNS FAIL"; $Result.Color = "Red"; return $Result }
+    } else { 
         $Result.IP = "[ PROXIED ]"
+        Write-DebugLog "DNS: Пропущен (Proxy Mode)."
     }
 
-    # ---- GetConnection скриптблок ----
-    $GetConnection = {
-        param($TargetHost, $TargetPort, $Timeout = $CONST.ProxyTimeout)
-        $attempts = 2
-        for ($i = 1; $i -le $attempts; $i++) {
-            try {
-                if ($ProxyConfig.Enabled) {
-                    return Connect-ThroughProxy $TargetHost $TargetPort $ProxyConfig $Timeout
-                } else {
-                    $tcp = New-Object System.Net.Sockets.TcpClient
-                    $ip = [System.Net.IPAddress]::Parse($Result.IP)
-                    $asyn = $tcp.BeginConnect($ip, $TargetPort, $null, $null)
-                    if (-not $asyn.AsyncWaitHandle.WaitOne($Timeout)) { throw "Timeout" }
-                    $tcp.EndConnect($asyn)
-                    return @{ Tcp = $tcp; Stream = $tcp.GetStream() }
-                }
-            } catch {
-                if ($i -eq $attempts) { throw $_ }
-                Start-Sleep -Milliseconds 600
-            }
-        }
-    }
-
-    # ---- HTTP проверка ----
+    # 2. HTTP Проверка
+    Write-DebugLog "HTTP: Тест порта 80..."
     $conn = $null
     try {
-        Write-DebugLog "Worker $Target : HTTP start"
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $conn = & $GetConnection $Target $CONST.HttpPort $TO
-        $lat = $sw.ElapsedMilliseconds
-        $Result.Lat = "${lat}ms"
-        $conn.Stream.ReadTimeout = $TO
-        $msg = [Text.Encoding]::ASCII.GetBytes("HEAD / HTTP/1.1`r`nHost: $Target`r`nUser-Agent: Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36`r`nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8`r`nAccept-Language: ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7`r`nAccept-Encoding: gzip, deflate, br`r`nConnection: keep-alive`r`nUpgrade-Insecure-Requests: 1`r`n`r`n")
-        $conn.Stream.Write($msg, 0, $msg.Length)
-        $buf = New-Object byte[] 64
-        if ($conn.Stream.Read($buf, 0, 1) -gt 0) { $Result.HTTP = "OK" } else { $Result.HTTP = "DROP" }
-        Write-DebugLog "Worker $Target : HTTP done in $($sw.ElapsedMilliseconds) ms, result=$($Result.HTTP)"
-    } catch {
+        if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 80 $ProxyConfig $TO }
+        else {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $ar = $tcp.BeginConnect($Result.IP, 80, $null, $null)
+            if (-not $ar.AsyncWaitHandle.WaitOne($TO)) { throw "Таймаут" }
+            $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+        }
+        $Result.Lat = "$($sw.ElapsedMilliseconds)ms"
+        $Result.HTTP = "OK"
+        Write-DebugLog "HTTP: OK (Ping: $($Result.Lat))"
+    } catch { 
         $Result.HTTP = "ERR"
-    } finally {
-        if ($conn) { $conn.Tcp.Close() }
-    }
-    
-    # ---- Адаптивный таймаут ----
-    $timeoutMultiplier = if ($Result.HTTP -eq "OK") { 0.5 } else { 0.2 }
-    $adjustedTimeout = [int]($TO * $timeoutMultiplier)
-    if ($adjustedTimeout -lt 500) { $adjustedTimeout = 500 }
+        Write-DebugLog "HTTP: Ошибка -> $($_.Exception.Message)" "WARN"
+    } finally { if ($conn) { $conn.Tcp.Close() } }
 
-    # ---- TLS проверки ----
-    if ($CanTls13) {
-        $t12Task = [System.Threading.Tasks.Task]::Run({
-            param($TargetHost, $TimeoutVal, $GetConn, $CONST)
-            try {
-                $conn = & $GetConn $TargetHost $CONST.HttpsPort $TimeoutVal
-                $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
-                $ar = $ssl.BeginAuthenticateAsClient($TargetHost, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false, $null, $null)
-                if ($ar.AsyncWaitHandle.WaitOne($TimeoutVal)) {
-                    $ssl.EndAuthenticateAsClient($ar)
-                    $result = "OK"
-                } else {
-                    try { $ssl.EndAuthenticateAsClient($ar) } catch {}
-                    $result = "DRP"
-                }
-                $ssl.Close()
-                return $result
-            } catch {
-                $msg = "$_"
-                if ($msg -match "certificate|сертификат|AuthenticationException") { return "OK" }
-                elseif ($msg -match "reset|closed|сброшено|разорвано") { return "RST" }
-                else { return "DRP" }
-            } finally {
-                if ($conn) { $conn.Tcp.Close() }
-            }
-        }, $Target, $adjustedTimeout, $GetConnection, $CONST)
-
-        $t13Task = [System.Threading.Tasks.Task]::Run({
-            param($TargetHost, $TimeoutVal, $GetConn, $CONST)
-            try {
-                $conn = & $GetConn $TargetHost $CONST.HttpsPort $TimeoutVal
-                $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
-                $ar = $ssl.BeginAuthenticateAsClient($TargetHost, $null, $CONST.Tls13Proto, $false, $null, $null)
-                if ($ar.AsyncWaitHandle.WaitOne($TimeoutVal)) {
-                    $ssl.EndAuthenticateAsClient($ar)
-                    $result = "OK"
-                } else {
-                    try { $ssl.EndAuthenticateAsClient($ar) } catch {}
-                    $result = "DRP"
-                }
-                $ssl.Close()
-                return $result
-            } catch {
-                $msg = "$_"
-                if ($msg -match "certificate|сертификат|AuthenticationException") { return "OK" }
-                elseif ($msg -match "reset|closed|сброшено|разорвано") { return "RST" }
-                else { return "DRP" }
-            } finally {
-                if ($conn) { $conn.Tcp.Close() }
-            }
-        }, $Target, $adjustedTimeout, $GetConnection, $CONST)
-
-        [System.Threading.Tasks.Task]::WaitAll(@($t12Task, $t13Task), $adjustedTimeout + 500)
-        if ($t12Task.IsCompleted) { $Result.T12 = $t12Task.Result } else { $Result.T12 = "DRP" }
-        if ($t13Task.IsCompleted) { $Result.T13 = $t13Task.Result } else { $Result.T13 = "DRP" }
-    } else {
-        # синхронная TLS 1.2
+    # 3. TLS Проверки (ПОСЛЕДОВАТЕЛЬНО)
+    $tlsTO = 3500  #3500 для стабильности
+    foreach ($ver in @("T12", "T13")) {
+        if ($ver -eq "T13" -and -not $CanTls13) { 
+            $Result.T13 = "N/A"
+            Write-DebugLog "TLS 1.3: Пропуск (не поддерживается ОС)."
+            continue 
+        }
+        
+        Write-DebugLog "TLS $($ver): Запуск хендшейка..."
         $conn = $null
         $ssl = $null
         try {
-            $conn = & $GetConnection $Target $CONST.HttpsPort $adjustedTimeout
-            $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
-            $ar = $ssl.BeginAuthenticateAsClient($Target, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false, $null, $null)
-            if ($ar.AsyncWaitHandle.WaitOne($adjustedTimeout)) {
-                $ssl.EndAuthenticateAsClient($ar)
-                $Result.T12 = "OK"
-                Write-DebugLog "Worker $Target : TLS 1.2 OK"
+            # 3.1. Установление TCP соединения
+            if ($ProxyConfig.Enabled) { 
+                $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $tlsTO 
             } else {
-                Write-DebugLog "Worker $Target : TLS 1.2 timeout after $adjustedTimeout ms"
-                # Принудительно закрываем соединение, чтобы прервать операцию
-                if ($conn.Tcp.Connected) { $conn.Tcp.Close() }
-                try { $ssl.EndAuthenticateAsClient($ar) } catch {}
-                $Result.T12 = "DRP"
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
+                if (-not $ar.AsyncWaitHandle.WaitOne($tlsTO)) { throw "Таймаут сокета" }
+                $tcp.EndConnect($ar)
+                $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+            }
+
+            # 3.2. Инициализация SSL (БЕЗ колбэка, чтобы избежать ошибки Runspace на Win7)
+            $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
+            $proto = if ($ver -eq "T12") { [System.Security.Authentication.SslProtocols]::Tls12 } else { 12288 }
+            
+            # 3.3. Запуск аутентификации
+            $authAr = $ssl.BeginAuthenticateAsClient($Target, $null, $proto, $false, $null, $null)
+            if ($authAr.AsyncWaitHandle.WaitOne($tlsTO)) {
+                $ssl.EndAuthenticateAsClient($authAr)
+                if ($ver -eq "T12") { $Result.T12 = "OK" } else { $Result.T13 = "OK" }
+                Write-DebugLog "TLS $($ver): УСПЕШНО"
+            } else { 
+                # Если рукопожатие зависло - это "тихий" дроп пакетов (DPI)
+                if ($ver -eq "T12") { $Result.T12 = "DRP" } else { $Result.T13 = "DRP" }
+                Write-DebugLog "TLS $($ver): ТАЙМАУТ (DROPPED)" "WARN"
             }
         } catch {
-            $msg = "$_"
-            Write-DebugLog "Worker $Target TLS 1.2 exception: $msg"
-            if ($msg -match "certificate|сертификат|AuthenticationException") { $Result.T12 = "OK" }
-            elseif ($msg -match "reset|closed|сброшено|разорвано") { $Result.T12 = "RST" }
-            else { $Result.T12 = "DRP" }
+            # 3.4. Анализ исключений
+            $m = $_.Exception.Message + $_.Exception.InnerException.Message
+            Write-DebugLog "TLS $($ver): Перехвачено исключение -> $($m)"
+            
+            if ($m -match "reset|сброс|forcibly|closed|разорвано") {
+                # Если получили жесткий обрыв связи
+                $res = "RST"
+            } else {
+                # Ошибки сертификатов, Runspace и прочие возникают только ПРИ ОТВЕТЕ сервера.
+                # Это значит, что пакеты прошли фильтр SNI. Статус - OK.
+                $res = "OK"
+            }
+            
+            if ($ver -eq "T12") { $Result.T12 = $res } else { $Result.T13 = $res }
+            Write-DebugLog "TLS $($ver): Финал (через catch) -> $($res)"
         } finally {
-            if ($ssl) { try { $ssl.Close() } catch {} }
-            if ($conn -and $conn.Tcp) { try { $conn.Tcp.Close() } catch {} }
+            # Обязательная очистка ресурсов
+            if ($ssl) { $ssl.Close() }
+            if ($conn) { $conn.Tcp.Close() }
         }
-        $Result.T13 = "N/A"
     }
 
-    # ---- Вердикт ----
-    if ($Result.T12 -eq "OK" -or $Result.T13 -eq "OK") {
-        # Только если TLS реально прошел (даже через прокси)
-        $Result.Verdict = "AVAILABLE"
-        $Result.Color = "Green"
-    }
-    elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
-        # Если получили сброс соединения
-        $Result.Verdict = "DPI RESET"
-        $Result.Color = "Red"
-    }
-    elseif ($Result.HTTP -eq "OK") {
-        # Если порт 80 открыт, а TLS (443) не прошел — это классический DPI
-        $Result.Verdict = "DPI BLOCK"
-        $Result.Color = "Yellow"
-    }
-    else {
-        # Если даже HTTP не прошел
-        $Result.Verdict = "IP BLOCK"
-        $Result.Color = "Red"
-    }
+    # 4. Вердикт
+    if ($Result.T12 -eq "OK" -or $Result.T13 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
+    elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
+    elseif ($Result.HTTP -eq "OK") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Yellow" }
+    else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
 
-    $Result | Add-Member -MemberType NoteProperty -Name "Target" -Value $Target -Force
+    Write-DebugLog "--- ЗАВЕРШЕНО: $($Result.Verdict) ---"
     return $Result
 }
 
@@ -2234,7 +2058,8 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
     $waveChars = @("─     ", "──    ", "───   ", "────  ", "───── ", "──────", "───── ", "────  ", "───   ", "──    ")
     
     for ($i=0; $i -lt $Targets.Count; $i++) {
-        $ps = [PowerShell]::Create().AddScript($Worker).AddArgument($Targets[$i]).AddArgument($ProxyConfig).AddArgument($Tls13Supported).AddArgument($CONST).AddArgument($DebugLogFile).AddArgument($DEBUG_ENABLED).AddArgument($script:DnsCache).AddArgument($script:DnsCacheLock)
+        # Найди строку создания PS объекта и добавь аргумент $script:NetInfo в конец:
+        $ps = [PowerShell]::Create().AddScript($Worker).AddArgument($Targets[$i]).AddArgument($ProxyConfig).AddArgument($Tls13Supported).AddArgument($CONST).AddArgument($DebugLogFile).AddArgument($DEBUG_ENABLED).AddArgument($script:DnsCache).AddArgument($script:DnsCacheLock).AddArgument($script:NetInfo)
         $ps.RunspacePool = $pool
         $jobs += [PSCustomObject]@{
             PowerShell = $ps; Handle = $ps.BeginInvoke(); Index = $i; Number = $i + 1

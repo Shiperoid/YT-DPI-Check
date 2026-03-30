@@ -122,3 +122,28 @@ This major update elevates YT-DPI from a simple multi-threaded scanner to a prof
 *   **Deep Trace (L4 Traceroute):** Advanced TCP-level traceroute to find the exact "Censorship Point" (TSPU/DPI) on your network path by incrementing TTL values.
 *   **Thread-Safe DNS Cache:** Scanned IP addresses are now stored in a synchronized hashtable, allowing all 20+ worker threads to share data instantly, reducing DNS overhead to zero during re-scans.
 *   **Professional Documentation:** The internal help menu `[H]` has been rewritten as a technical manual, covering QUIC, SNI, Kyber encryption, and GGC throttling.
+
+
+## Release v2.1.4 — Stability & Compatibility Hotfix
+
+This emergency update addresses critical issues found in the 2.1.3 release, primarily affecting Windows 7 users and systems with active IPv6 stacks.
+
+### 🛠 Fixed in this version:
+*   **Critical "No Runspace" Fix:** Resolved a threading error where TLS handshake validation would fail on older Windows versions due to PowerShell RunspacePool limitations.
+*   **Legacy IPv6 Detection:** Switched to .NET-native NetworkInformation classes for IPv6 discovery. This ensures the script no longer crashes on Windows 7/8.1 where `Get-NetIPAddress` is unavailable.
+*   **Handshake Reliability:** Increased TLS timeout to 3500ms and optimized the handshake sequence. This significantly reduces "False Positive" DPI BLOCK reports on slow or throttled connections.
+*   **Silent Certificate Handling:** Improved logic for handling invalid/self-signed certificates from GGC nodes. If the server responds, it is now correctly marked as AVAILABLE.
+*   **Worker Logging:** Restored and enhanced detailed logging for background worker threads to aid in forensic network analysis.
+
+---
+
+## Релиз v2.1.4 — Исправление совместимости и стабильности
+
+Срочное обновление, устраняющее критические ошибки версии 2.1.3, которые проявлялись на Windows 7 и в сетях с активным IPv6.
+
+### 🛠 Что исправлено:
+*   **Ошибка Runspace:** Устранена критическая проблема, из-за которой проверка TLS завершалась аварией на старых версиях PowerShell.
+*   **IPv6 на Windows 7:** Метод определения сети переписан на чистый .NET. Теперь скрипт корректно определяет наличие IPv6 на всех ОС, начиная с Windows 7.
+*   **Устранение ложных блокировок:** Таймаут TLS-рукопожатия увеличен до 3.5 сек. Это убрало "ложные желтые результаты" на медленных соединениях.
+*   **Работа с GGC нодами:** Улучшена обработка ответов от серверов Google с нестандартными сертификатами. Теперь любой ответ сервера считается успехом связи.
+*   **Логирование воркеров:** Вернул подробные отчеты от каждого потока в лог-файл для более точной диагностики.

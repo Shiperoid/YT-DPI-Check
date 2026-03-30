@@ -1,5 +1,5 @@
-﻿# YT-DPI v2.1.3
-![GitHub Release](https://img.shields.io/badge/release-2.1.3-green)
+﻿# YT-DPI v2.1.4
+![GitHub Release](https://img.shields.io/badge/release-2.1.4-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 
