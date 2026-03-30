@@ -10,7 +10,7 @@
 
 ![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI/refs/heads/master/img/YT-DPI-v2.1.3.png)
 
-## 🚀 Key Evolutionary Features (v2.1+)
+## 🚀 Key Features (v2.1+)
 
 *   **Persistent Analytics Core:** Stores network state, ISP metadata, and high-speed DNS mappings in `%LOCALAPPDATA%`. Launch time is reduced to <1s.
 *   **Multi-Protocol Engine:** Independent testing of Port 80 (HTTP), Port 443 (TLS 1.2), and Port 443 (TLS 1.3) to find the specific layer of censorship.
