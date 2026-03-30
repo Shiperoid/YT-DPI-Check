@@ -1492,25 +1492,42 @@ function Test-ProxyConnection {
         "Получение HTTP ответа         "
     )
 
-    # Отрисовка заготовок
-    for($i=0; $i -lt $steps.Count; $i++) {
-        Write-Host "  [ " -NoNewline -ForegroundColor Gray
-        Write-Host (Get-PaddedCenter "WAIT") -ForegroundColor Yellow -NoNewline
-        Write-Host " ] $($steps[$i])" -ForegroundColor White
+    # Локальная функция форматирования статуса
+    function Format-Status($s) {
+        $width = 6
+        $spaces = $width - $s.Length
+        if ($spaces -le 0) { return $s }
+        $left = [Math]::Floor($spaces / 2)
+        $right = $spaces - $left
+        return (" " * $left) + $s + (" " * $right)
     }
 
+    # Сохраняем позиции строк для каждого шага
+    $stepRows = @()
+    for($i=0; $i -lt $steps.Count; $i++) {
+        $stepRows += [Console]::CursorTop
+        Write-Host "  [ " -NoNewline -ForegroundColor Gray
+        Write-Host (Format-Status "WAIT") -ForegroundColor Yellow -NoNewline
+        Write-Host " ] $($steps[$i])" -ForegroundColor White
+    }
+    $afterStepsRow = [Console]::CursorTop
+
+    # Функция обновления статуса (перерисовывает всю строку)
     function Update-ProxyStep($idx, $status, $color) {
-        $prevX = [Console]::CursorLeft
-        $prevY = [Console]::CursorTop
-        # 11 - это строка, где начинаются шаги (с учетом заголовков выше)
-        [Console]::SetCursorPosition(4, 12 + $idx)
-        Write-Host (Get-PaddedCenter $status) -ForegroundColor $color
-        [Console]::SetCursorPosition($prevX, $prevY)
+        $row = $stepRows[$idx]
+        [Console]::SetCursorPosition(0, $row)
+        [Console]::Write(" " * [Console]::WindowWidth)  # Очищаем строку
+        [Console]::SetCursorPosition(0, $row)
+        # Полностью перерисовываем строку
+        Write-Host "  [ " -NoNewline -ForegroundColor Gray
+        Write-Host (Format-Status $status) -ForegroundColor $color -NoNewline
+        Write-Host " ] $($steps[$idx])" -ForegroundColor White
     }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $success = $false
     $errDetail = "Неизвестная ошибка"
+    $latency = $null
 
     try {
         # Шаг 1: TCP Connect
@@ -1523,10 +1540,12 @@ function Test-ProxyConnection {
         $tcp.EndConnect($asyn)
         Update-ProxyStep 0 " OK " "Green"
 
-        # Шаг 2 & 3: Handshake через существующую функцию
+        # Шаг 2: Handshake (проверка прокси)
         Update-ProxyStep 1 "WAIT" "Yellow"
         $conn = Connect-ThroughProxy "google.com" 80 $global:ProxyConfig 4000
         Update-ProxyStep 1 " OK " "Green"
+        
+        # Шаг 3: Туннель установлен (автоматически OK)
         Update-ProxyStep 2 " OK " "Green"
 
         # Шаг 4: HTTP Request
@@ -1547,8 +1566,12 @@ function Test-ProxyConnection {
         Write-DebugLog "Proxy Test Error: $errDetail"
     }
 
+    # Перемещаем курсор на строку после всех шагов и очищаем её
+    [Console]::SetCursorPosition(0, $afterStepsRow)
+    [Console]::Write(" " * [Console]::WindowWidth)
+    [Console]::SetCursorPosition(0, $afterStepsRow)
+
     # Итоговый блок
-    [Console]::SetCursorPosition(0, 17)
     Write-Host " $dash" -ForegroundColor Gray
     if ($success) {
         Write-Host "  РЕЗУЛЬТАТ: " -NoNewline -ForegroundColor White
@@ -1558,7 +1581,6 @@ function Test-ProxyConnection {
     } else {
         Write-Host "  РЕЗУЛЬТАТ: " -NoNewline -ForegroundColor White
         Write-Host "ОШИБКА СОЕДИНЕНИЯ" -ForegroundColor Red
-        # Обрезаем слишком длинные ошибки
         if ($errDetail.Length -gt $w - 15) { $errDetail = $errDetail.Substring(0, $w - 18) + "..." }
         Write-Host "  ДЕТАЛИ:    " -NoNewline -ForegroundColor White
         Write-Host $errDetail -ForegroundColor Gray
@@ -1623,80 +1645,397 @@ function Draw-Block {
     return $currentY
 }
 
+function Parse-ProxyString {
+    param([string]$input)
+    
+    Write-DebugLog "Parse-ProxyString: Входная строка = '$input'"
+    
+    $result = @{
+        Valid = $false
+        Type = "AUTO"
+        Host = ""
+        Port = 0
+        User = ""
+        Pass = ""
+    }
+    
+    # Удаляем пробелы
+    $input = $input.Trim()
+    if ([string]::IsNullOrEmpty($input)) {
+        Write-DebugLog "Parse-ProxyString: Пустая строка, возвращаем невалидный результат"
+        return $result
+    }
+    
+    Write-DebugLog "Parse-ProxyString: После Trim = '$input'"
+    
+    # Проверяем наличие протокола
+    $protocol = ""
+    $rest = $input
+    
+    if ($input -match '^(?i)(http|socks5)://(.*)$') {
+        $protocol = $matches[1].ToUpper()
+        $rest = $matches[2]
+        $result.Type = $protocol
+        Write-DebugLog "Parse-ProxyString: Обнаружен протокол = '$protocol', остаток = '$rest'"
+    } else {
+        Write-DebugLog "Parse-ProxyString: Протокол не указан, тип = AUTO"
+    }
+    
+    # Проверяем наличие аутентификации
+    $userpass = ""
+    $hostport = $rest
+    
+    if ($rest -match '^([^@]+)@(.+)$') {
+        $userpass = $matches[1]
+        $hostport = $matches[2]
+        Write-DebugLog "Parse-ProxyString: Обнаружена аутентификация, userpass = '$userpass', hostport = '$hostport'"
+        
+        # Разбираем логин:пароль
+        if ($userpass -match '^([^:]+):(.+)$') {
+            $result.User = $matches[1]
+            $result.Pass = $matches[2]
+            Write-DebugLog "Parse-ProxyString: User = '$($result.User)', Pass = '***'"
+        } else {
+            Write-DebugLog "Parse-ProxyString: Ошибка формата аутентификации (ожидается user:pass)"
+            return $result
+        }
+    } else {
+        Write-DebugLog "Parse-ProxyString: Аутентификация не обнаружена"
+    }
+    
+    # Разбираем хост:порт
+    Write-DebugLog "Parse-ProxyString: Парсим hostport = '$hostport'"
+    $lastColon = $hostport.LastIndexOf(':')
+    Write-DebugLog "Parse-ProxyString: Последнее двоеточие на позиции $lastColon"
+    
+    if ($lastColon -gt 0) {
+        $result.Host = $hostport.Substring(0, $lastColon)
+        $portStr = $hostport.Substring($lastColon + 1)
+        Write-DebugLog "Parse-ProxyString: Host = '$($result.Host)', PortStr = '$portStr'"
+        
+        if ([int]::TryParse($portStr, [ref]$result.Port)) {
+            Write-DebugLog "Parse-ProxyString: Порт распарсен = $($result.Port)"
+            if ($result.Port -ge 1 -and $result.Port -le 65535) {
+                if ($result.Host.Length -gt 0) {
+                    $result.Valid = $true
+                    Write-DebugLog "Parse-ProxyString: УСПЕХ! Host='$($result.Host)', Port=$($result.Port), Type=$($result.Type), Valid=$($result.Valid)"
+                } else {
+                    Write-DebugLog "Parse-ProxyString: Ошибка - пустой хост"
+                }
+            } else {
+                Write-DebugLog "Parse-ProxyString: Ошибка - порт вне диапазона 1-65535 (получен $($result.Port))"
+            }
+        } else {
+            Write-DebugLog "Parse-ProxyString: Ошибка - не удалось распарсить порт из '$portStr'"
+        }
+    } else {
+        Write-DebugLog "Parse-ProxyString: Ошибка - не найдено двоеточие в '$hostport'"
+    }
+    
+    return $result
+}
+
+
 function Show-ProxyMenu {
     [Console]::Clear()
     $w = [Console]::WindowWidth
-    if ($w -gt 80) { $w = 80 }
-    $line = "=" * $w
-    $y = 1
-
-    Out-Str 0 $y $line "DarkYellow"; $y++
-    $title = Get-PaddedCenter "НАСТРОЙКА ПРОКСИ" $w
-    Out-Str 0 $y $title "Yellow"; $y++
-    Out-Str 0 $y $line "DarkYellow"; $y += 2
-
-    # Текущий статус (безопасный вывод)
-    $cur = "ОТКЛЮЧЕН"
-    $statusColor = "Red"
+    if ($w -gt 100) { $w = 100 }
+    $line = "═" * $w
+    $dash = "─" * $w
+    
+    # Заголовок
+    Write-Host "`n $line" -ForegroundColor Cyan
+    Write-Host (Get-PaddedCenter "НАСТРОЙКА ПРОКСИ" $w) -ForegroundColor Yellow
+    Write-Host " $line" -ForegroundColor Cyan
+    
+    # Текущий статус
     if ($global:ProxyConfig.Enabled) {
-        $cur = "$($global:ProxyConfig.Type) -> $($global:ProxyConfig.Host):$($global:ProxyConfig.Port)"
-        $statusColor = "Green"
+        Write-Host "`n  ТЕКУЩИЙ ПРОКСИ: " -NoNewline -ForegroundColor White
+        Write-Host "$($global:ProxyConfig.Type)://" -NoNewline -ForegroundColor Green
+        if ($global:ProxyConfig.User) {
+            Write-Host "$($global:ProxyConfig.User):*****@" -NoNewline -ForegroundColor DarkYellow
+        }
+        Write-Host "$($global:ProxyConfig.Host):$($global:ProxyConfig.Port)" -ForegroundColor Green
+    } else {
+        Write-Host "`n  ТЕКУЩИЙ ПРОКСИ: " -NoNewline -ForegroundColor White
+        Write-Host "ОТКЛЮЧЕН" -ForegroundColor Red
     }
     
-    Out-Str 4 $y "ТЕКУЩИЙ СТАТУС: " "White"
-    Out-Str 20 $y $cur $statusColor; $y += 2
-
-    Out-Str 2 $y "ИНСТРУКЦИЯ:" "Cyan"; $y++
-    Out-Str 4 $y "1. Введите адрес (например 127.0.0.1:1080)" "Gray"; $y++
-    Out-Str 4 $y "2. Протокол (SOCKS5/HTTP) определится САМ" "Gray"; $y++
-    Out-Str 4 $y "3. Для выключения введите 'OFF' или '0'" "Gray"; $y += 2
-
-    Out-Str 0 $y $line "DarkYellow"; $y++
-    Out-Str 2 $y "ВВОД: " "Cyan"
+    # Инструкция
+    Write-Host "`n $dash" -ForegroundColor Gray
+    Write-Host "  ФОРМАТЫ ВВОДА:" -ForegroundColor Cyan
+    Write-Host "    * host:port                 - HTTP (автоопределение)" -ForegroundColor Gray
+    Write-Host "    * http://host:port          - HTTP явно" -ForegroundColor Gray
+    Write-Host "    * socks5://host:port        - SOCKS5 явно" -ForegroundColor Gray
+    Write-Host "    * user:pass@host:port       - с аутентификацией" -ForegroundColor Gray
+    Write-Host "    * http://user:pass@host:port - HTTP с аутентификацией" -ForegroundColor Gray
+    Write-Host "    * socks5://user:pass@host:port - SOCKS5 с аутентификацией" -ForegroundColor Gray
+    Write-Host "    * OFF / 0 / пусто           - отключить прокси" -ForegroundColor Gray
+    Write-Host "    * TEST                      - протестировать текущий прокси" -ForegroundColor Gray
     
+    Write-Host "`n $dash" -ForegroundColor Gray
+    Write-Host "  ВВОД: " -NoNewline -ForegroundColor Yellow
+    
+    [Console]::ForegroundColor = "White"
     [Console]::CursorVisible = $true
-    $input = [Console]::ReadLine()
+    $userInput = [Console]::ReadLine().Trim()
     [Console]::CursorVisible = $false
     
-    $y += 2
-    if ($input -eq "OFF" -or $input -eq "off" -or $input -eq "0") {
+    Write-DebugLog "Show-ProxyMenu: Введено = '$userInput'"
+    
+    # Обработка команд
+    if ($userInput -eq "" -or $userInput -eq "OFF" -or $userInput -eq "off" -or $userInput -eq "0") {
         $global:ProxyConfig.Enabled = $false
-        Out-Str 4 $y "[ OK ] Прокси отключен." "Green"
+        $global:ProxyConfig.User = ""
+        $global:ProxyConfig.Pass = ""
+        Write-Host "`n  [OK] Прокси отключен." -ForegroundColor Green
+        Save-Config $script:Config
+        Start-Sleep -Seconds 1.5
+        return
     }
-    elseif ($input -match '(?<host>[^:/]+):(?<port>\d+)$') {
-        $h = $matches['host']
-        $p = [int]$matches['port']
-        
-        Out-Str 4 $y "[ WAIT ] Тестируем протокол..." "Yellow"
-        
-        # Умный тест на SOCKS5
-        $type = "HTTP"
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        try {
-            $ar = $tcp.BeginConnect($h, $p, $null, $null)
-            if ($ar.AsyncWaitHandle.WaitOne(1000)) {
-                $tcp.EndConnect($ar)
-                $stream = $tcp.GetStream()
-                $stream.Write([byte[]]@(0x05, 0x01, 0x00), 0, 3)
-                $buf = New-Object byte[] 2
-                if ($stream.Read($buf, 0, 2) -gt 0 -and $buf[0] -eq 0x05) { $type = "SOCKS5" }
-            }
-        } catch {} finally { $tcp.Close() }
+    
+    if ($userInput -eq "TEST" -or $userInput -eq "test") {
+        if (-not $global:ProxyConfig.Enabled) {
+            Write-Host "`n  [FAIL] Прокси не включен. Сначала настройте его." -ForegroundColor Red
+            Start-Sleep -Seconds 2
+            Show-ProxyMenu
+            return
+        }
+        Write-Host "`n  [WAIT] Тестирование прокси..." -ForegroundColor Yellow
+        Start-Sleep -Milliseconds 500
+        Test-ProxyConnection
+        Show-ProxyMenu
+        return
+    }
+    
+    # --- ПАРСИНГ ---
+    Write-DebugLog "Show-ProxyMenu: Начинаем парсинг '$userInput'"
 
-        $global:ProxyConfig.Enabled = $true
-        $global:ProxyConfig.Host = $h
-        $global:ProxyConfig.Port = $p
-        $global:ProxyConfig.Type = $type
-        
-        Out-Str 4 ($y+1) "[ OK ] Определен тип: $type" "Green"
-        Out-Str 4 ($y+2) "[ OK ] Настройки применены!" "Green"
-    } else {
-        if ($input -ne "") {
-            Out-Str 4 $y "[ ERR ] Неверный формат! Используйте хост:порт" "Red"
+    $proxyType = "AUTO"
+    $user = ""
+    $pass = ""
+    $proxyHost = ""
+    $port = 0
+
+    # Удаляем пробелы
+    $userInput = $userInput.Trim()
+    if ($userInput -eq "") {
+        Write-Host "`n  [FAIL] Пустой ввод." -ForegroundColor Red
+        Start-Sleep -Seconds 2
+        Show-ProxyMenu
+        return
+    }
+
+    # 1. Проверяем наличие протокола (http:// или socks5://)
+    if ($userInput -match '^(?i)(http|socks5)://') {
+        $protocol = $matches[1].ToUpper()
+        $proxyType = $protocol
+        $userInput = $userInput -replace '^(?i)(http|socks5)://', ''
+        Write-DebugLog "Show-ProxyMenu: Обнаружен протокол $proxyType, остаток = '$userInput'"
+    }
+
+    # 2. Проверяем наличие аутентификации user:pass@
+    if ($userInput -match '^([^@]+)@') {
+        $authPart = $matches[1]
+        $userInput = $userInput -replace '^[^@]+@', ''
+        Write-DebugLog "Show-ProxyMenu: Обнаружена аутентификация, authPart = '$authPart'"
+        if ($authPart -match '^([^:]+):(.+)$') {
+            $user = $matches[1]
+            $pass = $matches[2]
+            Write-DebugLog "Show-ProxyMenu: User = '$user', Pass = '***'"
+        } else {
+            Write-DebugLog "Show-ProxyMenu: Ошибка формата аутентификации"
+            Write-Host "`n  [FAIL] Неверный формат аутентификации! Используйте user:pass@host:port" -ForegroundColor Red
+            Start-Sleep -Seconds 3
+            Show-ProxyMenu
+            return
         }
     }
 
-    Start-Sleep -Seconds 2
+    # 3. Парсим хост и порт (последнее двоеточие)
+    $lastColon = $userInput.LastIndexOf(':')
+    if ($lastColon -le 0) {
+        Write-DebugLog "Show-ProxyMenu: Не найдено двоеточие в '$userInput'"
+        Write-Host "`n  [FAIL] Неверный формат! Используйте host:port (например 127.0.0.1:1080)" -ForegroundColor Red
+        Start-Sleep -Seconds 3
+        Show-ProxyMenu
+        return
+    }
+
+    $proxyHost = $userInput.Substring(0, $lastColon)
+    $portStr = $userInput.Substring($lastColon + 1)
+
+    Write-DebugLog "Show-ProxyMenu: Host = '$proxyHost', PortStr = '$portStr'"
+
+    if (-not [int]::TryParse($portStr, [ref]$port)) {
+        Write-DebugLog "Show-ProxyMenu: Не удалось распарсить порт"
+        Write-Host "`n  [FAIL] Неверный формат порта! Порт должен быть числом (1-65535)" -ForegroundColor Red
+        Start-Sleep -Seconds 3
+        Show-ProxyMenu
+        return
+    }
+
+    if ($port -lt 1 -or $port -gt 65535) {
+        Write-DebugLog "Show-ProxyMenu: Порт вне диапазона: $port"
+        Write-Host "`n  [FAIL] Порт должен быть в диапазоне 1-65535" -ForegroundColor Red
+        Start-Sleep -Seconds 3
+        Show-ProxyMenu
+        return
+    }
+
+    if ([string]::IsNullOrEmpty($proxyHost)) {
+        Write-DebugLog "Show-ProxyMenu: Пустой хост"
+        Write-Host "`n  [FAIL] Хост не указан" -ForegroundColor Red
+        Start-Sleep -Seconds 3
+        Show-ProxyMenu
+        return
+    }
+
+    Write-DebugLog "Show-ProxyMenu: Парсинг успешен! Host='$proxyHost', Port=$port, Type=$proxyType, User='$user'"
+
+    Write-Host "`n  [WAIT] Проверка работоспособности прокси..." -ForegroundColor Yellow
+
+    # Если тип AUTO, пытаемся определить
+    if ($proxyType -eq "AUTO") {
+        Write-DebugLog "Show-ProxyMenu: Определяем тип прокси для $proxyHost`:$port"
+        $detected = Detect-ProxyType $proxyHost $port
+        if ($detected.Type -eq "UNKNOWN") {
+            Write-Host "`n  [FAIL] Не удалось определить тип прокси (проверьте порт)" -ForegroundColor Red
+            Start-Sleep -Seconds 3
+            Show-ProxyMenu
+            return
+        }
+        $proxyType = $detected.Type
+        Write-DebugLog "Show-ProxyMenu: Определен тип = $proxyType"
+    }
+
+    # Сохраняем настройки
+    $global:ProxyConfig.Enabled = $true
+    $global:ProxyConfig.Type = $proxyType
+    $global:ProxyConfig.Host = $proxyHost
+    $global:ProxyConfig.Port = $port
+    $global:ProxyConfig.User = $user
+    $global:ProxyConfig.Pass = $pass
+
+    # Тестируем прокси
+    $testResult = Test-ProxyQuick $global:ProxyConfig
+
+    if ($testResult.Success) {
+        Write-Host "  [OK] Прокси работает! (задержка: $($testResult.Latency) мс)" -ForegroundColor Green
+        Write-Host "  [OK] Тип: $($global:ProxyConfig.Type)" -ForegroundColor Green
+        if ($global:ProxyConfig.User) {
+            Write-Host "  [OK] Аутентификация настроена" -ForegroundColor Green
+        }
+        Save-Config $script:Config
+        Start-Sleep -Seconds 2
+    } else {
+        Write-Host "  [FAIL] Прокси НЕ РАБОТАЕТ: $($testResult.Error)" -ForegroundColor Red
+        Write-Host "  [i] Проверьте адрес, порт и тип прокси" -ForegroundColor Gray
+        $global:ProxyConfig.Enabled = $false
+        Start-Sleep -Seconds 3
+        Show-ProxyMenu
+        return
+    }
+}
+
+
+
+function Detect-ProxyType {
+    param([string]$targetHost, [int]$targetPort)
+    
+    $result = @{
+        Type = "UNKNOWN"
+        User = ""
+        Pass = ""
+    }
+    
+    $tcp = $null
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $async = $tcp.BeginConnect($targetHost, $targetPort, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne(2000)) {
+            return $result
+        }
+        $tcp.EndConnect($async)
+        $stream = $tcp.GetStream()
+        $stream.ReadTimeout = 2000
+        $stream.WriteTimeout = 2000
+        
+        # Пробуем SOCKS5
+        try {
+            $stream.Write([byte[]]@(0x05, 0x01, 0x00), 0, 3)
+            $buf = New-Object byte[] 2
+            $read = $stream.Read($buf, 0, 2)
+            if ($read -eq 2 -and $buf[0] -eq 0x05) {
+                $result.Type = "SOCKS5"
+                return $result
+            }
+        } catch { 
+            # Не SOCKS5, пробуем HTTP
+        }
+        
+        # Пробуем HTTP CONNECT
+        try {
+            $req = [Text.Encoding]::ASCII.GetBytes("CONNECT google.com:80 HTTP/1.1`r`nHost: google.com:80`r`n`r`n")
+            $stream.Write($req, 0, $req.Length)
+            $buf = New-Object byte[] 128
+            $read = $stream.Read($buf, 0, 128)
+            $response = [Text.Encoding]::ASCII.GetString($buf, 0, $read)
+            if ($response -match "HTTP/1.[01]\s+200") {
+                $result.Type = "HTTP"
+                return $result
+            }
+        } catch {
+            # Не HTTP
+        }
+        
+    } catch {
+        # Ошибка подключения
+    } finally {
+        if ($tcp) { $tcp.Close() }
+    }
+    
+    return $result
+}
+
+function Test-ProxyQuick {
+    param($ProxyConfig)
+    
+    $result = @{
+        Success = $false
+        Latency = $null
+        Error = ""
+    }
+    
+    # Проверка, что прокси настроен
+    if ([string]::IsNullOrEmpty($ProxyConfig.Host) -or $ProxyConfig.Port -le 0) {
+        $result.Error = "Прокси не настроен (хост/порт пуст)"
+        return $result
+    }
+
+    try {
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        
+        # Пробуем установить туннель до тестового хоста
+        $conn = Connect-ThroughProxy "google.com" 80 $ProxyConfig 5000
+        
+        if ($conn) {
+            $result.Latency = $sw.ElapsedMilliseconds
+            $result.Success = $true
+            $conn.Tcp.Close()
+        } else {
+            $result.Error = "Не удалось установить туннель"
+        }
+    } catch {
+        $result.Error = $_.Exception.Message
+        if ($result.Error -match "таймаут|timeout") {
+            $result.Error = "Таймаут подключения"
+        } elseif ($result.Error -match "отказано|refused") {
+            $result.Error = "Соединение отклонено"
+        }
+    }
+    
+    return $result
 }
 
 function Show-HelpMenu {
@@ -1770,6 +2109,10 @@ $Worker = {
     # --- ВНУТРЕННИЕ ФУНКЦИИ ---
     function Connect-ThroughProxy {
         param($TargetHost, $TargetPort, $ProxyConfig, [int]$Timeout = $CONST.ProxyTimeout)
+        # Проверка корректности конфигурации прокси
+        if ([string]::IsNullOrEmpty($ProxyConfig.Host) -or $ProxyConfig.Port -le 0) {
+            throw "Некорректная конфигурация прокси: хост='$($ProxyConfig.Host)', порт=$($ProxyConfig.Port)"
+        }
         Write-DebugLog "Подключение через прокси $($ProxyConfig.Type) к $($TargetHost):$($TargetPort)"
         $tcp = New-Object System.Net.Sockets.TcpClient
         try {
@@ -2075,6 +2418,11 @@ function Test-Tls13Support {
 # ====================================================================================
 # 1. Загрузка конфигурации (Один раз)
 $script:Config = Load-Config
+$global:ProxyConfig = $script:Config.Proxy
+#---
+# Если нужно сбрасывать состояние прокси при каждом запуске
+# $global:ProxyConfig.Enabled = $false
+#---
 $script:Config.RunCount++
 
 # 2. Восстановление системных параметров
@@ -2377,7 +2725,7 @@ while ($true) {
             Out-Str 0 $oldRow (" " * [Console]::WindowWidth) "Black" "Black"
             # ------------------------
 
-            Draw-StatusBar -Message "[ WAIT ] REFRESHING NETWORK STATE..." -Fg "Black" -Bg "Cyan"
+
             
             Draw-StatusBar -Message "[ WAIT ] REFRESHING NETWORK STATE..." -Fg "Black" -Bg "Cyan"
             $script:NetInfo = Get-NetworkInfo
