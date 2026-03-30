@@ -49,7 +49,6 @@ function Write-DebugLog($msg, $level = "DEBUG") {
     }
 }
 
-
 Write-DebugLog "==================== СКРИПТ ЗАПУЩЕН ====================" "INFO"
 Write-DebugLog "Версия PowerShell: $($PSVersionTable.PSVersion)" "INFO"
 Write-DebugLog "ОС: $([System.Environment]::OSVersion.VersionString)" "INFO"
@@ -79,30 +78,6 @@ if (Test-Path $DebugLogFile) {
         Write-DebugLog "Ошибка при ротации лога: $_" "WARN"
     }
 }
-
-$stdOutHandle = (Get-Process -Id $PID).MainWindowHandle
-if ($stdOutHandle -ne [IntPtr]::Zero) {
-    $code = @"
-    using System;
-    using System.Runtime.InteropServices;
-    public class VTMode {
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern IntPtr GetStdHandle(int nStdHandle);
-        [DllImport("kernel32.dll")]
-        public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
-        [DllImport("kernel32.dll")]
-        public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
-    }
-"@
-    if (-not ([System.Management.Automation.PSTypeName]'ConsoleHelper').Type) {
-        Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
-        $hOut = [VTMode]::GetStdHandle(-11) # STD_OUTPUT_HANDLE
-        $mode = 0
-        if ([VTMode]::GetConsoleMode($hOut, [ref]$mode)) {
-            [VTMode]::SetConsoleMode($hOut, $mode -bor 0x0004) # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    }   }
-}
-
 
 # --- ОТКЛЮЧЕНИЕ ВЫДЕЛЕНИЯ МЫШЬЮ ---
 Write-DebugLog "Отключаем QuickEdit..."
@@ -141,7 +116,6 @@ $script:DnsCacheLock = New-Object System.Threading.Mutex($false, "Global\YT-DPI-
 $script:NetInfo = $null
 $script:Targets = $null
 $script:LastScanResults = @()
-$script:Stats = @{ Clean = 0; Blocked = 0; Rst = 0; Err = 0 }
 $script:UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # --- КОНСТАНТЫ ---
@@ -164,7 +138,6 @@ $SCRIPT:CONST = @{
     NavStr = "[ *READY* ]  [ENTER] SCAN | [H] HELP | [P] PROXY  | [T] TEST PROXY | [D] DEEP TRACE | [S] SAVE | [U] UPDATE | [Q] QUIT"
 }
 Write-DebugLog "Константы инициализированы."
-
 
 # --- ГЛОБАЛЬНЫЕ ПУТИ ---
 $script:ConfigDir = Join-Path $env:LOCALAPPDATA "YT-DPI"
@@ -408,72 +381,6 @@ function Get-Targets {
     return $targets | Sort-Object { $_.Length } | Select-Object -Unique
 }
 
-if ($shouldPrompt) {
-    $newVersion = Check-UpdateVersion -Repo "Shiperoid/YT-DPI" -LastCheckedVersion $config.LastCheckedVersion
-    if ($newVersion) {
-        [Console]::Clear()
-        Write-Host "=== ОБНОВЛЕНИЕ ===" -ForegroundColor Cyan
-        Write-Host "Доступна новая версия $newVersion (текущая $scriptVersion). Обновить? (Y/N)" -ForegroundColor Yellow
-        $key = [Console]::ReadKey($true).KeyChar
-        if ($key -eq 'y' -or $key -eq 'Y') {
-            Write-DebugLog "Пользователь согласился обновиться"
-            $currentFile = $script:OriginalFilePath
-            $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.bat"
-            Start-Updater $currentFile $downloadUrl
-            exit
-        } else {
-            Write-DebugLog "Пользователь отказался от обновления"
-            $config.LastPromptRun = $config.RunCount
-            $config.LastCheckedVersion = $newVersion   # запоминаем предложенную версию
-            Save-Config $config
-        }
-    } else {
-        Write-DebugLog "Новая версия не найдена, запоминаем что напоминали"
-        $config.LastPromptRun = $config.RunCount
-        Save-Config $config
-    }
-}
-
-
-function Test-HttpClient($Target, $UseHttps = $true) {
-    $uri = if ($UseHttps) { "https://$Target/" } else { "http://$Target/" }
-    $handler = New-Object System.Net.Http.HttpClientHandler
-    $handler.ServerCertificateCustomValidationCallback = { $true } # отключаем проверку сертификатов
-    if ($global:ProxyConfig.Enabled) {
-        $handler.Proxy = New-Object System.Net.WebProxy($global:ProxyConfig.Host, $global:ProxyConfig.Port)
-        if ($global:ProxyConfig.User) {
-            $handler.Proxy.Credentials = New-Object System.Net.NetworkCredential($global:ProxyConfig.User, $global:ProxyConfig.Pass)
-        }
-    } else {
-        $handler.Proxy = $null
-        $handler.UseProxy = $false
-    }
-    $client = New-Object System.Net.Http.HttpClient($handler)
-    $client.Timeout = [TimeSpan]::FromMilliseconds($CONST.TimeoutMs)
-    $client.DefaultRequestHeaders.UserAgent.ParseAdd($script:UserAgent)
-    $client.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-    $client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
-    $client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("gzip, deflate, br")
-    $client.DefaultRequestHeaders.Connection.ParseAdd("keep-alive")
-    $client.DefaultRequestHeaders.Add("Upgrade-Insecure-Requests", "1")
-    try {
-        $response = $client.GetAsync($uri).Result
-        $status = [int]$response.StatusCode
-        if ($status -eq 200 -or $status -eq 301 -or $status -eq 302) {
-            return "OK"
-        } else {
-            return "ERR"
-        }
-    } catch {
-        return "ERR"
-    } finally {
-        $client.Dispose()
-    }
-}
-
-
-
-
 # ====================================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И UI
 # ====================================================================================
@@ -495,6 +402,7 @@ function Clear-KeyBuffer {
 
 function Update-ConsoleSize {
     try {
+        [Console]::SetCursorPosition(0, 0)
         $linesNeeded = $script:Targets.Count + 19
         $maxHeight = [Console]::LargestWindowHeight
         if ($linesNeeded -gt $maxHeight) {
@@ -538,12 +446,18 @@ function Draw-StatusBar {
     if (-not $script:Targets) { return }
     $row = Get-NavRow -count $script:Targets.Count
     $width = [Console]::WindowWidth
-    $defaultText = $CONST.NavStr
-    $text = if ($Message) { $Message } else { $defaultText }
-    # Обрезаем/дополняем до ширины окна
-    if ($text.Length -gt $width - 2) { $text = $text.Substring(0, $width - 5) + "..." }
-    else { $text = $text.PadRight($width - 2) }
-    Out-Str 2 $row $text $Fg $Bg
+    
+    # 1. Сначала ПОЛНОСТЬЮ очищаем строку пробелами, чтобы убрать "призраков"
+    Out-Str 0 $row (" " * $width) "Black" "Black"
+    
+    # 2. Готовим текст
+    $text = if ($Message) { $Message } else { $CONST.NavStr }
+    
+    # 3. Обрезаем, если текст шире окна
+    if ($text.Length -gt ($width - 4)) { $text = $text.Substring(0, $width - 7) + "..." }
+    
+    # 4. Рисуем новый статус с небольшим отступом для красоты
+    Out-Str 2 $row " $text " $Fg $Bg
 }
 
 function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
@@ -566,10 +480,10 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     Out-Str 45 5 '███████╗██╗██║' 'Gray'
     Out-Str 45 6 '╚══════╝╚═╝╚═╝' 'Gray'
 
-    # Правая панель информации
+    # Правая панель информации 
     Out-Str 65 1 "> SYS STATUS: [ ONLINE ]" "Green"
-    Out-Str 65 2 ("> LOCAL DNS: " + $NetInfo.DNS).PadRight(50) "Cyan"
-    Out-Str 65 3 "> ENGINE: Barebuh Pro v1.7.6" "Red"
+    Out-Str 65 2 "> ENGINE: Barebuh Pro v1.7.6" "Red"
+    Out-Str 65 3 ("> LOCAL DNS: " + $NetInfo.DNS).PadRight(50) "Cyan"
     Out-Str 65 4 ("> CDN NODE: " + $NetInfo.CDN).PadRight(50) "Yellow"
     Out-Str 65 5 "> AUTHOR: github.com/Shiperoid" "Green"
     
@@ -586,7 +500,7 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     
     $proxyStatus = if ($global:ProxyConfig.Enabled) { "> PROXY: $($global:ProxyConfig.Type) $($global:ProxyConfig.Host):$($global:ProxyConfig.Port) Connected" } else { "> PROXY: [ OFF ]" }
     Out-Str 65 7 ($proxyStatus.PadRight(58)) "DarkYellow"
-    Out-Str 65 8 "> TG: t.me/YT_DPI" "Green"
+    Out-Str 65 8 "> TG: t.me/YT_DPI | VERSION: $scriptVersion" "Green"
         
     # Таблица
     $y = 9
@@ -1121,7 +1035,6 @@ function Invoke-Update {
     }
 }
 
-
 # --- Вспомогательные функции ---
 function Get-LocalIpAddress {
     try {
@@ -1561,93 +1474,94 @@ function Test-ProxyConnection {
     Write-Host " $line" -ForegroundColor Gray
 
     if (-not $global:ProxyConfig.Enabled) {
-        Write-Host "`n  [!] ОШИБКА: Прокси не настроен." -ForegroundColor Red
-        Write-Host "  Сначала включите его в меню [P]." -ForegroundColor Gray
+        Write-Host "`n  [!] ОШИБКА: Прокси не включен." -ForegroundColor Red
+        Write-Host "  Сначала настройте его кнопкой [P]." -ForegroundColor Gray
         Start-Sleep -Seconds 3
         return
     }
 
-    # Инфо-блок
     Write-Host "`n  КОНФИГУРАЦИЯ:" -ForegroundColor White
-    Write-Host "  > ТИП:    $($global:ProxyConfig.Type)" -ForegroundColor Gray
     Write-Host "  > АДРЕС:  $($global:ProxyConfig.Host):$($global:ProxyConfig.Port)" -ForegroundColor Gray
+    Write-Host "  > ТИП:    $($global:ProxyConfig.Type)" -ForegroundColor Gray
     Write-Host "`n $dash" -ForegroundColor Gray
 
     $steps = @(
-        @{ Title = "Подключение к прокси-серверу  " },
-        @{ Title = "Авторизация и рукопожатие   " },
-        @{ Title = "Соединение с google.com:80  " },
-        @{ Title = "Получение HTTP-заголовков   " }
+        "Подключение к прокси-хосту    ",
+        "Проверка порта и рукопожатие  ",
+        "Туннель до google.com:80      ",
+        "Получение HTTP ответа         "
     )
 
-    # Внутренняя функция для отрисовки шага без PadBoth
-    function Update-ProxyStep($idx, $status, $color) {
-        [Console]::SetCursorPosition(2, 11 + $idx)
-        
-        # Ручное центрирование статуса в поле из 6 символов
-        $spaces = 6 - $status.Length
-        $left = [Math]::Floor($spaces / 2)
-        $right = $spaces - $left
-        $statusStr = (" " * $left) + $status + (" " * $right)
-
+    # Отрисовка заготовок
+    for($i=0; $i -lt $steps.Count; $i++) {
         Write-Host "  [ " -NoNewline -ForegroundColor Gray
-        Write-Host $statusStr -ForegroundColor $color -NoNewline
-        Write-Host " ] $($steps[$idx].Title)" -ForegroundColor White
+        Write-Host (Get-PaddedCenter "WAIT") -ForegroundColor Yellow -NoNewline
+        Write-Host " ] $($steps[$i])" -ForegroundColor White
     }
 
-    # Отрисовка начальных шагов
-    for($i=0; $i -lt $steps.Count; $i++) { Update-ProxyStep $i "WAIT" "Yellow" }
+    function Update-ProxyStep($idx, $status, $color) {
+        $prevX = [Console]::CursorLeft
+        $prevY = [Console]::CursorTop
+        # 11 - это строка, где начинаются шаги (с учетом заголовков выше)
+        [Console]::SetCursorPosition(4, 12 + $idx)
+        Write-Host (Get-PaddedCenter $status) -ForegroundColor $color
+        [Console]::SetCursorPosition($prevX, $prevY)
+    }
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $success = $false
-    $latency = 0
-    $errorMessage = ""
+    $errDetail = "Неизвестная ошибка"
 
     try {
-        # Шаг 1: Соединение
+        # Шаг 1: TCP Connect
         $tcp = New-Object System.Net.Sockets.TcpClient
         $asyn = $tcp.BeginConnect($global:ProxyConfig.Host, $global:ProxyConfig.Port, $null, $null)
-        if (-not $asyn.AsyncWaitHandle.WaitOne(3000)) { throw "Host Unreachable" }
+        if (-not $asyn.AsyncWaitHandle.WaitOne(3000)) { 
+            Update-ProxyStep 0 "FAIL" "Red"
+            throw "Прокси-сервер не отвечает (Timeout)" 
+        }
         $tcp.EndConnect($asyn)
         Update-ProxyStep 0 " OK " "Green"
 
-        # Шаг 2 & 3: Прокси-рукопожатие
-        $conn = Connect-ThroughProxy "google.com" 80 $global:ProxyConfig
+        # Шаг 2 & 3: Handshake через существующую функцию
+        Update-ProxyStep 1 "WAIT" "Yellow"
+        $conn = Connect-ThroughProxy "google.com" 80 $global:ProxyConfig 4000
         Update-ProxyStep 1 " OK " "Green"
         Update-ProxyStep 2 " OK " "Green"
 
-        # Шаг 4: Запрос
+        # Шаг 4: HTTP Request
+        Update-ProxyStep 3 "WAIT" "Yellow"
         $req = [Text.Encoding]::ASCII.GetBytes("HEAD / HTTP/1.1`r`nHost: google.com`r`nConnection: close`r`n`r`n")
         $conn.Stream.Write($req, 0, $req.Length)
         
         $buf = New-Object byte[] 128
-        $read = $conn.Stream.Read($buf, 0, 128)
-        if ($read -gt 0) {
+        if ($conn.Stream.Read($buf, 0, 128) -gt 0) {
             $latency = $sw.ElapsedMilliseconds
             Update-ProxyStep 3 " OK " "Green"
             $success = $true
-        } else { throw "No Response" }
+        } else { throw "Сервер Google не ответил через прокси" }
 
         $conn.Tcp.Close()
     } catch {
-        $errorMessage = $_.Exception.Message
-        if ($errorMessage.Length -gt 50) { $errorMessage = $errorMessage.Substring(0, 47) + "..." }
-        Write-DebugLog "Test-Proxy Error: $($errorMessage)"
+        $errDetail = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+        Write-DebugLog "Proxy Test Error: $errDetail"
     }
 
-    # Итог
-    [Console]::SetCursorPosition(0, 16)
+    # Итоговый блок
+    [Console]::SetCursorPosition(0, 17)
     Write-Host " $dash" -ForegroundColor Gray
     if ($success) {
-        Write-Host "  СТАТУС:    " -NoNewline -ForegroundColor White
-        Write-Host "РАБОТАЕТ" -ForegroundColor Green
+        Write-Host "  РЕЗУЛЬТАТ: " -NoNewline -ForegroundColor White
+        Write-Host "ПРОКСИ РАБОТАЕТ" -ForegroundColor Green
         Write-Host "  ЗАДЕРЖКА:  " -NoNewline -ForegroundColor White
         Write-Host "$($latency) ms" -ForegroundColor Cyan
     } else {
-        Write-Host "  СТАТУС:    " -NoNewline -ForegroundColor White
-        Write-Host "ОШИБКА" -ForegroundColor Red
+        Write-Host "  РЕЗУЛЬТАТ: " -NoNewline -ForegroundColor White
+        Write-Host "ОШИБКА СОЕДИНЕНИЯ" -ForegroundColor Red
+        # Обрезаем слишком длинные ошибки
+        if ($errDetail.Length -gt $w - 15) { $errDetail = $errDetail.Substring(0, $w - 18) + "..." }
         Write-Host "  ДЕТАЛИ:    " -NoNewline -ForegroundColor White
-        Write-Host $errorMessage -ForegroundColor Gray
+        Write-Host $errDetail -ForegroundColor Gray
     }
     Write-Host " $line" -ForegroundColor Gray
 
@@ -1655,13 +1569,6 @@ function Test-ProxyConnection {
     Clear-KeyBuffer
     $null = [Console]::ReadKey($true)
 }
-
-# Вспомогательная функция для центрирования (если её нет в контексте)
-function Get-PaddedCenter($text, $width) {
-    $pad = [math]::Max(0, [math]::Floor(($width - $text.Length) / 2))
-    return (" " * $pad) + $text
-}
-
 
 # Универсальная функция для отрисовки блока
 function Draw-Block {
@@ -1846,12 +1753,6 @@ function Show-HelpMenu {
     
     try { [Console]::BufferHeight = $oldBufH } catch {}
 }
-
-# Переопределяем вызов метода для удобства (т.к. расширения в PS работают через [StringExtensions]::PadBoth)
-function Pad-Both($str, $len) { return [StringExtensions]::PadBoth($str, $len) }
-# В функции выше я использовал .PadBoth для краткости, если не сработает - замени на [StringExtensions]::PadBoth(...)
-
-
 
 # ====================================================================================
 # РАБОЧИЙ ПОТОК
@@ -2041,7 +1942,6 @@ $Worker = {
 # АСИНХРОННОЕ СКАНИРОВАНИЕ
 # ====================================================================================
 function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
-    $globalScanSw = [System.Diagnostics.Stopwatch]::StartNew()
     Write-DebugLog "Start-ScanWithAnimation: Режим Ultra-Smooth Waterfall..."
     
     $cpuCount = [Environment]::ProcessorCount
@@ -2058,7 +1958,6 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
     $waveChars = @("─     ", "──    ", "───   ", "────  ", "───── ", "──────", "───── ", "────  ", "───   ", "──    ")
     
     for ($i=0; $i -lt $Targets.Count; $i++) {
-        # Найди строку создания PS объекта и добавь аргумент $script:NetInfo в конец:
         $ps = [PowerShell]::Create().AddScript($Worker).AddArgument($Targets[$i]).AddArgument($ProxyConfig).AddArgument($Tls13Supported).AddArgument($CONST).AddArgument($DebugLogFile).AddArgument($DEBUG_ENABLED).AddArgument($script:DnsCache).AddArgument($script:DnsCacheLock).AddArgument($script:NetInfo)
         $ps.RunspacePool = $pool
         $jobs += [PSCustomObject]@{
@@ -2114,11 +2013,6 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
                 Write-ResultLine $j.Row $res
                 $j.Revealed = $true
                 
-                # Статистика
-                $v = [string]$res.Verdict
-                if ($v -match "AVAILABLE") { $script:Stats.Clean++ }
-                elseif ($v -match "BLOCK") { $script:Stats.Blocked++ }
-                if ($res.T12 -eq "RST" -or $res.T13 -eq "RST") { $script:Stats.Rst++ }
             } 
             else {
                 # Формируем ОДНУ строку для всей правой части таблицы (LAT + VERDICT)
@@ -2141,8 +2035,8 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
         # Выход, если всё раскрыто
         if ($revealIndex -eq ($Targets.Count - 1)) { break }
 
-        # Тайминг кадра (для стабильных 15-20 FPS)
-        Start-Sleep -Milliseconds 55
+        # Тайминг кадра
+        Start-Sleep -Milliseconds 30
     }
     
     $pool.Close(); $pool.Dispose()
@@ -2474,10 +2368,16 @@ while ($true) {
         }
 
         # Обработка Enter
-            if ($k -eq "Enter") {
+        if ($k -eq "Enter") {
             Write-DebugLog "Запуск сканирования по Enter"
             
-            $script:Stats.Clean = 0; $script:Stats.Blocked = 0; $script:Stats.Rst = 0; $script:Stats.Err = 0
+            # --- ФИКС ЗАДВАИВАНИЯ ---
+            # Стираем старый статус по старым координатам, пока Targets еще не обновились
+            $oldRow = Get-NavRow -count $script:Targets.Count
+            Out-Str 0 $oldRow (" " * [Console]::WindowWidth) "Black" "Black"
+            # ------------------------
+
+            Draw-StatusBar -Message "[ WAIT ] REFRESHING NETWORK STATE..." -Fg "Black" -Bg "Cyan"
             
             Draw-StatusBar -Message "[ WAIT ] REFRESHING NETWORK STATE..." -Fg "Black" -Bg "Cyan"
             $script:NetInfo = Get-NetworkInfo
