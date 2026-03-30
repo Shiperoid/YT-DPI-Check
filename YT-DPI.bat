@@ -168,10 +168,11 @@ function New-ConfigObject {
         LastCheckedVersion = ""
         Tls13Supported = $null
         Proxy = @{ Enabled = $false; Type = "HTTP"; Host = ""; Port = 0; User = ""; Pass = "" }
+        ProxyHistory = @()
         NetCache = @{ 
             ISP = "Loading..."; LOC = "Unknown"; DNS = "8.8.8.8"; 
             CDN = "manifest.googlevideo.com"; 
-            TimestampTicks = (Get-Date).AddDays(-1).Ticks # Храним как число
+            TimestampTicks = (Get-Date).AddDays(-1).Ticks
         }
         DnsCache = @{} 
     }
@@ -195,11 +196,18 @@ function Load-Config {
             # Безопасная проверка свежести кэша через Ticks
             $lastTicks = if ($config.NetCache.TimestampTicks) { $config.NetCache.TimestampTicks } else { 0 }
             $diff = (Get-Date).Ticks - $lastTicks
-            # 6 часов в тиках (1 тик = 100 наносекунд)
             $isStale = $diff -gt ([TimeSpan]::FromHours(6).Ticks)
             
             $config | Add-Member -MemberType NoteProperty -Name "NetCacheStale" -Value $isStale -Force
             Write-DebugLog "Конфиг загружен. Кэш устарел: $isStale" "INFO"
+            
+            # === ДОБАВЛЯЕМ МИГРАЦИЮ ===
+            if ($null -eq $config.ProxyHistory) {
+                $config | Add-Member -MemberType NoteProperty -Name "ProxyHistory" -Value @() -Force
+                Write-DebugLog "Добавлено поле ProxyHistory в конфиг" "INFO"
+            }
+            # Если в будущем появятся другие поля, добавляем их здесь
+            
             return $config
         } catch { 
             Write-DebugLog "Ошибка JSON, создаем новый: $_" "WARN"
@@ -650,7 +658,8 @@ function Trace-TcpRoute {
         [string]$Target,
         [int]$Port = 443,
         [int]$MaxHops = 15,
-        [int]$TimeoutSec = 5
+        [int]$TimeoutSec = 5,
+        [scriptblock]$onProgress = $null
     )
     Write-DebugLog "Trace-TcpRoute: $Target`:$Port, MaxHops=$MaxHops, TimeoutSec=$TimeoutSec"
 
@@ -693,7 +702,7 @@ function Trace-TcpRoute {
 
     # Комбинированный метод: ICMP traceroute + TCP probes к каждому узлу
     Write-DebugLog "Используем комбинированный метод (ICMP + TCP)"
-    return Invoke-TcpTracerouteCombined -Target $Target -Port $Port -MaxHops $MaxHops -TimeoutSec $TimeoutSec
+    return Invoke-TcpTracerouteCombined -Target $Target -Port $Port -MaxHops $MaxHops -TimeoutSec $TimeoutSec -onProgress $onProgress
 }
 
 # --- Raw sockets TCP traceroute (требует админа) ---
@@ -794,7 +803,8 @@ function Invoke-TcpTracerouteCombined {
         [string]$Target,
         [int]$Port,
         [int]$MaxHops,
-        [int]$TimeoutSec
+        [int]$TimeoutSec,
+        [scriptblock]$onProgress = $null
     )
 
     $icmpHops = @()
@@ -894,11 +904,27 @@ function Invoke-TcpTracerouteCombined {
         $targetResolved = [System.Net.Dns]::GetHostAddresses($Target) | 
                           Where-Object { $_.AddressFamily -eq 'InterNetwork' } | 
                           Select-Object -First 1 -ExpandProperty IPAddressToString
-    } catch {
-        Write-DebugLog "Не удалось разрешить целевой IP: $_"
-    }
-    
+    } catch {}
+
+    $hopIndex = 0
     foreach ($hop in $icmpHops) {
+        $hopIndex++
+        
+        # Проверка на прерывание по ESC (если передан блок обновления статуса)
+        if ($onProgress -and [Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true).Key
+            if ($key -eq "Escape") {
+                Write-DebugLog "Трассировка прервана пользователем"
+                return @()
+            }
+        }
+
+        # Обновляем прогресс, если передан callback
+        if ($onProgress) {
+            $msg = "[TRACE] Hop $($hop.Hop)/$MaxHops : $($hop.IP) - проверка TCP..."
+            & $onProgress $msg
+        }
+
         Write-DebugLog "Проверка хопа $($hop.Hop): $($hop.IP)"
         
         # 1. TCP проверка
@@ -907,6 +933,10 @@ function Invoke-TcpTracerouteCombined {
         # 2. TLS проверка (если TCP успешен)
         $tlsStatus = "N/A"
         if ($tcpResult.Status -eq "SYNACK") {
+            if ($onProgress) {
+                $msg = "[TRACE] Hop $($hop.Hop)/$MaxHops : $($hop.IP) - TCP OK, проверка TLS..."
+                & $onProgress $msg
+            }
             Write-DebugLog "  TCP OK, проверяем TLS на хопе $($hop.Hop)"
             $tlsResult = Test-TlsHandshake -TargetIp $hop.IP -Port $Port -TimeoutSec 2
             $tlsStatus = $tlsResult.Status
@@ -920,6 +950,13 @@ function Invoke-TcpTracerouteCombined {
             TlsStatus    = $tlsStatus
             RttMs        = $tcpResult.RttMs
             IsBlocking   = ($tlsStatus -eq "Timeout") -or ($tcpResult.Status -eq "RST")
+        }
+        
+        # Обновляем прогресс с результатом
+        if ($onProgress) {
+            $resultMsg = if ($tlsStatus -eq "OK") { "OK" } elseif ($tcpResult.Status -eq "SYNACK") { "TCP OK" } else { $tcpResult.Status }
+            $msg = "[TRACE] Hop $($hop.Hop)/$MaxHops : $($hop.IP) -> $resultMsg"
+            & $onProgress $msg
         }
         
         Write-DebugLog "Хоп $($hop.Hop): $($hop.IP) -> TCP: $($tcpResult.Status), TLS: $tlsStatus, RTT=$($tcpResult.RttMs) ms"
@@ -1014,10 +1051,16 @@ function Invoke-Update {
     
     if ($res -eq "LATEST") {
         Draw-StatusBar -Message "[ UPDATE ] You are already using the latest version ($scriptVersion)." -Fg "Black" -Bg "DarkGreen"
+        # Обновляем LastCheckedVersion
+        $Config.LastCheckedVersion = $scriptVersion
+        Save-Config $Config
         Start-Sleep -Seconds 2
     }
     elseif ($res -eq "DEV_VERSION") {
         Draw-StatusBar -Message "[ UPDATE ] Your version ($scriptVersion) is newer than GitHub release ($res)." -Fg "Black" -Bg "Magenta"
+        # Обновляем LastCheckedVersion, чтобы не показывать снова
+        $Config.LastCheckedVersion = $scriptVersion
+        Save-Config $Config
         Start-Sleep -Seconds 3
     }
     elseif ($null -ne $res) {
@@ -1028,6 +1071,10 @@ function Invoke-Update {
             $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.bat"
             Start-Updater $currentFile $downloadUrl
             exit
+        } else {
+            # Если отказались, запоминаем, что предложили эту версию
+            $Config.LastCheckedVersion = $res
+            Save-Config $Config
         }
     } else {
         Draw-StatusBar -Message "[ UPDATE ] Update server unreachable or API limit reached." -Fg "Black" -Bg "Red"
@@ -1761,17 +1808,28 @@ function Show-ProxyMenu {
         Write-Host "ОТКЛЮЧЕН" -ForegroundColor Red
     }
     
+    # История
+    $history = $script:Config.ProxyHistory
+    if ($history -and $history.Count -gt 0) {
+        Write-Host "`n  ИСТОРИЯ (выберите номер):" -ForegroundColor Cyan
+        for ($i = 0; $i -lt $history.Count; $i++) {
+            Write-Host "    $($i+1). $($history[$i])" -ForegroundColor Gray
+        }
+        Write-Host "    0. Очистить историю" -ForegroundColor DarkGray
+    }
+    
     # Инструкция
     Write-Host "`n $dash" -ForegroundColor Gray
     Write-Host "  ФОРМАТЫ ВВОДА:" -ForegroundColor Cyan
-    Write-Host "    * host:port                 - HTTP (автоопределение)" -ForegroundColor Gray
-    Write-Host "    * http://host:port          - HTTP явно" -ForegroundColor Gray
-    Write-Host "    * socks5://host:port        - SOCKS5 явно" -ForegroundColor Gray
-    Write-Host "    * user:pass@host:port       - с аутентификацией" -ForegroundColor Gray
-    Write-Host "    * http://user:pass@host:port - HTTP с аутентификацией" -ForegroundColor Gray
-    Write-Host "    * socks5://user:pass@host:port - SOCKS5 с аутентификацией" -ForegroundColor Gray
-    Write-Host "    * OFF / 0 / пусто           - отключить прокси" -ForegroundColor Gray
-    Write-Host "    * TEST                      - протестировать текущий прокси" -ForegroundColor Gray
+    Write-Host "    * host:port                      - HTTP (автоопределение)" -ForegroundColor Gray
+    Write-Host "    * http://host:port               - HTTP явно" -ForegroundColor Gray
+    Write-Host "    * socks5://host:port             - SOCKS5 явно" -ForegroundColor Gray
+    Write-Host "    * user:pass@host:port            - с аутентификацией" -ForegroundColor Gray
+    Write-Host "    * http://user:pass@host:port     - HTTP с аутентификацией" -ForegroundColor Gray
+    Write-Host "    * socks5://user:pass@host:port   - SOCKS5 с аутентификацией" -ForegroundColor Gray
+    Write-Host "    * OFF / 0 / пусто                - отключить прокси" -ForegroundColor Gray
+    Write-Host "    * TEST                           - протестировать текущий прокси" -ForegroundColor Gray
+    Write-Host "    * CLEAR                          - очистить историю" -ForegroundColor Gray
     
     Write-Host "`n $dash" -ForegroundColor Gray
     Write-Host "  ВВОД: " -NoNewline -ForegroundColor Yellow
@@ -1808,8 +1866,76 @@ function Show-ProxyMenu {
         return
     }
     
-    # --- ПАРСИНГ ---
-    Write-DebugLog "Show-ProxyMenu: Начинаем парсинг '$userInput'"
+    if ($userInput -eq "CLEAR" -or $userInput -eq "clear") {
+        $script:Config.ProxyHistory = @()
+        Save-Config $script:Config
+        Write-Host "`n  [OK] История прокси очищена." -ForegroundColor Green
+        Start-Sleep -Seconds 1.5
+        Show-ProxyMenu
+        return
+    }
+    
+    # Проверяем, не номер ли это из истории
+    $selectedIndex = -1
+    if ($userInput -match '^\d+$') {
+        $num = [int]$userInput
+        if ($num -ge 1 -and $num -le $history.Count) {
+            $selectedIndex = $num - 1
+            Write-DebugLog "Show-ProxyMenu: Выбран прокси из истории #$num"
+            # Распарсим строку истории
+            $historyEntry = $history[$selectedIndex]
+            # Формат: Type://[user:*****@]host:port
+            if ($historyEntry -match '^(?i)(http|socks5)://(?:([^:]+):\*\*\*\*\*@)?([^:]+):(\d+)$') {
+                $proto = $matches[1].ToUpper()
+                $user = if ($matches[2]) { $matches[2] } else { "" }
+                $proxyHost = $matches[3]   # переименовано
+                $port = [int]$matches[4]
+                $pass = ""
+                # Если есть логин, запросим пароль
+                if ($user) {
+                    Write-Host "`n  [i] Прокси с аутентификацией. Введите пароль:" -ForegroundColor Yellow
+                    [Console]::CursorVisible = $true
+                    $pass = [Console]::ReadLine()
+                    [Console]::CursorVisible = $false
+                }
+                # Сохраняем конфиг
+                $global:ProxyConfig.Enabled = $true
+                $global:ProxyConfig.Type = $proto
+                $global:ProxyConfig.Host = $proxyHost
+                $global:ProxyConfig.Port = $port
+                $global:ProxyConfig.User = $user
+                $global:ProxyConfig.Pass = $pass
+                Write-Host "`n  [WAIT] Проверка работоспособности прокси..." -ForegroundColor Yellow
+                $testResult = Test-ProxyQuick $global:ProxyConfig
+                if ($testResult.Success) {
+                    Write-Host "  [OK] Прокси работает! (задержка: $($testResult.Latency) мс)" -ForegroundColor Green
+                    Write-Host "  [OK] Тип: $($global:ProxyConfig.Type)" -ForegroundColor Green
+                    if ($user) {
+                        Write-Host "  [OK] Аутентификация настроена" -ForegroundColor Green
+                    }
+                    # Добавляем в историю (обновим, чтобы пароль в истории был скрыт, но запись может уже быть)
+                    Add-ToProxyHistory $global:ProxyConfig
+                    Save-Config $script:Config
+                    Start-Sleep -Seconds 2
+                    return
+                } else {
+                    Write-Host "  [FAIL] Прокси НЕ РАБОТАЕТ: $($testResult.Error)" -ForegroundColor Red
+                    Write-Host "  [i] Проверьте параметры." -ForegroundColor Gray
+                    Start-Sleep -Seconds 3
+                    Show-ProxyMenu
+                    return
+                }
+            } else {
+                Write-Host "`n  [FAIL] Не удалось распарсить запись истории." -ForegroundColor Red
+                Start-Sleep -Seconds 2
+                Show-ProxyMenu
+                return
+            }
+        }
+    }
+    
+    # --- ПАРСИНГ нового прокси ---
+    Write-DebugLog "Show-ProxyMenu: Начинаем парсинг нового прокси '$userInput'"
 
     $proxyType = "AUTO"
     $user = ""
@@ -1926,6 +2052,8 @@ function Show-ProxyMenu {
         if ($global:ProxyConfig.User) {
             Write-Host "  [OK] Аутентификация настроена" -ForegroundColor Green
         }
+        # Добавляем в историю
+        Add-ToProxyHistory $global:ProxyConfig
         Save-Config $script:Config
         Start-Sleep -Seconds 2
     } else {
@@ -2007,18 +2135,14 @@ function Test-ProxyQuick {
         Error = ""
     }
     
-    # Проверка, что прокси настроен
     if ([string]::IsNullOrEmpty($ProxyConfig.Host) -or $ProxyConfig.Port -le 0) {
         $result.Error = "Прокси не настроен (хост/порт пуст)"
         return $result
     }
-
+    
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        
-        # Пробуем установить туннель до тестового хоста
         $conn = Connect-ThroughProxy "google.com" 80 $ProxyConfig 5000
-        
         if ($conn) {
             $result.Latency = $sw.ElapsedMilliseconds
             $result.Success = $true
@@ -2027,11 +2151,18 @@ function Test-ProxyQuick {
             $result.Error = "Не удалось установить туннель"
         }
     } catch {
-        $result.Error = $_.Exception.Message
-        if ($result.Error -match "таймаут|timeout") {
-            $result.Error = "Таймаут подключения"
-        } elseif ($result.Error -match "отказано|refused") {
-            $result.Error = "Соединение отклонено"
+        $errMsg = $_.Exception.Message
+        Write-DebugLog "Test-ProxyQuick error: $errMsg"
+        if ($errMsg -match "таймаут|timeout") {
+            $result.Error = "Таймаут подключения (возможно, порт закрыт или прокси не отвечает)"
+        } elseif ($errMsg -match "отказано|refused") {
+            $result.Error = "Соединение отклонено (проверьте порт, возможно, прокси не работает)"
+        } elseif ($errMsg -match "аутентификация|authentication") {
+            $result.Error = "Ошибка аутентификации (неверный логин/пароль)"
+        } elseif ($errMsg -match "не удалось разрешить|unable to resolve") {
+            $result.Error = "Не удалось разрешить имя хоста прокси"
+        } else {
+            $result.Error = $errMsg
         }
     }
     
@@ -2082,6 +2213,13 @@ function Show-HelpMenu {
     
     Write-Host "   3. Если Deep Trace не работает, запустите программу от имени Администратора." -ForegroundColor Gray
 
+    Write-Host "`n [ НАСТРОЙКА ПРОКСИ ]" -ForegroundColor White
+    Write-Host "   Примеры ввода:" -ForegroundColor Gray
+    Write-Host "     127.0.0.1:1080            - HTTP (автоопределение)" -ForegroundColor DarkGray
+    Write-Host "     socks5://192.168.1.1:2080 - SOCKS5 явно" -ForegroundColor DarkGray
+    Write-Host "     user:pass@proxy.com:3128  - с аутентификацией" -ForegroundColor DarkGray
+    Write-Host "     http://user:pass@proxy.com:3128 - HTTP с аутентификацией" -ForegroundColor DarkGray
+
     # Футер
     Write-Host "`n $($line)" -ForegroundColor Gray
     Write-Host (Get-PaddedCenter "Нажмите любую клавишу, чтобы вернуться назад" $w) -ForegroundColor Gray
@@ -2091,6 +2229,29 @@ function Show-HelpMenu {
     $null = [Console]::ReadKey($true)
     
     try { [Console]::BufferHeight = $oldBufH } catch {}
+}
+
+function Add-ToProxyHistory {
+    param($ProxyConfig)
+    
+    # Формируем строку для истории (без пароля)
+    $entry = "$($ProxyConfig.Type)://"
+    if ($ProxyConfig.User) {
+        $entry += "$($ProxyConfig.User):*****@"
+    }
+    $entry += "$($ProxyConfig.Host):$($ProxyConfig.Port)"
+    
+    # Получаем текущую историю
+    $history = @($script:Config.ProxyHistory)
+    # Удаляем дубликат, если есть
+    $history = $history | Where-Object { $_ -ne $entry }
+    # Добавляем в начало
+    $history = @($entry) + $history
+    # Обрезаем до 5
+    if ($history.Count -gt 5) { $history = $history[0..4] }
+    $script:Config.ProxyHistory = $history
+    Save-Config $script:Config
+    Write-DebugLog "Proxy history updated: $entry"
 }
 
 # ====================================================================================
@@ -2565,7 +2726,23 @@ while ($true) {
                 }
                 
                 # Выполняем трассировку
-                $trace = Trace-TcpRoute -Target $target -Port 443 -MaxHops 15 -TimeoutSec 5
+                $aborted = $false
+                $trace = $null
+                $progressRow = Get-NavRow -count $script:Targets.Count
+
+                # Функция обновления статуса во время трассировки
+                $progressBlock = {
+                    param($message)
+                    # Обновляем статус-бар с сообщением
+                    Out-Str 2 $progressRow $message -Fg "White" -Bg "DarkCyan"
+                    # Дополнительно проверяем прерывание извне (флаг $aborted)
+                }
+
+                try {
+                    $trace = Trace-TcpRoute -Target $target -Port 443 -MaxHops 15 -TimeoutSec 5 -onProgress $progressBlock
+                } catch {
+                    # Обработка ошибок
+                }
                 
                 # Очищаем строку перед результатом
                 Out-Str 0 $row (" " * $width) "Black"
