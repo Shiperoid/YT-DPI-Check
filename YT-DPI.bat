@@ -39,7 +39,7 @@ function Write-DebugLog($msg, $level = "DEBUG") {
             break
         }
         catch {
-            $retries--
+            $retries -= 1
             if ($retries -eq 0) { break }
             Start-Sleep -Milliseconds 50
         }
