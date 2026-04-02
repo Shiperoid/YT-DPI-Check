@@ -1,4 +1,4 @@
-﻿# YT-DPI v2.1.4
+# YT-DPI v2.1.4
 ![GitHub Release](https://img.shields.io/badge/release-2.1.4-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)

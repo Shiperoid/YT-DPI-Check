@@ -1,4 +1,4 @@
-﻿## Initial Stable Release (v1.0.0)
+## Initial Stable Release (v1.0.0)
 
 YT-DPI Check is a lightweight diagnostic utility designed to identify YouTube connection issues caused by DPI (Deep Packet Inspection) or IP-level blocking.
 
