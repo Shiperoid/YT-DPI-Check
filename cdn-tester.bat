@@ -1,4 +1,4 @@
-﻿<# :
+<# :
 @echo off
 title Google CDN Debugger
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((Get-Content -LiteralPath '%~f0' -Encoding UTF8) -join [Environment]::NewLine)"

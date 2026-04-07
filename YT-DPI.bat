@@ -1,7 +1,7 @@
 <# :
 @echo off
 set "SCRIPT_PATH=%~f0"
-title YT-DPI v2.1.4
+title YT-DPI v2.1.5
 chcp 65001 >nul
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ([System.IO.File]::ReadAllText('%~f0', [System.Text.Encoding]::UTF8))"
 exit /b
@@ -21,7 +21,7 @@ $DebugPreference = "SilentlyContinue"
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.1.4"   # текущая версия yt-dpi
+$scriptVersion = "2.1.5"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $DEBUG_ENABLED = $false
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
@@ -39,7 +39,7 @@ function Write-DebugLog($msg, $level = "DEBUG") {
             break
         }
         catch {
-            $retries--
+            $retries -= 1
             if ($retries -eq 0) { break }
             Start-Sleep -Milliseconds 50
         }
@@ -1260,68 +1260,99 @@ function Connect-ThroughProxy {
                 $stream.WriteTimeout = $Timeout
 
                 if ($ProxyConfig.Type -eq "SOCKS5") {
-                    Write-DebugLog "SOCKS5 подключение, аутентификация..."
-                    # Методы
-                    $methods = @(0x00)
-                    if ($ProxyConfig.User -and $ProxyConfig.Pass) { $methods += 0x02 }
-                    $stream.Write([byte[]](@(0x05, $methods.Length) + $methods), 0, $methods.Length + 2)
-                    # Чтение ответа на метод
-                    $resp = New-Object byte[] 2
-                    if (-not (Read-StreamWithTimeout $stream $resp 2 $Timeout)) {
-                        throw "SOCKS5 no response to method request"
+                    Write-DebugLog "SOCKS5: начало рукопожатия"
+
+                    # === Определяем, какие методы аутентификации предложить ===
+                    $methods = @()
+                    if ($ProxyConfig.User -and $ProxyConfig.Pass) {
+                        # Если есть логин/пароль, предлагаем сначала аутентификацию по паролю (0x02), затем без аутентификации (0x00)
+                        $methods = @(0x02, 0x00)
+                    } else {
+                        # Без аутентификации предлагаем только 0x00
+                        $methods = @(0x00)
                     }
-                    if ($resp[1] -eq 0x02) {
-                        # Аутентификация
+                    $greeting = [byte[]](@(0x05, $methods.Count) + $methods)
+                    $stream.Write($greeting, 0, $greeting.Length)
+
+                    # Читаем ответ сервера (2 байта: VER, METHOD)
+                    $resp = New-Object byte[] 2
+                    if ($stream.Read($resp, 0, 2) -ne 2) {
+                        throw "SOCKS5: нет ответа на выбор метода"
+                    }
+                    if ($resp[0] -ne 0x05) {
+                        throw "SOCKS5: неверная версия ответа (ожидалась 0x05, получена 0x$('{0:X2}' -f $resp[0]))"
+                    }
+
+                    $method = $resp[1]
+                    Write-DebugLog "SOCKS5: сервер выбрал метод аутентификации 0x$('{0:X2}' -f $method)"
+
+                    # === Обработка выбранного метода ===
+                    if ($method -eq 0x00) {
+                        # Без аутентификации — ничего не делаем
+                        Write-DebugLog "SOCKS5: аутентификация не требуется"
+                    }
+                    elseif ($method -eq 0x02) {
+                        # Аутентификация по логину/паролю
+                        if (-not $ProxyConfig.User -or -not $ProxyConfig.Pass) {
+                            throw "SOCKS5: сервер требует логин/пароль, но они не указаны в настройках"
+                        }
                         $u = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.User)
                         $p = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.Pass)
-                        $auth = [byte[]](@(0x01, $u.Length) + $u + @($p.Length) + $p)
-                        $stream.Write($auth, 0, $auth.Length)
-                        $resp = New-Object byte[] 2
-                        if (-not (Read-StreamWithTimeout $stream $resp 2 $Timeout) -or $resp[1] -ne 0x00) {
-                            throw "SOCKS5 authentication failed"
+                        $authMsg = [byte[]](@(0x01, $u.Length) + $u + @($p.Length) + $p)
+                        $stream.Write($authMsg, 0, $authMsg.Length)
+
+                        $authResp = New-Object byte[] 2
+                        if ($stream.Read($authResp, 0, 2) -ne 2) {
+                            throw "SOCKS5: нет ответа на аутентификацию"
                         }
-                    }
-                    # Запрос на маршрутизацию
-                    $ipObj = $null
-                    if ([System.Net.IPAddress]::TryParse($TargetHost, [ref]$ipObj)) {
-                        if ($ipObj.AddressFamily -eq 'InterNetworkV6') {
-                            $req = [byte[]](@(0x05, 0x01, 0x00, 0x04) + $ipObj.GetAddressBytes())
-                        } else {
-                            $req = [byte[]](@(0x05, 0x01, 0x00, 0x01) + $ipObj.GetAddressBytes())
+                        if ($authResp[0] -ne 0x01 -or $authResp[1] -ne 0x00) {
+                            throw "SOCKS5: неверный логин/пароль (код $($authResp[1]))"
                         }
-                    } else {
-                        $h = [Text.Encoding]::UTF8.GetBytes($TargetHost)
-                        $req = [byte[]](@(0x05, 0x01, 0x00, 0x03, $h.Length) + $h)
+                        Write-DebugLog "SOCKS5: аутентификация успешна"
                     }
-                    $req += [byte[]](@([math]::Floor($TargetPort/256), ($TargetPort%256)))
+                    elseif ($method -eq 0xFF) {
+                        throw "SOCKS5: сервер отверг все предложенные методы аутентификации (0xFF). Проверьте, требуется ли аутентификация."
+                    }
+                    else {
+                        throw "SOCKS5: сервер выбрал неподдерживаемый метод аутентификации 0x$('{0:X2}' -f $method)"
+                    }
+
+                    # === Запрос на подключение к целевому хосту ===
+                    $addrType = 0x03   # domain name
+                    $hostBytes = [Text.Encoding]::UTF8.GetBytes($TargetHost)
+                    $req = [byte[]](@(0x05, 0x01, 0x00, $addrType, $hostBytes.Length) + $hostBytes + @([math]::Floor($TargetPort/256), ($TargetPort%256)))
                     $stream.Write($req, 0, $req.Length)
-                    # Чтение ответа (минимум 4 байта)
-                    $buf = New-Object byte[] 10
-                    $read = Read-StreamWithTimeout $stream $buf 10 $Timeout
-                    if (-not $read -or $read -lt 4 -or $buf[1] -ne 0x00) {
-                        throw "SOCKS5 route failed"
+
+                    # Читаем ответ (минимум 10 байт)
+                    $resp = New-Object byte[] 10
+                    $read = 0
+                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                    while ($read -lt 10 -and $sw.ElapsedMilliseconds -lt $Timeout) {
+                        if ($stream.DataAvailable) {
+                            $r = $stream.Read($resp, $read, 10 - $read)
+                            if ($r -eq 0) { break }
+                            $read += $r
+                        } else { Start-Sleep -Milliseconds 20 }
                     }
-                    Write-DebugLog "SOCKS5 маршрутизация успешна"
+                    if ($read -lt 10) { throw "SOCKS5: неполный ответ на запрос подключения" }
+                    if ($resp[0] -ne 0x05) { throw "SOCKS5: неверная версия в ответе на подключение" }
+                    if ($resp[1] -ne 0x00) {
+                        $repCode = $resp[1]
+                        $errorMap = @{
+                            0x01 = "general failure"
+                            0x02 = "connection not allowed"
+                            0x03 = "network unreachable"
+                            0x04 = "host unreachable"
+                            0x05 = "connection refused"
+                            0x06 = "TTL expired"
+                            0x07 = "command not supported"
+                            0x08 = "address type not supported"
+                        }
+                        $errText = if ($errorMap.ContainsKey($repCode)) { $errorMap[$repCode] } else { "unknown error 0x$('{0:X2}' -f $repCode)" }
+                        throw "SOCKS5: сервер вернул ошибку - $errText"
+                    }
+                    Write-DebugLog "SOCKS5: маршрут установлен успешно"
                     return @{ Tcp = $tcp; Stream = $stream }
-                }
-                else {
-                    Write-DebugLog "HTTP CONNECT запрос"
-                    $auth = ""
-                    if ($ProxyConfig.User -and $ProxyConfig.Pass) {
-                        $auth = "Proxy-Authorization: Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($ProxyConfig.User):$($ProxyConfig.Pass)")) + "`r`n"
-                    }
-                    $hostHeader = if ($TargetHost -match ':') { "[$TargetHost]" } else { $TargetHost }
-                    $req = "CONNECT $hostHeader`:$TargetPort HTTP/1.1`r`nHost: $hostHeader`:$TargetPort`r`n${auth}Proxy-Connection: Keep-Alive`r`n`r`n"
-                    $reqBytes = [Text.Encoding]::ASCII.GetBytes($req)
-                    $stream.Write($reqBytes, 0, $reqBytes.Length)
-                    # Читаем ответ до \r\n\r\n
-                    $response = Read-HttpResponse $stream $Timeout
-                    if ($response -match "HTTP/1.[01]\s+200") {
-                        Write-DebugLog "HTTP CONNECT успешен"
-                        return @{ Tcp = $tcp; Stream = $stream }
-                    } else {
-                        throw "HTTP proxy refused: $response"
-                    }
                 }
             } catch {
                 $lastError = $_
@@ -2270,7 +2301,6 @@ $Worker = {
     # --- ВНУТРЕННИЕ ФУНКЦИИ ---
     function Connect-ThroughProxy {
         param($TargetHost, $TargetPort, $ProxyConfig, [int]$Timeout = $CONST.ProxyTimeout)
-        # Проверка корректности конфигурации прокси
         if ([string]::IsNullOrEmpty($ProxyConfig.Host) -or $ProxyConfig.Port -le 0) {
             throw "Некорректная конфигурация прокси: хост='$($ProxyConfig.Host)', порт=$($ProxyConfig.Port)"
         }
@@ -2281,31 +2311,106 @@ $Worker = {
             if (-not $asyn.AsyncWaitHandle.WaitOne($Timeout)) { throw "Таймаут подключения к прокси" }
             $tcp.EndConnect($asyn); $stream = $tcp.GetStream()
             $stream.ReadTimeout = $Timeout; $stream.WriteTimeout = $Timeout
-            
+
             if ($ProxyConfig.Type -eq "SOCKS5") {
-                $stream.Write([byte[]]@(0x05, 0x01, 0x00), 0, 3)
-                $resp = New-Object byte[] 2; [void]$stream.Read($resp, 0, 2)
-                $h = [Text.Encoding]::UTF8.GetBytes($TargetHost)
-                $req = [byte[]](@(0x05, 0x01, 0x00, 0x03, $h.Length) + $h + @([math]::Floor($TargetPort/256), ($TargetPort%256)))
-                $stream.Write($req, 0, $req.Length)
-                $buf = New-Object byte[] 10; [void]$stream.Read($buf, 0, 10)
-                Write-DebugLog "SOCKS5: Маршрут установлен."
-                return @{ Tcp = $tcp; Stream = $stream }
-            } else {
-                $auth = if ($ProxyConfig.User) { "Proxy-Authorization: Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($ProxyConfig.User):$($ProxyConfig.Pass)")) + "`r`n" } else { "" }
-                $req = "CONNECT $($TargetHost):$($TargetPort) HTTP/1.1`r`nHost: $($TargetHost):$($TargetPort)`r`n$($auth)`r`n"
-                $reqB = [Text.Encoding]::ASCII.GetBytes($req); $stream.Write($reqB, 0, $reqB.Length)
-                $buf = New-Object byte[] 1024; $r = $stream.Read($buf, 0, 1024)
-                if ([Text.Encoding]::ASCII.GetString($buf, 0, $r) -match "200") {
-                    Write-DebugLog "HTTP Proxy: CONNECT успешен."
-                    return @{ Tcp = $tcp; Stream = $stream }
+                Write-DebugLog "SOCKS5: начало рукопожатия"
+
+                # === Определяем, какие методы аутентификации предложить ===
+                $methods = @()
+                if ($ProxyConfig.User -and $ProxyConfig.Pass) {
+                    # Если есть логин/пароль, предлагаем сначала аутентификацию по паролю (0x02), затем без аутентификации (0x00)
+                    $methods = @(0x02, 0x00)
+                } else {
+                    # Без аутентификации предлагаем только 0x00
+                    $methods = @(0x00)
                 }
-                throw "Прокси отказал (CONNECT failed)"
+                $greeting = [byte[]](@(0x05, $methods.Count) + $methods)
+                $stream.Write($greeting, 0, $greeting.Length)
+
+                # Читаем ответ сервера (2 байта: VER, METHOD)
+                $resp = New-Object byte[] 2
+                if ($stream.Read($resp, 0, 2) -ne 2) {
+                    throw "SOCKS5: нет ответа на выбор метода"
+                }
+                if ($resp[0] -ne 0x05) {
+                    throw "SOCKS5: неверная версия ответа (ожидалась 0x05, получена 0x$('{0:X2}' -f $resp[0]))"
+                }
+
+                $method = $resp[1]
+                Write-DebugLog "SOCKS5: сервер выбрал метод аутентификации 0x$('{0:X2}' -f $method)"
+
+                # === Обработка выбранного метода ===
+                if ($method -eq 0x00) {
+                    # Без аутентификации — ничего не делаем
+                    Write-DebugLog "SOCKS5: аутентификация не требуется"
+                }
+                elseif ($method -eq 0x02) {
+                    # Аутентификация по логину/паролю
+                    if (-not $ProxyConfig.User -or -not $ProxyConfig.Pass) {
+                        throw "SOCKS5: сервер требует логин/пароль, но они не указаны в настройках"
+                    }
+                    $u = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.User)
+                    $p = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.Pass)
+                    $authMsg = [byte[]](@(0x01, $u.Length) + $u + @($p.Length) + $p)
+                    $stream.Write($authMsg, 0, $authMsg.Length)
+
+                    $authResp = New-Object byte[] 2
+                    if ($stream.Read($authResp, 0, 2) -ne 2) {
+                        throw "SOCKS5: нет ответа на аутентификацию"
+                    }
+                    if ($authResp[0] -ne 0x01 -or $authResp[1] -ne 0x00) {
+                        throw "SOCKS5: неверный логин/пароль (код $($authResp[1]))"
+                    }
+                    Write-DebugLog "SOCKS5: аутентификация успешна"
+                }
+                elseif ($method -eq 0xFF) {
+                    throw "SOCKS5: сервер отверг все предложенные методы аутентификации (0xFF). Проверьте, требуется ли аутентификация."
+                }
+                else {
+                    throw "SOCKS5: сервер выбрал неподдерживаемый метод аутентификации 0x$('{0:X2}' -f $method)"
+                }
+
+                # === Запрос на подключение к целевому хосту ===
+                $addrType = 0x03   # domain name
+                $hostBytes = [Text.Encoding]::UTF8.GetBytes($TargetHost)
+                $req = [byte[]](@(0x05, 0x01, 0x00, $addrType, $hostBytes.Length) + $hostBytes + @([math]::Floor($TargetPort/256), ($TargetPort%256)))
+                $stream.Write($req, 0, $req.Length)
+
+                # Читаем ответ (минимум 10 байт)
+                $resp = New-Object byte[] 10
+                $read = 0
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                while ($read -lt 10 -and $sw.ElapsedMilliseconds -lt $Timeout) {
+                    if ($stream.DataAvailable) {
+                        $r = $stream.Read($resp, $read, 10 - $read)
+                        if ($r -eq 0) { break }
+                        $read += $r
+                    } else { Start-Sleep -Milliseconds 20 }
+                }
+                if ($read -lt 10) { throw "SOCKS5: неполный ответ на запрос подключения" }
+                if ($resp[0] -ne 0x05) { throw "SOCKS5: неверная версия в ответе на подключение" }
+                if ($resp[1] -ne 0x00) {
+                    $repCode = $resp[1]
+                    $errorMap = @{
+                        0x01 = "general failure"
+                        0x02 = "connection not allowed"
+                        0x03 = "network unreachable"
+                        0x04 = "host unreachable"
+                        0x05 = "connection refused"
+                        0x06 = "TTL expired"
+                        0x07 = "command not supported"
+                        0x08 = "address type not supported"
+                    }
+                    $errText = if ($errorMap.ContainsKey($repCode)) { $errorMap[$repCode] } else { "unknown error 0x$('{0:X2}' -f $repCode)" }
+                    throw "SOCKS5: сервер вернул ошибку - $errText"
+                }
+                Write-DebugLog "SOCKS5: маршрут установлен успешно"
+                return @{ Tcp = $tcp; Stream = $stream }
             }
-        } catch { 
+        } catch {
             if($tcp){$tcp.Close()}
             Write-DebugLog "Ошибка прокси: $($_.Exception.Message)" "WARN"
-            throw $_ 
+            throw $_
         }
     }
 
@@ -2319,7 +2424,7 @@ $Worker = {
         $ipStr = $null
         try {
             if ($DnsCacheLock.WaitOne(1000)) {
-                if ($DnsCache.ContainsKey($Target)) { 
+                if ($DnsCache.ContainsKey($Target)) {
                     $ipStr = $DnsCache[$Target]
                     Write-DebugLog "DNS: Кэш HIT -> $($ipStr)"
                 }
@@ -2330,22 +2435,22 @@ $Worker = {
                 $ips = [System.Net.Dns]::GetHostAddresses($Target)
                 $v6 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetworkV6' } | Select-Object -First 1
                 $v4 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
-                if ($v6 -and $NetInfo.HasIPv6) { 
+                if ($v6 -and $NetInfo.HasIPv6) {
                     $ipStr = $v6.IPAddressToString
                     Write-DebugLog "DNS: Выбран IPv6 -> $($ipStr)"
-                } else { 
-                    $ipStr = $v4.IPAddressToString 
+                } else {
+                    $ipStr = $v4.IPAddressToString
                     Write-DebugLog "DNS: Выбран IPv4 -> $($ipStr)"
                 }
                 if ($DnsCacheLock.WaitOne(1000)) { $DnsCache[$Target] = $ipStr; [void]$DnsCacheLock.ReleaseMutex() }
             }
-        } catch { 
+        } catch {
             $ipStr = "DNS_ERR"
             Write-DebugLog "DNS: Ошибка - $($_.Exception.Message)" "ERROR"
         }
         $Result.IP = $ipStr
         if ($ipStr -eq "DNS_ERR") { $Result.Verdict = "DNS FAIL"; $Result.Color = "Red"; return $Result }
-    } else { 
+    } else {
         $Result.IP = "[ PROXIED ]"
         Write-DebugLog "DNS: Пропущен (Proxy Mode)."
     }
@@ -2365,27 +2470,26 @@ $Worker = {
         $Result.Lat = "$($sw.ElapsedMilliseconds)ms"
         $Result.HTTP = "OK"
         Write-DebugLog "HTTP: OK (Ping: $($Result.Lat))"
-    } catch { 
+    } catch {
         $Result.HTTP = "ERR"
         Write-DebugLog "HTTP: Ошибка -> $($_.Exception.Message)" "WARN"
     } finally { if ($conn) { $conn.Tcp.Close() } }
 
     # 3. TLS Проверки (ПОСЛЕДОВАТЕЛЬНО)
-    $tlsTO = 3500  #3500 для стабильности
+    $tlsTO = 3500
     foreach ($ver in @("T12", "T13")) {
-        if ($ver -eq "T13" -and -not $CanTls13) { 
+        if ($ver -eq "T13" -and -not $CanTls13) {
             $Result.T13 = "N/A"
             Write-DebugLog "TLS 1.3: Пропуск (не поддерживается ОС)."
-            continue 
+            continue
         }
-        
+
         Write-DebugLog "TLS $($ver): Запуск хендшейка..."
         $conn = $null
         $ssl = $null
         try {
-            # 3.1. Установление TCP соединения
-            if ($ProxyConfig.Enabled) { 
-                $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $tlsTO 
+            if ($ProxyConfig.Enabled) {
+                $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $tlsTO
             } else {
                 $tcp = New-Object System.Net.Sockets.TcpClient
                 $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
@@ -2394,54 +2498,62 @@ $Worker = {
                 $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
             }
 
-            # 3.2. Инициализация SSL (БЕЗ колбэка, чтобы избежать ошибки Runspace на Win7)
             $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
             $proto = if ($ver -eq "T12") { [System.Security.Authentication.SslProtocols]::Tls12 } else { 12288 }
-            
-            # 3.3. Запуск аутентификации
+
             $authAr = $ssl.BeginAuthenticateAsClient($Target, $null, $proto, $false, $null, $null)
             if ($authAr.AsyncWaitHandle.WaitOne($tlsTO)) {
                 $ssl.EndAuthenticateAsClient($authAr)
                 if ($ver -eq "T12") { $Result.T12 = "OK" } else { $Result.T13 = "OK" }
                 Write-DebugLog "TLS $($ver): УСПЕШНО"
-            } else { 
-                # Если рукопожатие зависло - это "тихий" дроп пакетов (DPI)
+            } else {
                 if ($ver -eq "T12") { $Result.T12 = "DRP" } else { $Result.T13 = "DRP" }
                 Write-DebugLog "TLS $($ver): ТАЙМАУТ (DROPPED)" "WARN"
             }
         } catch {
-            # 3.4. Анализ исключений
             $m = $_.Exception.Message + $_.Exception.InnerException.Message
             Write-DebugLog "TLS $($ver): Перехвачено исключение -> $($m)"
-            
+
+            # Классификация результата TLS
             if ($m -match "reset|сброс|forcibly|closed|разорвано") {
-                # Если получили жесткий обрыв связи
                 $res = "RST"
-            } else {
-                # Ошибки сертификатов, Runspace и прочие возникают только ПРИ ОТВЕТЕ сервера.
-                # Это значит, что пакеты прошли фильтр SNI. Статус - OK.
+            } elseif ($m -match "certificate|сертификат|remote|authentic|success|handshake|ssl|policy|chain") {
                 $res = "OK"
+            } elseif ($m -match "timeout|timed|тайм") {
+                $res = "DRP"
+            } else {
+                $res = "ERR"
             }
-            
+
             if ($ver -eq "T12") { $Result.T12 = $res } else { $Result.T13 = $res }
             Write-DebugLog "TLS $($ver): Финал (через catch) -> $($res)"
         } finally {
-            # Обязательная очистка ресурсов
             if ($ssl) { $ssl.Close() }
             if ($conn) { $conn.Tcp.Close() }
         }
     }
 
     # 4. Вердикт
-    if ($Result.T12 -eq "OK" -or $Result.T13 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
-    elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
-    elseif ($Result.HTTP -eq "OK") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Yellow" }
-    else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
+    if ($Result.T12 -eq "OK" -or $Result.T13 -eq "OK") {
+        $Result.Verdict = "AVAILABLE"
+        $Result.Color = "Green"
+    }
+    elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
+        $Result.Verdict = "DPI RESET"
+        $Result.Color = "Red"
+    }
+    elseif ($Result.HTTP -eq "OK") {
+        $Result.Verdict = "DPI BLOCK"
+        $Result.Color = "Yellow"
+    }
+    else {
+        $Result.Verdict = "IP BLOCK"
+        $Result.Color = "Red"
+    }
 
     Write-DebugLog "--- ЗАВЕРШЕНО: $($Result.Verdict) ---"
     return $Result
 }
-
 # ====================================================================================
 # АСИНХРОННОЕ СКАНИРОВАНИЕ
 # ====================================================================================
@@ -2902,7 +3014,25 @@ while ($true) {
             Out-Str 0 $oldRow (" " * [Console]::WindowWidth) "Black" "Black"
             # ------------------------
 
+            # Быстрая проверка интернета
+            $internetAvailable = $false
+            try {
+                $tcpTest = New-Object System.Net.Sockets.TcpClient
+                $async = $tcpTest.BeginConnect("8.8.8.8", 53, $null, $null)
+                if ($async.AsyncWaitHandle.WaitOne(2000)) {
+                    $tcpTest.EndConnect($async)
+                    $internetAvailable = $true
+                }
+                $tcpTest.Close()
+            } catch {}
 
+            if (-not $internetAvailable) {
+                Draw-StatusBar -Message "[ ERROR ] NO INTERNET CONNECTION DETECTED. CHECK YOUR NETWORK." -Fg "Black" -Bg "Red"
+                Start-Sleep -Seconds 3
+                Draw-StatusBar
+                Clear-KeyBuffer
+                continue
+            }
             
             Draw-StatusBar -Message "[ WAIT ] REFRESHING NETWORK STATE..." -Fg "Black" -Bg "Cyan"
             $script:NetInfo = Get-NetworkInfo
