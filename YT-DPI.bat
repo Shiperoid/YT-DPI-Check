@@ -1,7 +1,7 @@
 <# :
 @echo off
 set "SCRIPT_PATH=%~f0"
-title YT-DPI v2.1.5
+title YT-DPI v2.1.6
 chcp 65001 >nul
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ([System.IO.File]::ReadAllText('%~f0', [System.Text.Encoding]::UTF8))"
 exit /b
@@ -21,7 +21,7 @@ $DebugPreference = "SilentlyContinue"
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.1.5"   # текущая версия yt-dpi
+$scriptVersion = "2.1.6"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $DEBUG_ENABLED = $false
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
@@ -199,6 +199,21 @@ function Load-Config {
             $isStale = $diff -gt ([TimeSpan]::FromHours(6).Ticks)
             
             $config | Add-Member -MemberType NoteProperty -Name "NetCacheStale" -Value $isStale -Force
+            # Принудительно очищаем IPv6 из кэша, если IPv6 не работает
+    if ($config.NetCache.HasIPv6 -eq $false -and $config.DnsCache) {
+        Write-DebugLog "IPv6 отключён, удаляем IPv6-записи из DNS-кэша" "INFO"
+        $newCache = @{}
+        foreach ($key in $config.DnsCache.PSObject.Properties) {
+            $value = $key.Value
+            # Если значение похоже на IPv6 (содержит ':'), пропускаем
+            if ($value -match ':') {
+                Write-DebugLog "Удаляем IPv6 запись: $key = $value" "DEBUG"
+                continue
+            }
+            $newCache[$key.Name] = $value
+        }
+        $config.DnsCache = $newCache
+    }
             Write-DebugLog "Конфиг загружен. Кэш устарел: $isStale" "INFO"
             
             # === ДОБАВЛЯЕМ МИГРАЦИЮ ===
@@ -1500,30 +1515,23 @@ function Get-NetworkInfo {
         if ($i -eq 1) { Start-Sleep -Milliseconds 500 }
     }
 
-    # 4. Проверяем наличие IPv6 интернета
-        # Внутри Get-NetworkInfo:
-    $hasV6 = $false
-    try {
-        # Используем .NET класс, который работает везде от XP до Win11
-        $interfaces = [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()
-        foreach ($int in $interfaces) {
-            if ($int.OperationalStatus -eq 'Up') {
-                $props = $int.GetIPProperties()
-                foreach ($addr in $props.UnicastAddresses) {
-                    # Ищем глобальный IPv6 (не fe80 и не петлю)
-                    if ($addr.Address.AddressFamily -eq 'InterNetworkV6' -and 
-                        -not $addr.Address.IsIPv6LinkLocal -and 
-                        $addr.Address.ToString() -ne '::1') {
-                        $hasV6 = $true
-                        break
-                    }
-                }
-            }
-            if ($hasV6) { break }
-        }
-        if ($hasV6) { Write-DebugLog "IPv6 стек активен." "INFO" }
-    } catch { Write-DebugLog "Ошибка проверки IPv6: $_" }
-
+    # 4. Активная проверка работоспособности IPv6
+$hasV6 = $false
+try {
+    Write-DebugLog "Активная проверка IPv6 (подключение к ipv6.google.com:80)..."
+    $testTcp = New-Object System.Net.Sockets.TcpClient
+    $async = $testTcp.BeginConnect("ipv6.google.com", 80, $null, $null)
+    if ($async.AsyncWaitHandle.WaitOne(3000)) {
+        $testTcp.EndConnect($async)
+        $hasV6 = $true
+        Write-DebugLog "IPv6 РАБОТАЕТ: успешное подключение к ipv6.google.com:80" "INFO"
+    } else {
+        Write-DebugLog "IPv6 НЕ РАБОТАЕТ: таймаут подключения к ipv6.google.com:80" "WARN"
+    }
+    $testTcp.Close()
+} catch {
+    Write-DebugLog "IPv6 НЕ РАБОТАЕТ: $_" "WARN"
+}
     # 5. ФОРМИРУЕМ ЕДИНЫЙ ОБЪЕКТ И ВОЗВРАЩАЕМ ЕГО
     $info = @{ 
         DNS            = $dns
@@ -2419,9 +2427,44 @@ $Worker = {
 
     Write-DebugLog "--- НАЧАЛО ПРОВЕРКИ ---"
 
-    # 1. DNS
+    function Invoke-TcpConnectWithFallback {
+    param($TargetIp, $TargetPort, $TimeoutMs, $IsProxy = $false)
+    $tcp = $null
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $async = $tcp.BeginConnect($TargetIp, $TargetPort, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "Timeout" }
+        $tcp.EndConnect($async)
+        return $tcp
+    } catch {
+        if ($_.Exception.Message -match "address family|None of the discovered") {
+            if ($usedIpv6 -and $v4Address) {
+                Write-DebugLog "Ошибка семейства адресов при использовании IPv6 ($TargetIp), переключаемся на IPv4: $v4Address"
+                # Обновляем кэш, чтобы больше не использовать этот IPv6
+                if ($DnsCacheLock.WaitOne(1000)) {
+                    $DnsCache[$Target] = $v4Address
+                    [void]$DnsCacheLock.ReleaseMutex()
+                }
+                # Повторяем попытку с IPv4
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $async = $tcp.BeginConnect($v4Address, $TargetPort, $null, $null)
+                if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "Timeout after fallback" }
+                $tcp.EndConnect($async)
+                # Обновляем Result.IP
+                $Result.IP = $v4Address
+                return $tcp
+            }
+        }
+        throw $_
+    }
+}
+
+    # 1. DNS с fallback на IPv4
+    $ipStr = $null
+    $usedIpv6 = $false
+    $v4Address = $null   # сохраним IPv4 на случай падения IPv6
+
     if (-not $ProxyConfig.Enabled) {
-        $ipStr = $null
         try {
             if ($DnsCacheLock.WaitOne(1000)) {
                 if ($DnsCache.ContainsKey($Target)) {
@@ -2435,14 +2478,23 @@ $Worker = {
                 $ips = [System.Net.Dns]::GetHostAddresses($Target)
                 $v6 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetworkV6' } | Select-Object -First 1
                 $v4 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
+                if ($v4) { $v4Address = $v4.IPAddressToString }
+                
                 if ($v6 -and $NetInfo.HasIPv6) {
                     $ipStr = $v6.IPAddressToString
+                    $usedIpv6 = $true
                     Write-DebugLog "DNS: Выбран IPv6 -> $($ipStr)"
                 } else {
-                    $ipStr = $v4.IPAddressToString
+                    $ipStr = $v4Address
                     Write-DebugLog "DNS: Выбран IPv4 -> $($ipStr)"
                 }
-                if ($DnsCacheLock.WaitOne(1000)) { $DnsCache[$Target] = $ipStr; [void]$DnsCacheLock.ReleaseMutex() }
+                if ($DnsCacheLock.WaitOne(1000)) { 
+                    $DnsCache[$Target] = $ipStr
+                    [void]$DnsCacheLock.ReleaseMutex()
+                }
+            } else {
+                # Если взяли из кэша, определим, IPv6 ли это
+                $usedIpv6 = ($ipStr -match ':')
             }
         } catch {
             $ipStr = "DNS_ERR"
@@ -2460,12 +2512,12 @@ $Worker = {
     $conn = $null
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 80 $ProxyConfig $TO }
-        else {
-            $tcp = New-Object System.Net.Sockets.TcpClient
-            $ar = $tcp.BeginConnect($Result.IP, 80, $null, $null)
-            if (-not $ar.AsyncWaitHandle.WaitOne($TO)) { throw "Таймаут" }
-            $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+        if ($ProxyConfig.Enabled) { 
+            $conn = Connect-ThroughProxy $Target 80 $ProxyConfig $TO 
+        } else {
+            # Используем новую функцию с fallback на IPv4
+            $tcp = Invoke-TcpConnectWithFallback -TargetIp $Result.IP -TargetPort 80 -TimeoutMs $TO
+            $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
         }
         $Result.Lat = "$($sw.ElapsedMilliseconds)ms"
         $Result.HTTP = "OK"
@@ -2491,10 +2543,8 @@ $Worker = {
             if ($ProxyConfig.Enabled) {
                 $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $tlsTO
             } else {
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
-                if (-not $ar.AsyncWaitHandle.WaitOne($tlsTO)) { throw "Таймаут сокета" }
-                $tcp.EndConnect($ar)
+                # Используем новую функцию с fallback на IPv4
+                $tcp = Invoke-TcpConnectWithFallback -TargetIp $Result.IP -TargetPort 443 -TimeoutMs $tlsTO
                 $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
             }
 
@@ -2657,6 +2707,23 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
     
     $pool.Close(); $pool.Dispose()
     foreach ($j in $jobs) { try { $j.PowerShell.Dispose() } catch {} }
+    # После получения $results, проверяем, не связано ли тотальное IP BLOCK с ложным IPv6
+    $allIpBlock = ($results | Where-Object { $_.Verdict -ne "IP BLOCK" -and $_.Verdict -ne "UNKNOWN" }) -eq $null
+    if ($allIpBlock -and $NetInfo.HasIPv6 -eq $true) {
+        Write-DebugLog "Все тесты дали IP BLOCK, но HasIPv6=true. Возможно, IPv6 не работает. Переключаем HasIPv6 в false." "WARN"
+        $script:NetInfo.HasIPv6 = $false
+        $script:Config.NetCache.HasIPv6 = $false
+        Save-Config $script:Config
+        # Можно также очистить кэш от IPv6
+        if ($DnsCacheLock.WaitOne(1000)) {
+            $toRemove = @()
+            foreach ($key in $DnsCache.Keys) {
+                if ($DnsCache[$key] -match ':') { $toRemove += $key }
+            }
+            foreach ($key in $toRemove) { $DnsCache.Remove($key) }
+            [void]$DnsCacheLock.ReleaseMutex()
+        }
+    }
     return [PSCustomObject]@{ Results = $results; Aborted = $aborted }
 }
 
