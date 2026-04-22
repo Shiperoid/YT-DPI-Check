@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 
-[[English](README.md)] | [[Telegram](https://t.me/YT-DPI)]
+[[English](README.md)] | [[Telegram](https://t.me/YT_DPI)]
 
 **YT-DPI** — это профессиональный диагностический фреймворк, предназначенный для детального анализа вмешательства систем DPI и ТСПУ в ваш трафик. В отличие от обычных чекеров, YT-DPI имитирует реальное поведение браузера (TLS Handshake) и проводит анализ на уровне L4, чтобы точно определить метод и место блокировки.
 
