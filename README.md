@@ -4,7 +4,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 
-[[Русский](README_ru.md)] | [[Telegram](https://t.me/YT-DPI)]
+[[Русский](README_ru.md)] | [[Telegram](https://t.me/YT_DPI)]
 
 **YT-DPI** is a professional forensic network diagnostic framework designed to dissect and identify Deep Packet Inspection (DPI) and TSPU interference. While standard tools just "ping", YT-DPI simulates browser-level TLS handshakes and performs L4-layer analysis to pinpoint exactly where and how your traffic is being manipulated.
 
