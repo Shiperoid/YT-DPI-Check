@@ -1494,406 +1494,129 @@ function Connect-ThroughProxy {
 # СЕТЕВЫЕ ФУНКЦИИ
 # ====================================================================================
 function Invoke-WebRequestViaProxy($Url, $Method = "GET", $Timeout = $CONST.TimeoutMs) {
-    Write-DebugLog "Invoke-WebRequestViaProxy: $Method $Url, ProxyEnabled=$($global:ProxyConfig.Enabled)"
+    Write-DebugLog "Invoke-WebRequestViaProxy: $Method $Url"
     $uri = [System.Uri]$Url
-    if (-not $global:ProxyConfig.Enabled -or $global:ProxyConfig.Type -in @("HTTP", "HTTPS")) {
+    
+    # Режим прямого подключения или HTTP-прокси
+    if (-not $global:ProxyConfig.Enabled -or $global:ProxyConfig.Type -eq "HTTP") {
         try {
             $req = [System.Net.WebRequest]::Create($uri)
             $req.Timeout = $Timeout
             $req.UserAgent = $script:UserAgent
-            $req.KeepAlive = $false
             if ($global:ProxyConfig.Enabled) {
                 $wp = New-Object System.Net.WebProxy($global:ProxyConfig.Host, $global:ProxyConfig.Port)
                 if ($global:ProxyConfig.User) { $wp.Credentials = New-Object System.Net.NetworkCredential($global:ProxyConfig.User, $global:ProxyConfig.Pass) }
                 $req.Proxy = $wp
             } else { $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy() }
+            
             $resp = $req.GetResponse()
             $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
             $content = $reader.ReadToEnd()
             $resp.Close()
-            Write-DebugLog "Invoke-WebRequestViaProxy успешно, длина ответа: $($content.Length)"
             return $content
-        } catch { 
-            Write-DebugLog "Invoke-WebRequestViaProxy ошибка: $_"
-            return "" 
-        }
-    } else {
-        Write-DebugLog "Invoke-WebRequestViaProxy через SOCKS"
+        } catch { return "" }
+    } 
+    # Режим SOCKS5 (Исправлено для HTTPS)
+    else {
         try {
             $conn = Connect-ThroughProxy $uri.Host $uri.Port $global:ProxyConfig $Timeout
-            $request = "$Method $($uri.PathAndQuery) HTTP/1.0`r`nHost: $($uri.Host)`r`nUser-Agent: $script:UserAgent`r`nConnection: close`r`n`r`n"
+            $stream = $conn.Stream
+
+            # --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: SSL-обертка для SOCKS ---
+            if ($uri.Scheme -eq "https") {
+                $sslStream = New-Object System.Net.Security.SslStream($stream, $false, { $true })
+                $sslStream.AuthenticateAsClient($uri.Host)
+                $stream = $sslStream
+            }
+
+            $request = "$Method $($uri.PathAndQuery) HTTP/1.1`r`nHost: $($uri.Host)`r`nUser-Agent: $script:UserAgent`r`nConnection: close`r`n`r`n"
             $reqBytes = [Text.Encoding]::ASCII.GetBytes($request)
-            $conn.Stream.Write($reqBytes, 0, $reqBytes.Length)
-            $buf = New-Object byte[] 4096
+            $stream.Write($reqBytes, 0, $reqBytes.Length)
+
+            $buf = New-Object byte[] 8192
             $respBytes = New-Object System.Collections.Generic.List[byte]
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            
             while ($sw.ElapsedMilliseconds -lt $Timeout) {
-                if ($conn.Stream.DataAvailable) {
-                    $read = $conn.Stream.Read($buf, 0, 4096)
-                    if ($read -gt 0) { for ($i=0; $i -lt $read; $i++) { $respBytes.Add($buf[$i]) } } else { break }
-                } elseif ($respBytes.Count -gt 0) { break }
-                else { Start-Sleep -Milliseconds 50 }
+                if ($conn.Tcp.Available -gt 0 -or ($uri.Scheme -eq "https" -and $true)) {
+                    try {
+                        $read = $stream.Read($buf, 0, 8192)
+                        if ($read -gt 0) { 
+                            for ($i=0; $i -lt $read; $i++) { $respBytes.Add($buf[$i]) } 
+                        } else { break }
+                    } catch { break }
+                } else { Start-Sleep -Milliseconds 50 }
             }
+            
+            $fullResponse = [Text.Encoding]::UTF8.GetString($respBytes.ToArray())
             $conn.Tcp.Close()
-            $parts = ([Text.Encoding]::UTF8.GetString($respBytes.ToArray())) -split "`r`n`r`n", 2
-            if ($parts.Length -eq 2) { 
-                Write-DebugLog "Invoke-WebRequestViaProxy (SOCKS) успешно, длина тела: $($parts[1].Length)"
-                return $parts[1] 
+            
+            # Извлекаем только тело ответа (после \r\n\r\n)
+            if ($fullResponse -match '(?s)\r\n\r\n(.*)') {
+                return $matches[1]
             }
+            return $fullResponse
         } catch {
-            Write-DebugLog "Invoke-WebRequestViaProxy (SOCKS) ошибка: $_"
+            Write-DebugLog "SOCKS WebRequest Error: $($_.Exception.Message)"
+            return ""
         }
-        return ""
     }
 }
 
 function Get-NetworkInfo {
     Write-DebugLog "Get-NetworkInfo: начало"
-    
-    # 1. Получаем DNS
     $dns = "UNKNOWN"
     try {
         $wmi = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | 
                Where-Object { $_.DNSServerSearchOrder -ne $null } | Select-Object -First 1
         if ($wmi) { $dns = $wmi.DNSServerSearchOrder[0] }
-        Write-DebugLog "DNS: $dns" "INFO"
-    } catch { Write-DebugLog "Ошибка получения DNS: $_" }
+    } catch { }
 
-    # 2. Определяем CDN узел
-    $rnd = [guid]::NewGuid().ToString().Substring(0,8)
     $cdn = "manifest.googlevideo.com"
-    $geoResponse = Invoke-WebRequestViaProxy "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd"
-    if ($geoResponse -match "=>\s+([\w-]+)") { 
-        $cdn = "r1.$($matches[1]).googlevideo.com"
-        Write-DebugLog "CDN определён: $cdn"
-    } else {
-        Write-DebugLog "CDN не определён, оставляем по умолчанию"
-    }
-
-    # 3. Получаем ISP и Локацию
     $isp = "UNKNOWN"; $loc = "UNKNOWN"
-    for ($i = 1; $i -le 2; $i++) {
-        $rawGeo = Invoke-WebRequestViaProxy "http://ip-api.com/json/?fields=status,countryCode,city,isp"
-        if ($rawGeo -match "(?s)(\{.*\})") {
+    
+    # Список провайдеров ГЕО (отсортированы по надежности через прокси)
+    $geoProviders = @(
+        @{ url = "http://ip-api.com/json/?fields=status,countryCode,city,isp"; type = "ip-api" },
+        @{ url = "https://ipapi.co/json/"; type = "ipapi-co" },
+        @{ url = "http://worldtimeapi.org/api/ip"; type = "worldtime" } # Резерв для LOC
+    )
+
+    :providerLoop foreach ($prov in $geoProviders) {
+        Write-DebugLog "Попытка ГЕО через $($prov.type)..."
+        $raw = Invoke-WebRequestViaProxy $prov.url -Timeout 5000
+        if ($raw -match '\{.*\}') {
             try {
-                $geo = $matches[1] | ConvertFrom-Json
-                if ($geo.status -eq "success") {
-                    $isp = $geo.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC)', ''
-                    if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
-                    $loc = "$($geo.city), $($geo.countryCode)"
-                    Write-DebugLog "Гео: $isp, $loc" "INFO"
-                    break
+                $data = $raw | ConvertFrom-Json
+                if ($prov.type -eq "ip-api" -and $data.status -eq "success") {
+                    $isp = $data.isp; $loc = "$($data.city), $($data.countryCode)"
                 }
-            } catch { Write-DebugLog "Ошибка парсинга гео: $_" }
+                elseif ($prov.type -eq "ipapi-co" -and $data.org) {
+                    $isp = $data.org; $loc = "$($data.city), $($data.country_code)"
+                }
+                
+                if ($isp -ne "UNKNOWN" -and $isp -ne $null) {
+                    Write-DebugLog "Гео получено ($($prov.type)): $isp" "INFO"
+                    break providerLoop
+                }
+            } catch { }
         }
-        if ($i -eq 1) { Start-Sleep -Milliseconds 500 }
     }
 
-    # 4. Активная проверка работоспособности IPv6
-$hasV6 = $false
-try {
-    Write-DebugLog "Активная проверка IPv6 (подключение к ipv6.google.com:80)..."
-    # Создаём TcpClient, явно указывая семейство IPv6
-    $testTcp = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
-    $async = $testTcp.BeginConnect("ipv6.google.com", 80, $null, $null)
-    if ($async.AsyncWaitHandle.WaitOne(3000)) {
-        $testTcp.EndConnect($async)
-        $hasV6 = $true
-        Write-DebugLog "IPv6 РАБОТАЕТ: успешное подключение к ipv6.google.com:80" "INFO"
-    } else {
-        Write-DebugLog "IPv6 НЕ РАБОТАЕТ: таймаут подключения к ipv6.google.com:80" "WARN"
-    }
-    $testTcp.Close()
-} catch {
-    Write-DebugLog "IPv6 НЕ РАБОТАЕТ: $_" "WARN"
-}
-    # 5. ФОРМИРУЕМ ЕДИНЫЙ ОБЪЕКТ И ВОЗВРАЩАЕМ ЕГО
-    $info = @{ 
-        DNS            = $dns
-        CDN            = $cdn
-        ISP            = $isp
-        LOC            = $loc
-        TimestampTicks = (Get-Date).Ticks
-        HasIPv6        = $hasV6 
-    }
-    
-    return $info
-}
+    # Очистка названия ISP
+    $isp = $isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation)', ''
+    if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
 
-function Test-ProxyConnection {
-    Write-DebugLog "Test-ProxyConnection: Запуск расширенного теста..."
-    [Console]::Clear()
-    
-    $w = [Console]::WindowWidth
-    if ($w -gt 80) { $w = 80 }
-    $line = "═" * $w
-    $dash = "─" * $w
-
-    # Заголовок
-    Write-Host "`n $line" -ForegroundColor Gray
-    Write-Host (Get-PaddedCenter "ДИАГНОСТИКА ПРОКСИ-СОЕДИНЕНИЯ" $w) -ForegroundColor Cyan
-    Write-Host " $line" -ForegroundColor Gray
-
-    if (-not $global:ProxyConfig.Enabled) {
-        Write-Host "`n  [!] ОШИБКА: Прокси не включен." -ForegroundColor Red
-        Write-Host "  Сначала настройте его кнопкой [P]." -ForegroundColor Gray
-        Start-Sleep -Seconds 3
-        return
-    }
-
-    Write-Host "`n  КОНФИГУРАЦИЯ:" -ForegroundColor White
-    Write-Host "  > АДРЕС:  $($global:ProxyConfig.Host):$($global:ProxyConfig.Port)" -ForegroundColor Gray
-    Write-Host "  > ТИП:    $($global:ProxyConfig.Type)" -ForegroundColor Gray
-    Write-Host "`n $dash" -ForegroundColor Gray
-
-    $steps = @(
-        "Подключение к прокси-хосту    ",
-        "Проверка порта и рукопожатие  ",
-        "Туннель до google.com:80      ",
-        "Получение HTTP ответа         "
-    )
-
-    # Локальная функция форматирования статуса
-    function Format-Status($s) {
-        $width = 6
-        $spaces = $width - $s.Length
-        if ($spaces -le 0) { return $s }
-        $left = [Math]::Floor($spaces / 2)
-        $right = $spaces - $left
-        return (" " * $left) + $s + (" " * $right)
-    }
-
-    # Сохраняем позиции строк для каждого шага
-    $stepRows = @()
-    for($i=0; $i -lt $steps.Count; $i++) {
-        $stepRows += [Console]::CursorTop
-        Write-Host "  [ " -NoNewline -ForegroundColor Gray
-        Write-Host (Format-Status "WAIT") -ForegroundColor Yellow -NoNewline
-        Write-Host " ] $($steps[$i])" -ForegroundColor White
-    }
-    $afterStepsRow = [Console]::CursorTop
-
-    # Функция обновления статуса (перерисовывает всю строку)
-    function Update-ProxyStep($idx, $status, $color) {
-        $row = $stepRows[$idx]
-        [Console]::SetCursorPosition(0, $row)
-        [Console]::Write(" " * [Console]::WindowWidth)  # Очищаем строку
-        [Console]::SetCursorPosition(0, $row)
-        # Полностью перерисовываем строку
-        Write-Host "  [ " -NoNewline -ForegroundColor Gray
-        Write-Host (Format-Status $status) -ForegroundColor $color -NoNewline
-        Write-Host " ] $($steps[$idx])" -ForegroundColor White
-    }
-
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $success = $false
-    $errDetail = "Неизвестная ошибка"
-    $latency = $null
-
+    # Быстрый тест IPv6
+    $hasV6 = $false
     try {
-        # Шаг 1: TCP Connect
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $asyn = $tcp.BeginConnect($global:ProxyConfig.Host, $global:ProxyConfig.Port, $null, $null)
-        if (-not $asyn.AsyncWaitHandle.WaitOne(3000)) { 
-            Update-ProxyStep 0 "FAIL" "Red"
-            throw "Прокси-сервер не отвечает (Timeout)" 
-        }
-        $tcp.EndConnect($asyn)
-        Update-ProxyStep 0 " OK " "Green"
+        $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
+        $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
+        if ($a.AsyncWaitHandle.WaitOne(2000)) { $t.EndConnect($a); $hasV6 = $true }
+        $t.Close()
+    } catch { }
 
-        # Шаг 2: Handshake (проверка прокси)
-        Update-ProxyStep 1 "WAIT" "Yellow"
-        $conn = Connect-ThroughProxy "google.com" 80 $global:ProxyConfig 4000
-        Update-ProxyStep 1 " OK " "Green"
-        
-        # Шаг 3: Туннель установлен (автоматически OK)
-        Update-ProxyStep 2 " OK " "Green"
-
-        # Шаг 4: HTTP Request
-        Update-ProxyStep 3 "WAIT" "Yellow"
-        $req = [Text.Encoding]::ASCII.GetBytes("HEAD / HTTP/1.1`r`nHost: google.com`r`nConnection: close`r`n`r`n")
-        $conn.Stream.Write($req, 0, $req.Length)
-        
-        $buf = New-Object byte[] 128
-        if ($conn.Stream.Read($buf, 0, 128) -gt 0) {
-            $latency = $sw.ElapsedMilliseconds
-            Update-ProxyStep 3 " OK " "Green"
-            $success = $true
-        } else { throw "Сервер Google не ответил через прокси" }
-
-        $conn.Tcp.Close()
-    } catch {
-        $errDetail = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
-        Write-DebugLog "Proxy Test Error: $errDetail"
-    }
-
-    # Перемещаем курсор на строку после всех шагов и очищаем её
-    [Console]::SetCursorPosition(0, $afterStepsRow)
-    [Console]::Write(" " * [Console]::WindowWidth)
-    [Console]::SetCursorPosition(0, $afterStepsRow)
-
-    # Итоговый блок
-    Write-Host " $dash" -ForegroundColor Gray
-    if ($success) {
-        Write-Host "  РЕЗУЛЬТАТ: " -NoNewline -ForegroundColor White
-        Write-Host "ПРОКСИ РАБОТАЕТ" -ForegroundColor Green
-        Write-Host "  ЗАДЕРЖКА:  " -NoNewline -ForegroundColor White
-        Write-Host "$($latency) ms" -ForegroundColor Cyan
-    } else {
-        Write-Host "  РЕЗУЛЬТАТ: " -NoNewline -ForegroundColor White
-        Write-Host "ОШИБКА СОЕДИНЕНИЯ" -ForegroundColor Red
-        if ($errDetail.Length -gt $w - 15) { $errDetail = $errDetail.Substring(0, $w - 18) + "..." }
-        Write-Host "  ДЕТАЛИ:    " -NoNewline -ForegroundColor White
-        Write-Host $errDetail -ForegroundColor Gray
-    }
-    Write-Host " $line" -ForegroundColor Gray
-
-    Write-Host "`n  Нажмите любую клавишу для возврата..." -ForegroundColor Gray
-    Clear-KeyBuffer
-    $null = [Console]::ReadKey($true)
-}
-
-# Универсальная функция для отрисовки блока
-function Draw-Block {
-    param(
-        [int]$X,
-        [int]$Y,
-        [string]$Title,
-        [array]$Content,
-        [int]$Width = 78,
-        [string]$TitleColor = "Yellow",
-        [string]$BorderColor = "DarkYellow"
-    )
-    
-    $line = "═" * ($Width - 2)
-    $dash = "─" * ($Width - 2)
-    $currentY = $Y
-    
-    # Верхняя граница
-    Out-Str $X $currentY ("╔" + $line + "╗") $BorderColor
-    $currentY++
-    
-    # Заголовок (если есть)
-    if ($Title -and $Title -ne "") {
-        $titleLine = "║" + " " * 3 + $Title + " " * ($Width - 2 - 3 - $Title.Length) + "║"
-        Out-Str $X $currentY $titleLine $TitleColor
-        $currentY++
-        Out-Str $X $currentY ("├" + $dash + "┤") $BorderColor
-        $currentY++
-    } else {
-        Out-Str $X $currentY ("║" + " " * ($Width - 2) + "║") $BorderColor
-        $currentY++
-    }
-    
-    # Содержимое
-    foreach ($item in $Content) {
-        $text = $item
-        if ($text.GetType().Name -eq "Hashtable") {
-            $text = $item.Text
-            $color = $item.Color
-        } else {
-            $color = "White"
-        }
-        $contentLine = "║" + $text.PadRight($Width - 2) + "║"
-        Out-Str $X $currentY $contentLine $color
-        $currentY++
-    }
-    
-    # Нижняя граница
-    Out-Str $X $currentY ("└" + $dash + "┘") $BorderColor
-    $currentY++
-    
-    return $currentY
-}
-
-function Parse-ProxyString {
-    param([string]$input)
-    
-    Write-DebugLog "Parse-ProxyString: Входная строка = '$input'"
-    
-    $result = @{
-        Valid = $false
-        Type = "AUTO"
-        Host = ""
-        Port = 0
-        User = ""
-        Pass = ""
-    }
-    
-    # Удаляем пробелы
-    $input = $input.Trim()
-    if ([string]::IsNullOrEmpty($input)) {
-        Write-DebugLog "Parse-ProxyString: Пустая строка, возвращаем невалидный результат"
-        return $result
-    }
-    
-    Write-DebugLog "Parse-ProxyString: После Trim = '$input'"
-    
-    # Проверяем наличие протокола
-    $protocol = ""
-    $rest = $input
-    
-    if ($input -match '^(?i)(http|socks5)://(.*)$') {
-        $protocol = $matches[1].ToUpper()
-        $rest = $matches[2]
-        $result.Type = $protocol
-        Write-DebugLog "Parse-ProxyString: Обнаружен протокол = '$protocol', остаток = '$rest'"
-    } else {
-        Write-DebugLog "Parse-ProxyString: Протокол не указан, тип = AUTO"
-    }
-    
-    # Проверяем наличие аутентификации
-    $userpass = ""
-    $hostport = $rest
-    
-    if ($rest -match '^([^@]+)@(.+)$') {
-        $userpass = $matches[1]
-        $hostport = $matches[2]
-        Write-DebugLog "Parse-ProxyString: Обнаружена аутентификация, userpass = '$userpass', hostport = '$hostport'"
-        
-        # Разбираем логин:пароль
-        if ($userpass -match '^([^:]+):(.+)$') {
-            $result.User = $matches[1]
-            $result.Pass = $matches[2]
-            Write-DebugLog "Parse-ProxyString: User = '$($result.User)', Pass = '***'"
-        } else {
-            Write-DebugLog "Parse-ProxyString: Ошибка формата аутентификации (ожидается user:pass)"
-            return $result
-        }
-    } else {
-        Write-DebugLog "Parse-ProxyString: Аутентификация не обнаружена"
-    }
-    
-    # Разбираем хост:порт
-    Write-DebugLog "Parse-ProxyString: Парсим hostport = '$hostport'"
-    $lastColon = $hostport.LastIndexOf(':')
-    Write-DebugLog "Parse-ProxyString: Последнее двоеточие на позиции $lastColon"
-    
-    if ($lastColon -gt 0) {
-        $result.Host = $hostport.Substring(0, $lastColon)
-        $portStr = $hostport.Substring($lastColon + 1)
-        Write-DebugLog "Parse-ProxyString: Host = '$($result.Host)', PortStr = '$portStr'"
-        
-        if ([int]::TryParse($portStr, [ref]$result.Port)) {
-            Write-DebugLog "Parse-ProxyString: Порт распарсен = $($result.Port)"
-            if ($result.Port -ge 1 -and $result.Port -le 65535) {
-                if ($result.Host.Length -gt 0) {
-                    $result.Valid = $true
-                    Write-DebugLog "Parse-ProxyString: УСПЕХ! Host='$($result.Host)', Port=$($result.Port), Type=$($result.Type), Valid=$($result.Valid)"
-                } else {
-                    Write-DebugLog "Parse-ProxyString: Ошибка - пустой хост"
-                }
-            } else {
-                Write-DebugLog "Parse-ProxyString: Ошибка - порт вне диапазона 1-65535 (получен $($result.Port))"
-            }
-        } else {
-            Write-DebugLog "Parse-ProxyString: Ошибка - не удалось распарсить порт из '$portStr'"
-        }
-    } else {
-        Write-DebugLog "Parse-ProxyString: Ошибка - не найдено двоеточие в '$hostport'"
-    }
-    
-    return $result
+    return @{ DNS=$dns; CDN=$cdn; ISP=$isp; LOC=$loc; TimestampTicks=(Get-Date).Ticks; HasIPv6=$hasV6 }
 }
 
 function Show-SettingsMenu {
