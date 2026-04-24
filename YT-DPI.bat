@@ -12,6 +12,7 @@ if (-not $script:OriginalFilePath) { $script:OriginalFilePath = $MyInvocation.In
 $ErrorActionPreference = "SilentlyContinue"
 $script:CurrentWindowWidth = 0
 $script:CurrentWindowHeight = 0
+[Console]::BufferHeight = [Console]::WindowHeight #потестить с этим параметром отрисовка быстрее но нет прокрутки
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 [Console]::CursorVisible = $false
@@ -1608,13 +1609,19 @@ function Get-NetworkInfo {
     if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
 
     # Быстрый тест IPv6
+    # 4. Проверка IPv6 (только если не выбран режим IPv4 Only)
     $hasV6 = $false
-    try {
-        $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
-        $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
-        if ($a.AsyncWaitHandle.WaitOne(2000)) { $t.EndConnect($a); $hasV6 = $true }
-        $t.Close()
-    } catch { }
+    if ($script:Config.IpPreference -ne "IPv4") {
+        try {
+            $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
+            $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
+            if ($a.AsyncWaitHandle.WaitOne(1000)) { # Уменьшили до 1 сек
+                $t.EndConnect($a)
+                $hasV6 = $true 
+            }
+            $t.Close()
+        } catch { }
+    }
 
     return @{ DNS=$dns; CDN=$cdn; ISP=$isp; LOC=$loc; TimestampTicks=(Get-Date).Ticks; HasIPv6=$hasV6 }
 }
@@ -2665,85 +2672,58 @@ function Test-Tls13Support {
 # ====================================================================================
 # ГЛАВНЫЙ ЦИКЛ ПРОГРАММЫ (ENGINE START)
 # ====================================================================================
-# 1. Загрузка конфигурации (Один раз)
+
+# 1. Загрузка конфигурации (Мгновенно)
 $script:Config = Load-Config
 $global:ProxyConfig = $script:Config.Proxy
-#---
-# Если нужно сбрасывать состояние прокси при каждом запуске
-# $global:ProxyConfig.Enabled = $false
-#---
 $script:Config.RunCount++
 
-# 2. Восстановление системных параметров
+# 2. Синхронизация DNS кэша
+$script:DnsCache = [hashtable]::Synchronized(@{})
+if ($script:Config.DnsCache -and $script:Config.DnsCache.PSObject) {
+    foreach ($prop in $script:Config.DnsCache.PSObject.Properties) {
+        if ($prop.MemberType -eq "NoteProperty") { $script:DnsCache[$prop.Name] = $prop.Value }
+    }
+}
+
+# 3. !!! МГНОВЕННАЯ ОТРИСОВКА UI !!!
+# Используем данные из кэша, чтобы не ждать сеть
+$script:NetInfo = $script:Config.NetCache
+$script:Targets = Get-Targets -NetInfo $script:NetInfo
+[Console]::Clear()
+Draw-UI $script:NetInfo $script:Targets $null $false
+Draw-StatusBar -Message "[ WAIT ] INITIALIZING NETWORK..." -Fg "Black" -Bg "Yellow"
+
+# 4. Фоновые проверки (теперь они не блокируют появление окна)
 if ($null -ne $script:Config.Tls13Supported) {
     $global:Tls13Supported = $script:Config.Tls13Supported
-    Write-DebugLog "TLS 1.3: Используем кэшированное значение ($global:Tls13Supported)"
 } else {
+    # Делаем проверку быстрой
     $global:Tls13Supported = Test-Tls13Support
     $script:Config.Tls13Supported = $global:Tls13Supported
 }
 
-# 3. Синхронизация DNS кэша (Потокобезопасная)
-$script:DnsCache = [hashtable]::Synchronized(@{})
-if ($script:Config.DnsCache -and $script:Config.DnsCache.PSObject) {
-    foreach ($prop in $script:Config.DnsCache.PSObject.Properties) {
-        # Игнорируем системные свойства самого объекта
-        if ($prop.MemberType -eq "NoteProperty") {
-            $script:DnsCache[$prop.Name] = $prop.Value
-        }
-    }
+# 5. Обновление сети только если кэш устарел или это первый запуск
+if ($script:Config.NetCacheStale -or $script:Config.RunCount -le 1 -or $script:NetInfo.ISP -eq "Loading...") {
+    $script:NetInfo = Get-NetworkInfo
+    $script:Config.NetCache = $script:NetInfo
+    # Перерисовываем UI с новыми данными об ISP без полной очистки
+    Draw-UI $script:NetInfo $script:Targets $null $false
 }
-Write-DebugLog "DNS Кэш инициализирован: $($script:DnsCache.Count) записей."
 
-# 4. Применяем настройки прокси из конфига
-$global:ProxyConfig = $script:Config.Proxy
-$script:CurrentWindowWidth = 0
-$script:CurrentWindowHeight = 0
-
-# 5. Проверка обновлений (Раз в 5 запусков)
-$shouldPrompt = ($script:Config.RunCount - $script:Config.LastPromptRun) -ge 5
-if ($shouldPrompt) {
-    Write-DebugLog "--- ПЛАНОВАЯ ПРОВЕРКА ОБНОВЛЕНИЙ ---" "INFO"
+# 6. Проверка обновлений (только раз в 10 запусков, чтобы не бесить)
+if ($script:Config.RunCount % 10 -eq 0) {
     $newVer = Check-UpdateVersion -Repo "Shiperoid/YT-DPI" -LastCheckedVersion $script:Config.LastCheckedVersion
     if ($newVer) {
-        [Console]::Clear()
-        Write-Host "`n  === ДОСТУПНО ОБНОВЛЕНИЕ ===" -ForegroundColor Cyan
-        Write-Host "  Версия: $newVer (текущая $scriptVersion)" -ForegroundColor Yellow
-        Write-Host "  Обновить сейчас? (Y/N)" -ForegroundColor White
-        $key = [Console]::ReadKey($true).KeyChar
-        if ($key -eq 'y' -or $key -eq 'Y') {
-            Write-DebugLog "Обновление подтверждено: $newVer"
-            $currentFile = $script:OriginalFilePath
-            $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.bat"
-            Start-Updater $currentFile $downloadUrl
-            exit
-        } else {
-            $script:Config.LastCheckedVersion = $newVer
-        }
+        Draw-StatusBar -Message "[ UPDATE ] NEW VERSION v$newVer AVAILABLE! PRESS 'U' TO UPDATE." -Fg "White" -Bg "DarkMagenta"
+        Start-Sleep -Seconds 3
     }
-    $script:Config.LastPromptRun = $script:Config.RunCount
-    Save-Config $script:Config # Фиксируем напоминание
 }
 
-# 6. Инициализация сети (Кэш или Живой поиск)
-$script:NetInfo = $script:Config.NetCache
-if ($script:Config.NetCacheStale -or $script:Config.RunCount -eq 1 -or $script:NetInfo.ISP -eq "Loading...") {
-    Write-DebugLog "Обновление сетевого статуса..." "INFO"
-    $script:NetInfo = Get-NetworkInfo
-    # КРИТИЧЕСКИ ВАЖНО: записываем новые данные обратно в объект конфига для сохранения
-    $script:Config.NetCache = $script:NetInfo
-}
-
-# 7. Подготовка целей и отрисовка UI (ЕДИНСТВЕННЫЙ РАЗ)
-$script:Targets = Get-Targets -NetInfo $script:NetInfo
-[Console]::Clear()
-Draw-UI $script:NetInfo $script:Targets $false
 Draw-StatusBar -Message $CONST.NavStr
-
-# 8. Сброс временных флагов
-$FirstRun = $false
-Clear-KeyBuffer
 Write-DebugLog "--- СИСТЕМА ГОТОВА ---" "INFO"
+Clear-KeyBuffer
+$FirstRun = $false
 
 while ($true) {
     if ($FirstRun) {
