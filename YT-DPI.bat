@@ -156,6 +156,114 @@ $script:DnsCache = [hashtable]::Synchronized(@{}) # Сразу делаем ег
 $script:LastScanResults = @()
 
 
+# --- НИЗКОУРОВНЕВЫЙ TLS ДВИЖОК (C#) ---
+$tlsCode = @"
+using System;
+using System.Collections.Generic;
+using System.Net.Sockets;
+using System.Text;
+using System.Linq;
+
+public class TlsScanner {
+    public static string TestT13(string targetIp, string host, string proxyHost, int proxyPort, string user, string pass, int timeout) {
+        try {
+            using (TcpClient tcp = new TcpClient()) {
+                // 1. Подключение (Direct или Proxy)
+                string connectHost = string.IsNullOrEmpty(proxyHost) ? targetIp : proxyHost;
+                int connectPort = string.IsNullOrEmpty(proxyHost) ? 443 : proxyPort;
+
+                var ar = tcp.BeginConnect(connectHost, connectPort, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(timeout)) return "DRP";
+                tcp.EndConnect(ar);
+                
+                NetworkStream stream = tcp.GetStream();
+                stream.ReadTimeout = timeout;
+                stream.WriteTimeout = timeout;
+
+                // 2. Если есть прокси - делаем рукопожатие SOCKS5
+                if (!string.IsNullOrEmpty(proxyHost)) {
+                    byte[] greeting = new byte[] { 0x05, 0x01, 0x00 };
+                    stream.Write(greeting, 0, greeting.Length);
+                    byte[] authResp = new byte[2];
+                    stream.Read(authResp, 0, 2);
+                    
+                    byte[] connectReq = BuildSocksConnect(host, 443);
+                    stream.Write(connectReq, 0, connectReq.Length);
+                    byte[] connResp = new byte[10];
+                    stream.Read(connResp, 0, 10);
+                    if (connResp[1] != 0x00) return "PRX_ERR";
+                }
+
+                // 3. Формируем "Chrome-like" TLS 1.3 Hello
+                byte[] hello = BuildModernHello(host);
+                stream.Write(hello, 0, hello.Length);
+
+                // 4. Анализ ответа
+                byte[] header = new byte[5];
+                int read = stream.Read(header, 0, 5);
+                if (read < 5) return "DRP";
+
+                if (header[0] == 0x16) return "OK"; // Handshake (Server Hello)
+                if (header[0] == 0x15) return "RST"; // Alert
+                return "DRP";
+            }
+        } catch (Exception ex) {
+            string m = ex.Message.ToLower();
+            if (m.Contains("reset") || m.Contains("closed") || m.Contains("aborted")) return "RST";
+            return "DRP";
+        }
+    }
+
+    private static byte[] BuildSocksConnect(string host, int port) {
+        List<byte> req = new List<byte> { 0x05, 0x01, 0x00, 0x03 };
+        byte[] h = Encoding.ASCII.GetBytes(host);
+        req.Add((byte)h.Length);
+        req.AddRange(h);
+        req.Add((byte)(port >> 8));
+        req.Add((byte)(port & 0xFF));
+        return req.ToArray();
+    }
+
+    private static byte[] BuildModernHello(string host) {
+        List<byte> body = new List<byte>();
+        body.AddRange(new byte[] { 0x03, 0x03 }); // Version
+        for (int i = 0; i < 32; i++) body.Add(0x07); // Random
+        body.Add(0x00); // Session ID
+        body.AddRange(new byte[] { 0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03 }); // Ciphers
+        body.AddRange(new byte[] { 0x01, 0x00 }); // Compression
+
+        List<byte> exts = new List<byte>();
+        // SNI
+        byte[] h = Encoding.ASCII.GetBytes(host);
+        exts.AddRange(new byte[] { 0x00, 0x00 });
+        int sniLen = h.Length + 5;
+        exts.Add((byte)(sniLen >> 8)); exts.Add((byte)(sniLen & 0xFF));
+        exts.Add((byte)((h.Length + 3) >> 8)); exts.Add((byte)((h.Length + 3) & 0xFF));
+        exts.Add(0x00);
+        exts.Add((byte)(h.Length >> 8)); exts.Add((byte)(h.Length & 0xFF));
+        exts.AddRange(h);
+
+        // Supported Versions (1.3)
+        exts.AddRange(new byte[] { 0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04 });
+        // Supported Groups (X25519)
+        exts.AddRange(new byte[] { 0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1d });
+        // Key Share (Важно для TLS 1.3!)
+        exts.AddRange(new byte[] { 0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20 });
+        for (int i = 0; i < 32; i++) exts.Add(0x09);
+
+        body.Add((byte)(exts.Count >> 8)); body.Add((byte)(exts.Count & 0xFF));
+        body.AddRange(exts);
+
+        List<byte> pkt = new List<byte> { 0x16, 0x03, 0x01 };
+        pkt.Add((byte)(body.Count >> 8)); pkt.Add((byte)(body.Count & 0xFF));
+        pkt.AddRange(body);
+        return pkt.ToArray();
+    }
+}
+"@
+try { Add-Type -TypeDefinition $tlsCode -ErrorAction SilentlyContinue } catch {}
+
+
 # --- ГЛОБАЛЬНЫЕ ПУТИ ---
 # Лог кладем строго в папку, где лежит сам файл .bat
 $script:ParentDir = Split-Path -Parent $script:OriginalFilePath
@@ -2412,106 +2520,40 @@ $Worker = {
         Write-DebugLog "HTTP: Ошибка -> $($_.Exception.Message)" "WARN"
     } finally { if ($conn) { $conn.Tcp.Close() } }
 
-    # 3. TLS Проверки (Максимальная отладка)
+    # 3. TLS Проверки
     foreach ($ver in @("T12", "T13")) {
-        if ($ver -eq "T13" -and -not $CanTls13) {
-            Write-DebugLog "TLS T13 : Пропуск (система не поддерживает TLS 1.3)"
-            $Result.T13 = "---"; continue
+        if ($ver -eq "T13") {
+            # Вызываем наш новый C# движок с поддержкой прокси
+            $pHost = if ($ProxyConfig.Enabled) { $ProxyConfig.Host } else { "" }
+            $pPort = if ($ProxyConfig.Enabled) { [int]$ProxyConfig.Port } else { 0 }
+            
+            $res = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, 3000)
+            $Result.T13 = $res
+            Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$res"
+            continue
         }
 
-        Write-DebugLog "TLS $ver : --- СТАРТ ПРОВЕРКИ ДЛЯ [$Target] ---"
+        # Код для TLS 1.2 (через SslStream, он там работает нормально)
         $conn = $null; $ssl = $null
         try {
-            # 1. TCP CONNECT
-            $port = 443
-            Write-DebugLog "TLS $ver : Попытка TCP соединения с $($Result.IP):$port..."
-            if ($ProxyConfig.Enabled) { 
-                $conn = Connect-ThroughProxy $Target $port $ProxyConfig 3000 
-                Write-DebugLog "TLS $ver : TCP через прокси установлен."
-            } else {
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $ar = $tcp.BeginConnect($Result.IP, $port, $null, $null)
-                if (-not $ar.AsyncWaitHandle.WaitOne(3000)) { 
-                    Write-DebugLog "TLS $ver : Ошибка - Таймаут TCP соединения (3000ms)" "WARN"
-                    throw "TcpTimeout" 
-                }
-                $tcp.EndConnect($ar)
-                $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
-                Write-DebugLog "TLS $ver : TCP соединение установлено напрямую."
+            if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig 3000 }
+            else {
+                $tcp = [System.Net.Sockets.TcpClient]::new()
+                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
+                if (-not $ar.AsyncWaitHandle.WaitOne(3000)) { throw "TcpTimeout" }
+                $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
             }
-
-            # 2. SSL STREAM SETUP
-            $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false, { 
-                param($s, $cert, $chain, $errs) 
-                Write-DebugLog "TLS $ver : [CALLBACK] Проверка сертификата. Ошибки: $errs"
-                return $true # Игнорируем ошибки сертификата, нам важен сам факт коннекта
-            })
-
-            # 3. PROTOCOL SELECTION
-            if ($ver -eq "T12") { 
-                $proto = [System.Security.Authentication.SslProtocols]::Tls12 
-            } else { 
-                $proto = [System.Enum]::ToObject([System.Security.Authentication.SslProtocols], 12288) 
-            }
-            Write-DebugLog "TLS $ver : Выбран протокол: $proto (ID: $([int]$proto))"
-
-            # 4. HANDSHAKE
-            Write-DebugLog "TLS $ver : Запуск Handshake (SNI: $Target)..."
-            $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $authAr = $ssl.BeginAuthenticateAsClient($Target, $null, $proto, $false, $null, $null)
-            
-            if ($authAr.AsyncWaitHandle.WaitOne(4000)) {
-                $ssl.EndAuthenticateAsClient($authAr)
-                $sw.Stop()
-                Write-DebugLog "TLS $ver : Handshake УСПЕШЕН за $($sw.ElapsedMilliseconds)ms."
-                Write-DebugLog "TLS $ver : [INFO] Согласован: Протокол=$($ssl.SslProtocol), Шифр=$($ssl.CipherAlgorithm), Ключ=$($ssl.KeyExchangeAlgorithm)"
-
-                # 5. DATA WRITE TEST (Проверка на "умный" DPI/Reset после хендшейка)
-                Write-DebugLog "TLS $ver : Тест передачи данных (отправка 1 байта)..."
-                try {
-                    $ssl.Write([byte[]]@(0))
-                    Write-DebugLog "TLS $ver : Данные отправлены успешно. Соединение ЖИВОЕ."
-                    $res = "OK"
-                } catch {
-                    Write-DebugLog "TLS $ver : !!! СБРОС СРАЗУ ПОСЛЕ HANDSHAKE !!! (ResetAfterHandshake)" "WARN"
-                    throw "ResetAfterHandshake"
-                }
-            } else {
-                Write-DebugLog "TLS $ver : !!! ТАЙМАУТ HANDSHAKE !!! (Провайдер дропнул пакеты)" "WARN"
-                $res = "DRP"
-            }
+            $cb = [System.Net.Security.RemoteCertificateValidationCallback] { $true }
+            $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false, $cb)
+            $ssl.AuthenticateAsClient($Target, $null, "Tls12", $false)
+            $res = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
         } catch {
-            $ex = $_.Exception
-            $inner = if ($ex.InnerException) { $ex.InnerException.Message } else { "Нет" }
-            $msg = $ex.Message
-            
-            Write-DebugLog "TLS $ver : Перехвачено исключение!" "WARN"
-            Write-DebugLog "TLS $ver : Сообщение: $msg" "WARN"
-            Write-DebugLog "TLS $ver : InnerException: $inner" "WARN"
-
-            if ($msg -match "not supported|12288|enumeration") {
-                Write-DebugLog "TLS $ver : Результат -> Протокол не поддерживается ОС/PowerShell."
-                $res = "---"
-            } elseif ($msg -match "certificate|сертификат|remote|authentic|success") {
-                Write-DebugLog "TLS $ver : Результат -> OK (ошибка сертификата не считается блокировкой)."
-                $res = "OK"
-            } elseif ($msg -match "reset|сброс|forcibly|closed|разорвано|ResetAfterHandshake") {
-                Write-DebugLog "TLS $ver : Результат -> RST (Активная блокировка DPI Reset)."
-                $res = "RST"
-            } elseif ($msg -match "TcpTimeout") {
-                Write-DebugLog "TLS $ver : Результат -> DRP (Не удалось даже открыть TCP порт)."
-                $res = "DRP"
-            } else {
-                Write-DebugLog "TLS $ver : Результат -> DRP (Таймаут или неспецифическая ошибка)."
-                $res = "DRP"
-            }
-        } finally {
-            if ($ssl) { $ssl.Close(); Write-DebugLog "TLS $ver : SslStream закрыт." }
-            if ($conn) { $conn.Tcp.Close(); Write-DebugLog "TLS $ver : TCP сокет закрыт." }
-        }
-        
-        if ($ver -eq "T12") { $Result.T12 = $res } else { $Result.T13 = $res }
-        Write-DebugLog "TLS $ver : --- ФИНАЛ: $res ---`r`n"
+            $m = $_.Exception.Message + $_.Exception.InnerException.Message
+            if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $res = "RST" }
+            elseif ($m -match "certificate|сертификат|remote|success") { $res = "OK" }
+            else { $res = "DRP" }
+        } finally { if($ssl){$ssl.Close()}; if($conn){$conn.Tcp.Close()} }
+        $Result.T12 = $res
     }
 
     # 4. Вердикт
@@ -2519,10 +2561,8 @@ $Worker = {
         $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
     } elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
         $Result.Verdict = "DPI RESET"; $Result.Color = "Red"
-    } elseif ($Result.T12 -eq "DRP") {
+    } elseif ($Result.T12 -eq "DRP" -or $Result.T13 -eq "DRP") {
         $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red"
-    } elseif ($Result.HTTP -eq "OK") {
-        $Result.Verdict = "TLS BLOCK"; $Result.Color = "Yellow"
     } else {
         $Result.Verdict = "IP BLOCK"; $Result.Color = "Red"
     }
@@ -2704,29 +2744,8 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
 # ПРОВЕРКА ПОДДЕРЖКИ TLS 1.3
 # ====================================================================================
 function Test-Tls13Support {
-    Write-DebugLog "Проверка поддержки TLS 1.3..."
-    try {
-        # Пытаемся получить объект протокола TLS 1.3 (код 12288)
-        # Это сработает на PS 7+ и на PS 5.1 (если .NET свежий)
-        $tls13 = [System.Enum]::ToObject([System.Security.Authentication.SslProtocols], 12288)
-        
-        # Пробное рукопожатие с любым стабильным сервером
-        $t = New-Object System.Net.Sockets.TcpClient
-        $ar = $t.BeginConnect("8.8.8.8", 443, $null, $null)
-        if ($ar.AsyncWaitHandle.WaitOne(1000)) {
-            $t.EndConnect($ar)
-            $ssl = New-Object System.Net.Security.SslStream($t.GetStream(), $false, { $true })
-            # Если система не поддерживает T13, упадет именно здесь
-            $ssl.AuthenticateAsClient("8.8.8.8", $null, $tls13, $false)
-            $ssl.Close()
-        }
-        $t.Close()
-        Write-DebugLog "TLS 1.3 подтвержден системой." "INFO"
-        return $true
-    } catch {
-        Write-DebugLog "TLS 1.3 не поддерживается этой средой (Legacy Mode)." "WARN"
-        return $false
-    }
+    Write-DebugLog "Движок TLS 1.3 (Raw Sockets) активирован."
+    return $true
 }
 
 # ====================================================================================
