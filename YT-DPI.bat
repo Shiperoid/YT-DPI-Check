@@ -3,7 +3,16 @@
 set "SCRIPT_PATH=%~f0"
 title YT-DPI v2.1.7
 chcp 65001 >nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ([System.IO.File]::ReadAllText('%~f0', [System.Text.Encoding]::UTF8))"
+
+:: Проверяем наличие PowerShell 7 (pwsh.exe)
+where pwsh >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    set "PS_EXE=pwsh"
+) else (
+    set "PS_EXE=powershell"
+)
+
+%PS_EXE% -NoProfile -ExecutionPolicy Bypass -Command "iex ([System.IO.File]::ReadAllText('%~f0', [System.Text.Encoding]::UTF8))"
 exit /b
 #>
 $script:OriginalFilePath = [System.Environment]::GetEnvironmentVariable("SCRIPT_PATH", "Process")
@@ -50,36 +59,34 @@ function Write-DebugLog($msg, $level = "DEBUG") {
     }
 }
 
-Write-DebugLog "==================== СКРИПТ ЗАПУЩЕН ====================" "INFO"
-Write-DebugLog "Версия PowerShell: $($PSVersionTable.PSVersion)" "INFO"
-Write-DebugLog "ОС: $([System.Environment]::OSVersion.VersionString)" "INFO"
-Write-DebugLog "Командная строка: $([Environment]::CommandLine)" "INFO"
-
-Write-DebugLog "Путь к скрипту: $script:OriginalFilePath"
-# РОТАЦИЯ ЛОГА ПРИ ЗАПУСКЕ (если превышен лимит 5 МБ)
-$maxLogSizeBytes = 5 * 1024 * 1024   # 5 МБ
+# ===== ЛОГИРОВАНИЕ И РОТАЦИЯ =====
+$maxLogSizeBytes = 5 * 1024 * 1024
 if (Test-Path $DebugLogFile) {
     try {
-        $fileInfo = Get-Item $DebugLogFile -ErrorAction SilentlyContinue
+        $fileInfo = Get-Item $DebugLogFile
         if ($fileInfo.Length -gt $maxLogSizeBytes) {
             $backupName = [System.IO.Path]::GetFileNameWithoutExtension($DebugLogFile) + "_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + ".log"
-            $backupPath = Join-Path (Split-Path $DebugLogFile -Parent) $backupName
-            Move-Item $DebugLogFile $backupPath -Force
-            # Создаём новый пустой файл (необязательно, т.к. AppendAllText создаст, но для ясности)
-            New-Item $DebugLogFile -ItemType File -Force | Out-Null
-            Write-DebugLog "Старый лог превышал $maxLogSizeBytes байт, переименован в $backupName" "INFO"
+            Move-Item $DebugLogFile (Join-Path (Split-Path $DebugLogFile -Parent) $backupName) -Force
         } else {
-            # Файл маленький — просто удаляем, чтобы начать чистый лог
             Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue
-            Write-DebugLog "Старый лог-файл удален (размер $($fileInfo.Length) байт)" "INFO"
         }
-    } catch {
-        # Если что‑то пошло не так, просто удаляем старый лог
-        Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue
-        Write-DebugLog "Ошибка при ротации лога: $_" "WARN"
-    }
+    } catch { Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue }
 }
 
+# ТЕПЕРЬ ПИШЕМ ИНФО-БЛОК (Когда файл уже чистый)
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+try { $osInfo = Get-CimInstance Win32_OperatingSystem } catch { $osInfo = @{Caption="Windows (Legacy)"; Version="Unknown"} }
+
+Write-DebugLog "==================== YT-DPI SESSION START ====================" "INFO"
+Write-DebugLog "Скрипт версия: $scriptVersion" "INFO"
+Write-DebugLog "ОС: $($osInfo.Caption) ($($osInfo.Version))" "INFO"
+Write-DebugLog "PowerShell: $($PSVersionTable.PSVersion.ToString())" "INFO"
+Write-DebugLog "Права: $(if($isAdmin){'Администратор'}else{'Пользователь'})" "INFO"
+Write-DebugLog "Локаль: $([System.Globalization.CultureInfo]::CurrentCulture.Name)" "INFO"
+Write-DebugLog "Путь: $script:OriginalFilePath" "INFO"
+Write-DebugLog "============================================================" "INFO"
+
+Write-DebugLog "Старый лог-файл очищен, начало новой сессии." "INFO"
 # --- ОТКЛЮЧЕНИЕ ВЫДЕЛЕНИЯ МЫШЬЮ ---
 Write-DebugLog "Отключаем QuickEdit..."
 $code = @"
@@ -142,15 +149,23 @@ $SCRIPT:CONST = @{
 }
 Write-DebugLog "Константы инициализированы."
 
+# --- ИНИЦИАЛИЗАЦИЯ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
+$script:Config = $null
+$script:NetInfo = $null
+$script:DnsCache = [hashtable]::Synchronized(@{}) # Сразу делаем его потокобезопасным
+$script:LastScanResults = @()
+
+
 # --- ГЛОБАЛЬНЫЕ ПУТИ ---
+# Лог кладем строго в папку, где лежит сам файл .bat
+$script:ParentDir = Split-Path -Parent $script:OriginalFilePath
+$DebugLogFile = Join-Path $script:ParentDir "YT-DPI_Debug.log"
+
+# Конфиг остается в профиле пользователя (AppData)
 $script:ConfigDir = Join-Path $env:LOCALAPPDATA "YT-DPI"
 $script:ConfigFile = Join-Path $script:ConfigDir "YT-DPI_config.json"
 
-$script:Config = $null
-$script:NetInfo = $null
-$script:DnsCache = @{}
-
-# Создаём папку, если её нет
+# Создаём папку в AppData, если её нет (для конфига)
 if (-not (Test-Path $script:ConfigDir)) {
     try { New-Item -Path $script:ConfigDir -ItemType Directory -Force | Out-Null } catch {}
 }
@@ -556,7 +571,10 @@ function Draw-UI ($NetInfo, $Targets, $Results, $ClearScreen = $true) {
 
     $proxyStatus = if ($global:ProxyConfig.Enabled) { "> PROXY: $($global:ProxyConfig.Type) $($global:ProxyConfig.Host):$($global:ProxyConfig.Port) Connected" } else { "> PROXY: [ OFF ]" }
     Out-Str 65 7 ($proxyStatus.PadRight(58)) "DarkYellow"
-    Out-Str 65 8 "> TG: t.me/YT_DPI | VERSION: $scriptVersion" "Green"
+    $tlsStatusColor = if ($global:Tls13Supported) { "Green" } else { "Gray" }
+    $tlsStatusText = if ($global:Tls13Supported) { "[ OK ]" } else { "[ UNSUPPORTED ]" }
+    Out-Str 65 8 "> TLS 1.3: $tlsStatusText" $tlsStatusColor
+    Out-Str 65 9 "> TG: t.me/YT_DPI | VERSION: $scriptVersion" "Green"
 
     # --- Таблица ---
     $y = 9
@@ -2170,7 +2188,7 @@ function Add-ToProxyHistory {
 # ====================================================================================
 $Worker = {
     param($Target, $ProxyConfig, $CanTls13, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock, $NetInfo, $IpPreference)
-
+    
     function Write-DebugLog($msg, $level = "DEBUG") {
         if (-not $DEBUG_ENABLED) { return }
         $line = "[$(Get-Date -Format 'HH:mm:ss.fff')] [Worker $($Target)] [$($level)] $($msg)`r`n"
@@ -2293,7 +2311,7 @@ $Worker = {
         }
     }
 
-    $Result = [PSCustomObject]@{ IP="FAILED"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="UNKNOWN"; Color="White"; Target=$Target }
+    $Result = [PSCustomObject]@{ IP="FAILED"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="UNKNOWN"; Color="White"; Target=$Target; Number=0 }
     $TO = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { $CONST.TimeoutMs }
 
     Write-DebugLog "--- НАЧАЛО ПРОВЕРКИ ---"
@@ -2394,81 +2412,120 @@ $Worker = {
         Write-DebugLog "HTTP: Ошибка -> $($_.Exception.Message)" "WARN"
     } finally { if ($conn) { $conn.Tcp.Close() } }
 
-    # 3. TLS Проверки (ПОСЛЕДОВАТЕЛЬНО)
-    $tlsTO = 3500
+    # 3. TLS Проверки (Максимальная отладка)
     foreach ($ver in @("T12", "T13")) {
         if ($ver -eq "T13" -and -not $CanTls13) {
-            $Result.T13 = "N/A"
-            Write-DebugLog "TLS 1.3: Пропуск (не поддерживается ОС)."
-            continue
+            Write-DebugLog "TLS T13 : Пропуск (система не поддерживает TLS 1.3)"
+            $Result.T13 = "---"; continue
         }
 
-        Write-DebugLog "TLS $($ver): Запуск хендшейка..."
-        $conn = $null
-        $ssl = $null
+        Write-DebugLog "TLS $ver : --- СТАРТ ПРОВЕРКИ ДЛЯ [$Target] ---"
+        $conn = $null; $ssl = $null
         try {
-            if ($ProxyConfig.Enabled) {
-                $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $tlsTO
+            # 1. TCP CONNECT
+            $port = 443
+            Write-DebugLog "TLS $ver : Попытка TCP соединения с $($Result.IP):$port..."
+            if ($ProxyConfig.Enabled) { 
+                $conn = Connect-ThroughProxy $Target $port $ProxyConfig 3000 
+                Write-DebugLog "TLS $ver : TCP через прокси установлен."
             } else {
-                # Используем новую функцию с fallback на IPv4
-                $tcp = Invoke-TcpConnectWithFallback -TargetIp $Result.IP -TargetPort 443 -TimeoutMs $tlsTO
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $ar = $tcp.BeginConnect($Result.IP, $port, $null, $null)
+                if (-not $ar.AsyncWaitHandle.WaitOne(3000)) { 
+                    Write-DebugLog "TLS $ver : Ошибка - Таймаут TCP соединения (3000ms)" "WARN"
+                    throw "TcpTimeout" 
+                }
+                $tcp.EndConnect($ar)
                 $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+                Write-DebugLog "TLS $ver : TCP соединение установлено напрямую."
             }
 
-            $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
-            $proto = if ($ver -eq "T12") { [System.Security.Authentication.SslProtocols]::Tls12 } else { 12288 }
+            # 2. SSL STREAM SETUP
+            $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false, { 
+                param($s, $cert, $chain, $errs) 
+                Write-DebugLog "TLS $ver : [CALLBACK] Проверка сертификата. Ошибки: $errs"
+                return $true # Игнорируем ошибки сертификата, нам важен сам факт коннекта
+            })
 
+            # 3. PROTOCOL SELECTION
+            if ($ver -eq "T12") { 
+                $proto = [System.Security.Authentication.SslProtocols]::Tls12 
+            } else { 
+                $proto = [System.Enum]::ToObject([System.Security.Authentication.SslProtocols], 12288) 
+            }
+            Write-DebugLog "TLS $ver : Выбран протокол: $proto (ID: $([int]$proto))"
+
+            # 4. HANDSHAKE
+            Write-DebugLog "TLS $ver : Запуск Handshake (SNI: $Target)..."
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $authAr = $ssl.BeginAuthenticateAsClient($Target, $null, $proto, $false, $null, $null)
-            if ($authAr.AsyncWaitHandle.WaitOne($tlsTO)) {
+            
+            if ($authAr.AsyncWaitHandle.WaitOne(4000)) {
                 $ssl.EndAuthenticateAsClient($authAr)
-                if ($ver -eq "T12") { $Result.T12 = "OK" } else { $Result.T13 = "OK" }
-                Write-DebugLog "TLS $($ver): УСПЕШНО"
+                $sw.Stop()
+                Write-DebugLog "TLS $ver : Handshake УСПЕШЕН за $($sw.ElapsedMilliseconds)ms."
+                Write-DebugLog "TLS $ver : [INFO] Согласован: Протокол=$($ssl.SslProtocol), Шифр=$($ssl.CipherAlgorithm), Ключ=$($ssl.KeyExchangeAlgorithm)"
+
+                # 5. DATA WRITE TEST (Проверка на "умный" DPI/Reset после хендшейка)
+                Write-DebugLog "TLS $ver : Тест передачи данных (отправка 1 байта)..."
+                try {
+                    $ssl.Write([byte[]]@(0))
+                    Write-DebugLog "TLS $ver : Данные отправлены успешно. Соединение ЖИВОЕ."
+                    $res = "OK"
+                } catch {
+                    Write-DebugLog "TLS $ver : !!! СБРОС СРАЗУ ПОСЛЕ HANDSHAKE !!! (ResetAfterHandshake)" "WARN"
+                    throw "ResetAfterHandshake"
+                }
             } else {
-                if ($ver -eq "T12") { $Result.T12 = "DRP" } else { $Result.T13 = "DRP" }
-                Write-DebugLog "TLS $($ver): ТАЙМАУТ (DROPPED)" "WARN"
+                Write-DebugLog "TLS $ver : !!! ТАЙМАУТ HANDSHAKE !!! (Провайдер дропнул пакеты)" "WARN"
+                $res = "DRP"
             }
         } catch {
-            $m = $_.Exception.Message + $_.Exception.InnerException.Message
-            Write-DebugLog "TLS $($ver): Перехвачено исключение -> $($m)"
+            $ex = $_.Exception
+            $inner = if ($ex.InnerException) { $ex.InnerException.Message } else { "Нет" }
+            $msg = $ex.Message
+            
+            Write-DebugLog "TLS $ver : Перехвачено исключение!" "WARN"
+            Write-DebugLog "TLS $ver : Сообщение: $msg" "WARN"
+            Write-DebugLog "TLS $ver : InnerException: $inner" "WARN"
 
-            # Классификация результата TLS
-            if ($m -match "reset|сброс|forcibly|closed|разорвано") {
-                $res = "RST"
-            } elseif ($m -match "certificate|сертификат|remote|authentic|success|handshake|ssl|policy|chain") {
+            if ($msg -match "not supported|12288|enumeration") {
+                Write-DebugLog "TLS $ver : Результат -> Протокол не поддерживается ОС/PowerShell."
+                $res = "---"
+            } elseif ($msg -match "certificate|сертификат|remote|authentic|success") {
+                Write-DebugLog "TLS $ver : Результат -> OK (ошибка сертификата не считается блокировкой)."
                 $res = "OK"
-            } elseif ($m -match "timeout|timed|тайм") {
+            } elseif ($msg -match "reset|сброс|forcibly|closed|разорвано|ResetAfterHandshake") {
+                Write-DebugLog "TLS $ver : Результат -> RST (Активная блокировка DPI Reset)."
+                $res = "RST"
+            } elseif ($msg -match "TcpTimeout") {
+                Write-DebugLog "TLS $ver : Результат -> DRP (Не удалось даже открыть TCP порт)."
                 $res = "DRP"
             } else {
-                $res = "ERR"
+                Write-DebugLog "TLS $ver : Результат -> DRP (Таймаут или неспецифическая ошибка)."
+                $res = "DRP"
             }
-
-            if ($ver -eq "T12") { $Result.T12 = $res } else { $Result.T13 = $res }
-            Write-DebugLog "TLS $($ver): Финал (через catch) -> $($res)"
         } finally {
-            if ($ssl) { $ssl.Close() }
-            if ($conn) { $conn.Tcp.Close() }
+            if ($ssl) { $ssl.Close(); Write-DebugLog "TLS $ver : SslStream закрыт." }
+            if ($conn) { $conn.Tcp.Close(); Write-DebugLog "TLS $ver : TCP сокет закрыт." }
         }
+        
+        if ($ver -eq "T12") { $Result.T12 = $res } else { $Result.T13 = $res }
+        Write-DebugLog "TLS $ver : --- ФИНАЛ: $res ---`r`n"
     }
 
     # 4. Вердикт
     if ($Result.T12 -eq "OK" -or $Result.T13 -eq "OK") {
-        $Result.Verdict = "AVAILABLE"
-        $Result.Color = "Green"
+        $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
+    } elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
+        $Result.Verdict = "DPI RESET"; $Result.Color = "Red"
+    } elseif ($Result.T12 -eq "DRP") {
+        $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red"
+    } elseif ($Result.HTTP -eq "OK") {
+        $Result.Verdict = "TLS BLOCK"; $Result.Color = "Yellow"
+    } else {
+        $Result.Verdict = "IP BLOCK"; $Result.Color = "Red"
     }
-    elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
-        $Result.Verdict = "DPI RESET"
-        $Result.Color = "Red"
-    }
-    elseif ($Result.HTTP -eq "OK") {
-        $Result.Verdict = "DPI BLOCK"
-        $Result.Color = "Yellow"
-    }
-    else {
-        $Result.Verdict = "IP BLOCK"
-        $Result.Color = "Red"
-    }
-
-    Write-DebugLog "--- ЗАВЕРШЕНО: $($Result.Verdict) ---"
     return $Result
 }
 # ====================================================================================
@@ -2647,25 +2704,28 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
 # ПРОВЕРКА ПОДДЕРЖКИ TLS 1.3
 # ====================================================================================
 function Test-Tls13Support {
-    Write-DebugLog "Проверка поддержки TLS 1.3"
+    Write-DebugLog "Проверка поддержки TLS 1.3..."
     try {
-        $testTcp = New-Object System.Net.Sockets.TcpClient
-        $asyn = $testTcp.BeginConnect("google.com", 443, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(1500)) {
-            $testTcp.EndConnect($asyn)
-            $testSsl = New-Object System.Net.Security.SslStream($testTcp.GetStream(), $false)
-            $testSsl.AuthenticateAsClient("google.com", $null, $CONST.Tls13Proto, $false)
-            $testSsl.Close()
+        # Пытаемся получить объект протокола TLS 1.3 (код 12288)
+        # Это сработает на PS 7+ и на PS 5.1 (если .NET свежий)
+        $tls13 = [System.Enum]::ToObject([System.Security.Authentication.SslProtocols], 12288)
+        
+        # Пробное рукопожатие с любым стабильным сервером
+        $t = New-Object System.Net.Sockets.TcpClient
+        $ar = $t.BeginConnect("8.8.8.8", 443, $null, $null)
+        if ($ar.AsyncWaitHandle.WaitOne(1000)) {
+            $t.EndConnect($ar)
+            $ssl = New-Object System.Net.Security.SslStream($t.GetStream(), $false, { $true })
+            # Если система не поддерживает T13, упадет именно здесь
+            $ssl.AuthenticateAsClient("8.8.8.8", $null, $tls13, $false)
+            $ssl.Close()
         }
-        $testTcp.Close()
-        Write-DebugLog "TLS 1.3 поддерживается"
+        $t.Close()
+        Write-DebugLog "TLS 1.3 подтвержден системой." "INFO"
         return $true
     } catch {
-        Write-DebugLog "TLS 1.3 НЕ поддерживается: $_" "WARNING"
-        if ($_.Exception.Message -match "not supported|algorithm|поддерживается|алгоритм") {
-            return $false
-        }
-        return $true
+        Write-DebugLog "TLS 1.3 не поддерживается этой средой (Legacy Mode)." "WARN"
+        return $false
     }
 }
 
