@@ -1,7 +1,7 @@
 <# :
 @echo off
 set "SCRIPT_PATH=%~f0"
-title YT-DPI v2.2.1
+title YT-DPI v2.2.0
 chcp 65001 >nul
 
 :: Проверяем наличие PowerShell 7 (pwsh.exe)
@@ -31,7 +31,7 @@ $DebugPreference = "SilentlyContinue"
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.2.1"   # текущая версия yt-dpi
+$scriptVersion = "2.2.0"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $DEBUG_ENABLED = $true
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
@@ -686,12 +686,12 @@ function Draw-UI ($NetInfo, $Targets, $Results, $ClearScreen = $true) {
     Out-Str 1 5 '    ██║      ██║       ██████║ ██║     ██║' 'Green'
     Out-Str 1 6 '    ╚═╝      ╚═╝       ╚═════╝ ╚═╝     ╚═╝' 'Green'
 
-    Out-Str 45 1 '██████╗    ██╗' 'Gray'
-    Out-Str 45 2 '╚════██╗  ███║' 'Gray'
-    Out-Str 45 3 ' █████╔╝  ╚██║' 'Gray'
-    Out-Str 45 4 '██╔═══╝    ██║' 'Gray'
-    Out-Str 45 5 '███████╗██╗██║' 'Gray'
-    Out-Str 45 6 '╚══════╝╚═╝╚═╝' 'Gray'
+    Out-Str 45 1 '██████╗    ██████╗ ' 'Gray'
+    Out-Str 45 2 '╚════██╗   ╚════██╗' 'Gray'
+    Out-Str 45 3 ' █████╔╝    █████╔╝' 'Gray'
+    Out-Str 45 4 '██╔═══╝    ██╔═══╝' 'Gray'
+    Out-Str 45 5 '███████╗██╗███████╗' 'Gray'
+    Out-Str 45 6 '╚══════╝╚═╝╚══════╝' 'Gray'
 
     Out-Str 65 1 "> SYS STATUS: [ ONLINE ]" "Green"
     Out-Str 65 2 "> ENGINE: Barebuh Pro v2.3.4" "Red"
@@ -2254,34 +2254,28 @@ function Show-HelpMenu {
     Write-Host "`n [ КНОПКИ УПРАВЛЕНИЯ ]" -ForegroundColor White
     Write-Host "   ENTER          " -ForegroundColor Yellow -NoNewline; Write-Host "- Запустить проверку всех доменов" -ForegroundColor Gray
     Write-Host "   D (Deep Trace) " -ForegroundColor Yellow -NoNewline; Write-Host "- Трассировка (показывает, где именно блокировка)" -ForegroundColor Gray
-    Write-Host "   P (Proxy)      " -ForegroundColor Yellow -NoNewline; Write-Host "- Настроить прокси (формат IP:ПОРТ, например 127.0.0.1:1080)" -ForegroundColor Gray
-    Write-Host "   S (Save)       " -ForegroundColor Yellow -NoNewline; Write-Host "- Сохранить результаты в файл YT-DPI_Report.txt" -ForegroundColor Gray
+    Write-Host "   P (Proxy)      " -ForegroundColor Yellow -NoNewline; Write-Host "- Настроить прокси (SOCKS5/HTTP)" -ForegroundColor Gray
+    Write-Host "   R (Report)     " -ForegroundColor Yellow -NoNewline; Write-Host "- Сохранить результаты в YT-DPI_Report.txt" -ForegroundColor Gray
+    Write-Host "   S (Settings)   " -ForegroundColor Yellow -NoNewline; Write-Host "- Настройки (IPv4/IPv6, очистка кэша)" -ForegroundColor Gray
     Write-Host "   Q / ESC        " -ForegroundColor Yellow -NoNewline; Write-Host "- Выйти из программы" -ForegroundColor Gray
 
     # Статусы
     Write-Host "`n [ ЧТО ЗНАЧАТ ЦВЕТА ]" -ForegroundColor White
-    Write-Host "   AVAILABLE      " -ForegroundColor Green -NoNewline; Write-Host "- Всё хорошо, домен доступен." -ForegroundColor Gray
-    Write-Host "   DPI BLOCK/RESET" -ForegroundColor Red -NoNewline; Write-Host "- Блокировка провайдером (нужен обход SNI)." -ForegroundColor Gray
-    Write-Host "   IP BLOCK       " -ForegroundColor Red -NoNewline; Write-Host "- Сервер недоступен (заблокирован сам адрес)." -ForegroundColor Gray
+    Write-Host "   AVAILABLE      " -ForegroundColor Green -NoNewline; Write-Host "- Всё хорошо, домен полностью доступен." -ForegroundColor Gray
+    Write-Host "   THROTTLED      " -ForegroundColor Yellow -NoNewline; Write-Host "- Частичная блокировка (DPI мешает, один из протоколов сбоит)." -ForegroundColor Gray
+    Write-Host "   DPI BLOCK/RESET" -ForegroundColor Red -NoNewline; Write-Host "- Жесткая блокировка по SNI (нужен обход DPI)." -ForegroundColor Gray
+    Write-Host "   IP BLOCK       " -ForegroundColor Red -NoNewline; Write-Host "- Сервер недоступен (заблокирован сам адрес или нет интернета)." -ForegroundColor Gray
 
     # Решение проблем
-    Write-Host "`n [ ЕСЛИ ТЕСТ ЗЕЛЕНЫЙ, НО ВИДЕО НЕ ГРУЗИТСЯ ]" -ForegroundColor White
-    Write-Host "   1. Отключите QUIC в браузере: откройте " -ForegroundColor Gray -NoNewline
-    Write-Host "chrome://flags/#enable-quic" -ForegroundColor Cyan -NoNewline
-    Write-Host " -> Disabled" -ForegroundColor Gray
+    Write-Host "`n [ СОВЕТЫ ]" -ForegroundColor White
+    Write-Host "   1. Если YouTube тормозит при статусе " -ForegroundColor Gray -NoNewline
+    Write-Host "THROTTLED" -ForegroundColor Yellow -NoNewline
+    Write-Host ", включите средство обхода DPI." -ForegroundColor Gray
     
-    Write-Host "   2. Отключите Kyber: откройте " -ForegroundColor Gray -NoNewline
-    Write-Host "chrome://flags/#enable-tls13-kyber" -ForegroundColor Cyan -NoNewline
-    Write-Host " -> Disabled" -ForegroundColor Gray
+    Write-Host "   2. Отключите Kyber в браузере для стабильности: " -ForegroundColor Gray
+    Write-Host "      chrome://flags/#enable-tls13-kyber -> Disabled" -ForegroundColor Cyan
     
-    Write-Host "   3. Если Deep Trace не работает, запустите программу от имени Администратора." -ForegroundColor Gray
-
-    Write-Host "`n [ НАСТРОЙКА ПРОКСИ ]" -ForegroundColor White
-    Write-Host "   Примеры ввода:" -ForegroundColor Gray
-    Write-Host "     127.0.0.1:1080            - HTTP (автоопределение)" -ForegroundColor DarkGray
-    Write-Host "     socks5://192.168.1.1:2080 - SOCKS5 явно" -ForegroundColor DarkGray
-    Write-Host "     user:pass@proxy.com:3128  - с аутентификацией" -ForegroundColor DarkGray
-    Write-Host "     http://user:pass@proxy.com:3128 - HTTP с аутентификацией" -ForegroundColor DarkGray
+    Write-Host "   3. Если Deep Trace не работает, запустите скрипт от Администратора." -ForegroundColor Gray
 
     # Футер
     Write-Host "`n $($line)" -ForegroundColor Gray
