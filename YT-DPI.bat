@@ -33,7 +33,7 @@ $DebugPreference = "SilentlyContinue"
 
 $scriptVersion = "2.2.0"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
-$DEBUG_ENABLED = $true
+$DEBUG_ENABLED = $false
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
 $DebugLogMutex = New-Object System.Threading.Mutex($false, "Global\YT-DPI-Debug-Mutex")
 $script:LogLock = New-Object System.Object
