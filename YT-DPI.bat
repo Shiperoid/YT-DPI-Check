@@ -1,9 +1,18 @@
 <# :
 @echo off
 set "SCRIPT_PATH=%~f0"
-title YT-DPI v2.1.6
+title YT-DPI v2.2.0
 chcp 65001 >nul
-powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ([System.IO.File]::ReadAllText('%~f0', [System.Text.Encoding]::UTF8))"
+
+:: Проверяем наличие PowerShell 7 (pwsh.exe)
+where pwsh >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    set "PS_EXE=pwsh"
+) else (
+    set "PS_EXE=powershell"
+)
+
+%PS_EXE% -NoProfile -ExecutionPolicy Bypass -Command "iex ([System.IO.File]::ReadAllText('%~f0', [System.Text.Encoding]::UTF8))"
 exit /b
 #>
 $script:OriginalFilePath = [System.Environment]::GetEnvironmentVariable("SCRIPT_PATH", "Process")
@@ -12,6 +21,7 @@ if (-not $script:OriginalFilePath) { $script:OriginalFilePath = $MyInvocation.In
 $ErrorActionPreference = "SilentlyContinue"
 $script:CurrentWindowWidth = 0
 $script:CurrentWindowHeight = 0
+[Console]::BufferHeight = [Console]::WindowHeight #потестить с этим параметром отрисовка быстрее но нет прокрутки
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 [Console]::CursorVisible = $false
@@ -21,9 +31,9 @@ $DebugPreference = "SilentlyContinue"
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.1.6"   # текущая версия yt-dpi
+$scriptVersion = "2.2.0"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
-$DEBUG_ENABLED = $false
+$DEBUG_ENABLED = $true
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
 $DebugLogMutex = New-Object System.Threading.Mutex($false, "Global\YT-DPI-Debug-Mutex")
 $script:LogLock = New-Object System.Object
@@ -49,36 +59,34 @@ function Write-DebugLog($msg, $level = "DEBUG") {
     }
 }
 
-Write-DebugLog "==================== СКРИПТ ЗАПУЩЕН ====================" "INFO"
-Write-DebugLog "Версия PowerShell: $($PSVersionTable.PSVersion)" "INFO"
-Write-DebugLog "ОС: $([System.Environment]::OSVersion.VersionString)" "INFO"
-Write-DebugLog "Командная строка: $([Environment]::CommandLine)" "INFO"
-
-Write-DebugLog "Путь к скрипту: $script:OriginalFilePath"
-# РОТАЦИЯ ЛОГА ПРИ ЗАПУСКЕ (если превышен лимит 5 МБ)
-$maxLogSizeBytes = 5 * 1024 * 1024   # 5 МБ
+# ===== ЛОГИРОВАНИЕ И РОТАЦИЯ =====
+$maxLogSizeBytes = 5 * 1024 * 1024
 if (Test-Path $DebugLogFile) {
     try {
-        $fileInfo = Get-Item $DebugLogFile -ErrorAction SilentlyContinue
+        $fileInfo = Get-Item $DebugLogFile
         if ($fileInfo.Length -gt $maxLogSizeBytes) {
             $backupName = [System.IO.Path]::GetFileNameWithoutExtension($DebugLogFile) + "_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + ".log"
-            $backupPath = Join-Path (Split-Path $DebugLogFile -Parent) $backupName
-            Move-Item $DebugLogFile $backupPath -Force
-            # Создаём новый пустой файл (необязательно, т.к. AppendAllText создаст, но для ясности)
-            New-Item $DebugLogFile -ItemType File -Force | Out-Null
-            Write-DebugLog "Старый лог превышал $maxLogSizeBytes байт, переименован в $backupName" "INFO"
+            Move-Item $DebugLogFile (Join-Path (Split-Path $DebugLogFile -Parent) $backupName) -Force
         } else {
-            # Файл маленький — просто удаляем, чтобы начать чистый лог
             Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue
-            Write-DebugLog "Старый лог-файл удален (размер $($fileInfo.Length) байт)" "INFO"
         }
-    } catch {
-        # Если что‑то пошло не так, просто удаляем старый лог
-        Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue
-        Write-DebugLog "Ошибка при ротации лога: $_" "WARN"
-    }
+    } catch { Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue }
 }
 
+# ТЕПЕРЬ ПИШЕМ ИНФО-БЛОК (Когда файл уже чистый)
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+try { $osInfo = Get-CimInstance Win32_OperatingSystem } catch { $osInfo = @{Caption="Windows (Legacy)"; Version="Unknown"} }
+
+Write-DebugLog "==================== YT-DPI SESSION START ====================" "INFO"
+Write-DebugLog "Скрипт версия: $scriptVersion" "INFO"
+Write-DebugLog "ОС: $($osInfo.Caption) ($($osInfo.Version))" "INFO"
+Write-DebugLog "PowerShell: $($PSVersionTable.PSVersion.ToString())" "INFO"
+Write-DebugLog "Права: $(if($isAdmin){'Администратор'}else{'Пользователь'})" "INFO"
+Write-DebugLog "Локаль: $([System.Globalization.CultureInfo]::CurrentCulture.Name)" "INFO"
+Write-DebugLog "Путь: $script:OriginalFilePath" "INFO"
+Write-DebugLog "============================================================" "INFO"
+
+Write-DebugLog "Старый лог-файл очищен, начало новой сессии." "INFO"
 # --- ОТКЛЮЧЕНИЕ ВЫДЕЛЕНИЯ МЫШЬЮ ---
 Write-DebugLog "Отключаем QuickEdit..."
 $code = @"
@@ -116,12 +124,14 @@ $script:DnsCacheLock = New-Object System.Threading.Mutex($false, "Global\YT-DPI-
 $script:NetInfo = $null
 $script:Targets = $null
 $script:LastScanResults = @()
+$script:DynamicColPos = $null
+$script:IpColumnWidth = 16
 $script:UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 # --- КОНСТАНТЫ ---
 $SCRIPT:CONST = @{
-    TimeoutMs    = 3000
-    ProxyTimeout = 4000
+    TimeoutMs    = 1500
+    ProxyTimeout = 2500
     HttpPort     = 80
     HttpsPort    = 443
     Tls13Proto   = 12288
@@ -135,19 +145,166 @@ $SCRIPT:CONST = @{
         Lat = 96     # LAT (было 91)
         Ver = 104    # RESULT (было 99)
     }
-    NavStr = "[ *READY* ]  [ENTER] SCAN | [H] HELP | [P] PROXY  | [T] TEST PROXY | [D] DEEP TRACE | [S] SAVE | [U] UPDATE | [Q] QUIT"
+        NavStr = "[READY] [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [D] DEEP TRACE | [R] REPORT | [H] HELP | [Q] QUIT"
 }
 Write-DebugLog "Константы инициализированы."
 
+# --- ИНИЦИАЛИЗАЦИЯ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
+$script:Config = $null
+$script:NetInfo = $null
+$script:DnsCache = [hashtable]::Synchronized(@{}) # Сразу делаем его потокобезопасным
+$script:LastScanResults = @()
+
+
+# --- НИЗКОУРОВНЕВЫЙ TLS ДВИЖОК (C#) ---
+$tlsCode = @"
+using System;
+using System.Collections.Generic;
+using System.Net.Sockets;
+using System.Text;
+using System.Linq;
+
+public class TlsScanner {
+    public static string TestT13(string targetIp, string host, string proxyHost, int proxyPort, string user, string pass, int timeout) {
+        try {
+            using (TcpClient tcp = new TcpClient()) {
+                string connectHost = string.IsNullOrEmpty(proxyHost) ? targetIp : proxyHost;
+                int connectPort = string.IsNullOrEmpty(proxyHost) ? 443 : proxyPort;
+
+                var ar = tcp.BeginConnect(connectHost, connectPort, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(timeout)) return "DRP";
+                tcp.EndConnect(ar);
+                
+                NetworkStream stream = tcp.GetStream();
+                stream.ReadTimeout = timeout;
+                stream.WriteTimeout = timeout;
+
+                if (!string.IsNullOrEmpty(proxyHost)) {
+                    byte[] greeting = new byte[] { 0x05, 0x01, 0x00 };
+                    stream.Write(greeting, 0, greeting.Length);
+                    byte[] authResp = new byte[2];
+                    stream.Read(authResp, 0, 2);
+                    
+                    byte[] connectReq = BuildSocksConnect(host, 443);
+                    stream.Write(connectReq, 0, connectReq.Length);
+                    byte[] connResp = new byte[10];
+                    stream.Read(connResp, 0, 10);
+                    if (connResp[1] != 0x00) return "PRX_ERR";
+                }
+
+                // Шлем исправленный пакет
+                byte[] hello = BuildModernHello(host);
+                stream.Write(hello, 0, hello.Length);
+
+                byte[] header = new byte[5];
+                int read = 0;
+                try {
+                    read = stream.Read(header, 0, 5);
+                } catch (System.IO.IOException ex) {
+                    string m = ex.Message.ToLower();
+                    if (m.Contains("reset") || m.Contains("сброс")) return "RST";
+                    return "DRP";
+                }
+
+                if (read < 5) return "DRP";
+
+                // 0x16 = Handshake (Server Hello) - Успех
+                if (header[0] == 0x16) return "OK"; 
+                
+                // 0x15 = TLS Alert. Если сервер прислал это, значит пакет валиден, 
+                // но серверу что-то не нравится. Для теста доступности это "OK" (сервер ответил).
+                if (header[0] == 0x15) return "OK"; 
+                
+                return "DRP";
+            }
+        } catch (Exception ex) {
+            string m = ex.Message.ToLower();
+            if (m.Contains("reset") || m.Contains("closed")) return "RST";
+            return "DRP";
+        }
+    }
+
+    private static byte[] BuildSocksConnect(string host, int port) {
+        List<byte> req = new List<byte> { 0x05, 0x01, 0x00, 0x03 };
+        byte[] h = Encoding.ASCII.GetBytes(host);
+        req.Add((byte)h.Length);
+        req.AddRange(h);
+        req.Add((byte)(port >> 8));
+        req.Add((byte)(port & 0xFF));
+        return req.ToArray();
+    }
+
+    private static byte[] BuildModernHello(string host) {
+        List<byte> body = new List<byte>();
+        body.AddRange(new byte[] { 0x03, 0x03 }); // TLS 1.2 (for compatibility header)
+        
+        Random rand = new Random();
+        byte[] random = new byte[32];
+        rand.NextBytes(random);
+        body.AddRange(random);
+
+        body.Add(0x00); // Session ID len
+        body.AddRange(new byte[] { 0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03 }); // Ciphers: TLS_AES_128_GCM_SHA256 и др.
+        body.Add(0x20); // Length 32
+        byte[] sessId = new byte[32]; rand.NextBytes(sessId);
+        body.AddRange(sessId);
+
+        List<byte> exts = new List<byte>();
+        
+        // 1. SNI
+        byte[] h = Encoding.ASCII.GetBytes(host);
+        exts.AddRange(new byte[] { 0x00, 0x00 }); // Type SNI
+        int sniLen = h.Length + 5;
+        exts.Add((byte)(sniLen >> 8)); exts.Add((byte)(sniLen & 0xFF));
+        exts.Add((byte)((h.Length + 3) >> 8)); exts.Add((byte)((h.Length + 3) & 0xFF));
+        exts.Add(0x00); // Name type: host_name
+        exts.Add((byte)(h.Length >> 8)); exts.Add((byte)(h.Length & 0xFF));
+        exts.AddRange(h);
+
+        // 2. Extended Master Secret (0x0017)
+        exts.AddRange(new byte[] { 0x00, 0x17, 0x00, 0x00 });
+
+        // 3. Supported Groups (0x000a) - x25519
+        exts.AddRange(new byte[] { 0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1d });
+
+        // 4. Signature Algorithms (0x000d) - КРИТИЧНО ДЛЯ GOOGLE
+        // ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256, rsa_pkcs1_sha256
+        exts.AddRange(new byte[] { 0x00, 0x0d, 0x00, 0x08, 0x00, 0x06, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01 });
+
+        // 5. Supported Versions (0x002b) - TLS 1.3
+        exts.AddRange(new byte[] { 0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04 });
+
+        // 6. PSK Key Exchange Modes (0x002d) - КРИТИЧНО ДЛЯ TLS 1.3
+        exts.AddRange(new byte[] { 0x00, 0x2d, 0x00, 0x02, 0x01, 0x01 });
+
+        // 7. Key Share (0x0033)
+        exts.AddRange(new byte[] { 0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20 });
+        byte[] key = new byte[32]; rand.NextBytes(key);
+        exts.AddRange(key);
+
+        body.Add((byte)(exts.Count >> 8)); body.Add((byte)(exts.Count & 0xFF));
+        body.AddRange(exts);
+
+        List<byte> pkt = new List<byte> { 0x16, 0x03, 0x01 }; // Record Header
+        pkt.Add((byte)(body.Count >> 8)); pkt.Add((byte)(body.Count & 0xFF));
+        pkt.AddRange(body);
+        return pkt.ToArray();
+    }
+}
+"@
+try { Add-Type -TypeDefinition $tlsCode -ErrorAction SilentlyContinue } catch {}
+
+
 # --- ГЛОБАЛЬНЫЕ ПУТИ ---
+# Лог кладем строго в папку, где лежит сам файл .bat
+$script:ParentDir = Split-Path -Parent $script:OriginalFilePath
+$DebugLogFile = Join-Path $script:ParentDir "YT-DPI_Debug.log"
+
+# Конфиг остается в профиле пользователя (AppData)
 $script:ConfigDir = Join-Path $env:LOCALAPPDATA "YT-DPI"
 $script:ConfigFile = Join-Path $script:ConfigDir "YT-DPI_config.json"
 
-$script:Config = $null
-$script:NetInfo = $null
-$script:DnsCache = @{}
-
-# Создаём папку, если её нет
+# Создаём папку в AppData, если её нет (для конфига)
 if (-not (Test-Path $script:ConfigDir)) {
     try { New-Item -Path $script:ConfigDir -ItemType Directory -Force | Out-Null } catch {}
 }
@@ -166,13 +323,14 @@ function New-ConfigObject {
         RunCount = 0
         LastPromptRun = 0
         LastCheckedVersion = ""
-        Tls13Supported = $null
+        IpPreference = "IPv6"   # <--- НОВОЕ: "IPv6" (приоритет) или "IPv4"
         Proxy = @{ Enabled = $false; Type = "HTTP"; Host = ""; Port = 0; User = ""; Pass = "" }
         ProxyHistory = @()
         NetCache = @{ 
             ISP = "Loading..."; LOC = "Unknown"; DNS = "8.8.8.8"; 
             CDN = "manifest.googlevideo.com"; 
-            TimestampTicks = (Get-Date).AddDays(-1).Ticks
+            TimestampTicks = (Get-Date).AddDays(-1).Ticks;
+            HasIPv6 = $false
         }
         DnsCache = @{} 
     }
@@ -189,46 +347,41 @@ function Get-PaddedCenter {
 # --- Структура конфига в AppData ---
 function Load-Config {
     Write-DebugLog "Загрузка конфигурации..."
+    $default = New-ConfigObject
+    
     if (Test-Path $script:ConfigFile) {
         try {
             $config = Get-Content $script:ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
-            
-            # Безопасная проверка свежести кэша через Ticks
+            if ($null -eq $config) { return $default }
+
+            # --- МИГРАЦИЯ: Добавляем недостающие поля из дефолтного конфига ---
+            foreach ($prop in $default.PSObject.Properties) {
+                if ($null -eq $config.$($prop.Name)) {
+                    # Используем Add-Member, чтобы расширить объект «на лету»
+                    $config | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
+                    Write-DebugLog "Миграция: Добавлено отсутствующее поле $($prop.Name)" "INFO"
+                }
+            }
+
+            # Санитария DNS-кэша
+            if ($config.DnsCache -and $config.DnsCache.PSObject) {
+                $cleanDns = @{}
+                foreach ($p in $config.DnsCache.PSObject.Properties) {
+                    if ($p.Value -match '\..*\.' -or $p.Value -match ':') { $cleanDns[$p.Name] = $p.Value }
+                }
+                $config.DnsCache = $cleanDns
+            }
+
             $lastTicks = if ($config.NetCache.TimestampTicks) { $config.NetCache.TimestampTicks } else { 0 }
-            $diff = (Get-Date).Ticks - $lastTicks
-            $isStale = $diff -gt ([TimeSpan]::FromHours(6).Ticks)
-            
+            $isStale = (Get-Date).Ticks - $lastTicks -gt ([TimeSpan]::FromHours(6).Ticks)
             $config | Add-Member -MemberType NoteProperty -Name "NetCacheStale" -Value $isStale -Force
-            # Принудительно очищаем IPv6 из кэша, если IPv6 не работает
-    if ($config.NetCache.HasIPv6 -eq $false -and $config.DnsCache) {
-        Write-DebugLog "IPv6 отключён, удаляем IPv6-записи из DNS-кэша" "INFO"
-        $newCache = @{}
-        foreach ($key in $config.DnsCache.PSObject.Properties) {
-            $value = $key.Value
-            # Если значение похоже на IPv6 (содержит ':'), пропускаем
-            if ($value -match ':') {
-                Write-DebugLog "Удаляем IPv6 запись: $key = $value" "DEBUG"
-                continue
-            }
-            $newCache[$key.Name] = $value
-        }
-        $config.DnsCache = $newCache
-    }
-            Write-DebugLog "Конфиг загружен. Кэш устарел: $isStale" "INFO"
-            
-            # === ДОБАВЛЯЕМ МИГРАЦИЮ ===
-            if ($null -eq $config.ProxyHistory) {
-                $config | Add-Member -MemberType NoteProperty -Name "ProxyHistory" -Value @() -Force
-                Write-DebugLog "Добавлено поле ProxyHistory в конфиг" "INFO"
-            }
-            # Если в будущем появятся другие поля, добавляем их здесь
             
             return $config
         } catch { 
-            Write-DebugLog "Ошибка JSON, создаем новый: $_" "WARN"
+            Write-DebugLog "Ошибка загрузки: $_" "WARN"
         }
     }
-    return New-ConfigObject
+    return $default
 }
 
 function Save-Config($config) {
@@ -237,12 +390,11 @@ function Save-Config($config) {
         # Обновляем DNS кэш перед сохранением
         $config.DnsCache = $script:DnsCache
         $config.Proxy = $global:ProxyConfig
-        $config.Tls13Supported = $global:Tls13Supported
         
         # Удаляем временное поле
         if ($config.PSObject.Properties['NetCacheStale']) { $config.PSObject.Properties.Remove('NetCacheStale') }
 
-        $json = $config | ConvertTo-Json -Depth 5
+        $json = $config | ConvertTo-Json -Depth 5 -Compress
         Set-Content -Path $script:ConfigFile -Value $json -Encoding UTF8 -Force
         Write-DebugLog "Конфиг сохранен успешно." "INFO"
     } catch { 
@@ -409,10 +561,12 @@ function Get-Targets {
 # ====================================================================================
 function Out-Str($x, $y, $str, $color="White", $bg="Black") {
     try {
+        # Затираем всю область до конца строки
+        $clearStr = $str + (" " * [Math]::Max(0, [Console]::WindowWidth - $x - $str.Length))
         [Console]::SetCursorPosition($x, $y)
         [Console]::ForegroundColor = $color
         [Console]::BackgroundColor = $bg
-        [Console]::Write($str)
+        [Console]::Write($clearStr)
         [Console]::BackgroundColor = "Black"
     } catch {}
 }
@@ -483,11 +637,48 @@ function Draw-StatusBar {
     Out-Str 2 $row " $text " $Fg $Bg
 }
 
-function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
+function Draw-UI ($NetInfo, $Targets, $Results, $ClearScreen = $true) {
+    # $Results - массив объектов с результатами сканирования (свойство .IP)
     Write-DebugLog "Draw-UI: Targets count=$($Targets.Count), ClearScreen=$ClearScreen"
+
+        # --- Динамический расчёт ширины колонки IP ---
+    $ipColumnWidth = 16
+    
+    # 1. Проверяем текущие результаты (если они есть)
+    if ($Results) {
+        $maxIpLen = ($Results | ForEach-Object { if ($_.IP) { $_.IP.ToString().Length } else { 0 } } | Measure-Object -Maximum).Maximum
+        if ($maxIpLen -gt $ipColumnWidth) { $ipColumnWidth = $maxIpLen + 2 }
+    }
+    
+    # 2. Проверяем DNS-кэш (чтобы заранее знать про длинные IPv6)
+    if ($script:DnsCache) {
+        $cacheIpMax = ($script:DnsCache.Values | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+        if ($cacheIpMax -gt $ipColumnWidth) { $ipColumnWidth = $cacheIpMax + 2 }
+    }
+
+    if ($ipColumnWidth -gt 45) { $ipColumnWidth = 45 }
+    $script:IpColumnWidth = $ipColumnWidth
+
+    # --- Пересчёт позиций колонок (остальные ширины фиксированы) ---
+    $domStart  = 6
+    $domWidth  = 42
+    $ipStart   = $domStart + $domWidth + 2   # позиция после колонки Domain с отступом
+    $ipWidth   = $ipColumnWidth
+    $httpStart = $ipStart + $ipWidth + 2
+    $httpWidth = 6
+    $t12Start  = $httpStart + $httpWidth + 2
+    $t12Width  = 8
+    $t13Start  = $t12Start + $t12Width + 2
+    $t13Width  = 8
+    $latStart  = $t13Start + $t13Width + 2
+    $latWidth  = 6
+    $verStart  = $latStart + $latWidth + 2
+    $verWidth  = 30
+
     Update-ConsoleSize
     if ($ClearScreen) { [Console]::Clear() }
-    
+
+    # --- Логотип и правая панель (без изменений) ---
     Out-Str 1 1 ' ██╗   ██╗████████╗    ██████╗ ██████╗ ██╗' 'Green'
     Out-Str 1 2 ' ╚██╗ ██╔╝╚══██╔══╝    ██╔══██╗██╔══██╗██║' 'Green'
     Out-Str 1 3 '  ╚████╔╝    ██║ █████╗██║  ██║██████╔╝██║' 'Green'
@@ -495,76 +686,101 @@ function Draw-UI ($NetInfo, $Targets, $ClearScreen = $true) {
     Out-Str 1 5 '    ██║      ██║       ██████║ ██║     ██║' 'Green'
     Out-Str 1 6 '    ╚═╝      ╚═╝       ╚═════╝ ╚═╝     ╚═╝' 'Green'
 
-    # Правая панель
-    Out-Str 45 1 '██████╗    ██╗' 'Gray'
-    Out-Str 45 2 '╚════██╗  ███║' 'Gray'
-    Out-Str 45 3 ' █████╔╝  ╚██║' 'Gray'
-    Out-Str 45 4 '██╔═══╝    ██║' 'Gray'
-    Out-Str 45 5 '███████╗██╗██║' 'Gray'
-    Out-Str 45 6 '╚══════╝╚═╝╚═╝' 'Gray'
+    Out-Str 45 1 '██████╗    ██████╗ ' 'Gray'
+    Out-Str 45 2 '╚════██╗   ╚════██╗' 'Gray'
+    Out-Str 45 3 ' █████╔╝    █████╔╝' 'Gray'
+    Out-Str 45 4 '██╔═══╝    ██╔═══╝' 'Gray'
+    Out-Str 45 5 '███████╗██╗███████╗' 'Gray'
+    Out-Str 45 6 '╚══════╝╚═╝╚══════╝' 'Gray'
 
-    # Правая панель информации 
     Out-Str 65 1 "> SYS STATUS: [ ONLINE ]" "Green"
-    Out-Str 65 2 "> ENGINE: Barebuh Pro v1.7.6" "Red"
+    Out-Str 65 2 "> ENGINE: Barebuh Pro v2.3.4" "Red"
     Out-Str 65 3 ("> LOCAL DNS: " + $NetInfo.DNS).PadRight(50) "Cyan"
     Out-Str 65 4 ("> CDN NODE: " + $NetInfo.CDN).PadRight(50) "Yellow"
     Out-Str 65 5 "> AUTHOR: github.com/Shiperoid" "Green"
-    
+
     $dispIsp = $NetInfo.ISP
-    if ($dispIsp.Length -gt 35) { 
-        $dispIsp = $dispIsp.Substring(0, 32) + "..." 
-    }
+    if ($dispIsp.Length -gt 35) { $dispIsp = $dispIsp.Substring(0, 32) + "..." }
     $dispLoc = $NetInfo.LOC
-    if ($dispLoc.Length -gt 30) { 
-        $dispLoc = $dispLoc.Substring(0, 27) + "..." 
-    }
+    if ($dispLoc.Length -gt 30) { $dispLoc = $dispLoc.Substring(0, 27) + "..." }
     $ispStr = "> ISP / LOC: $dispIsp ($dispLoc)"
     Out-Str 65 6 ($ispStr.PadRight(80).Substring(0, 80)) "Magenta"
-    
+
     $proxyStatus = if ($global:ProxyConfig.Enabled) { "> PROXY: $($global:ProxyConfig.Type) $($global:ProxyConfig.Host):$($global:ProxyConfig.Port) Connected" } else { "> PROXY: [ OFF ]" }
     Out-Str 65 7 ($proxyStatus.PadRight(58)) "DarkYellow"
     Out-Str 65 8 "> TG: t.me/YT_DPI | VERSION: $scriptVersion" "Green"
-        
-    # Таблица
+
+    # --- Таблица ---
     $y = 9
     $width = [Console]::WindowWidth
-    
+
     # Верхняя граница таблицы
     Out-Str 0 $y ("=" * $width) "DarkCyan"
-    
-    # Заголовки (с новой колонкой #)
-    Out-Str $CONST.UI.Num ($y+1) "#" "White"
-    Out-Str $CONST.UI.Dom ($y+1) "TARGET DOMAIN" "White"
-    Out-Str $CONST.UI.IP  ($y+1) "IP ADDRESS" "White"
-    Out-Str $CONST.UI.HTTP ($y+1) "HTTP" "White"
-    Out-Str $CONST.UI.T12 ($y+1) "TLS 1.2" "White"
-    Out-Str $CONST.UI.T13 ($y+1) "TLS 1.3" "White"
-    Out-Str $CONST.UI.Lat ($y+1) "LAT" "White"
-    Out-Str $CONST.UI.Ver ($y+1) "RESULT" "White"
-    
+
+    # Заголовки
+    Out-Str 1 ($y+1) "#" "White"
+    Out-Str $domStart ($y+1) "TARGET DOMAIN" "White"
+    Out-Str $ipStart ($y+1) "IP ADDRESS" "White"
+    Out-Str $httpStart ($y+1) "HTTP" "White"
+    Out-Str $t12Start ($y+1) "TLS 1.2" "White"
+    Out-Str $t13Start ($y+1) "TLS 1.3" "White"
+    Out-Str $latStart ($y+1) "LAT" "White"
+    Out-Str $verStart ($y+1) "RESULT" "White"
+
+    Out-Str 0 ($y+2) ("=" * $width) "DarkCyan"
+
+
     # Разделитель под заголовками
     Out-Str 0 ($y+2) ("=" * $width) "DarkCyan"
-    
-    # Строки результатов (пустые)
+
+    # Строки результатов
     for($i=0; $i -lt $Targets.Count; $i++) {
         $currentRow = $y + 3 + $i
         $num = $i + 1
         $numStr = $num.ToString().PadRight(4)
-        
-        $numStr = ($i + 1).ToString().PadRight(4)
-        Out-Str $CONST.UI.Num $currentRow $numStr "Cyan"
-        Out-Str $CONST.UI.Dom $currentRow ($Targets[$i].PadRight(42).Substring(0, 42)) "Gray"
-        Out-Str $CONST.UI.IP  $currentRow ("---.---.---.---".PadRight(16).Substring(0, 16)) "DarkGray"
-        Out-Str $CONST.UI.HTTP $currentRow ("--".PadRight(6).Substring(0, 6)) "DarkGray"
-        Out-Str $CONST.UI.T12  $currentRow ("--".PadRight(8).Substring(0, 8)) "DarkGray"
-        Out-Str $CONST.UI.T13  $currentRow ("--".PadRight(8).Substring(0, 8)) "DarkGray"
-        Out-Str $CONST.UI.Lat  $currentRow ("----".PadRight(6).Substring(0, 6)) "DarkGray"
-        Out-Str $CONST.UI.Ver  $currentRow ("IDLE".PadRight(30).Substring(0, 30)) "DarkGray"
+
+        Out-Str 1 $currentRow $numStr "Cyan"
+        Out-Str $domStart $currentRow ($Targets[$i].PadRight($domWidth).Substring(0, $domWidth)) "Gray"
+
+        # Если есть результаты – используем их, иначе пустые значения
+        if ($Results -and $i -lt $Results.Count) {
+            $res = $Results[$i]
+            $ipStr = if ($res.IP) { [string]$res.IP } else { "---" }
+            if ($ipStr.Length -gt $ipWidth) { $ipStr = $ipStr.Substring(0, $ipWidth - 2) + ".." }
+            Out-Str $ipStart $currentRow $ipStr.PadRight($ipWidth).Substring(0, $ipWidth) "DarkGray"
+
+            $htStr = if ($res.HTTP) { [string]$res.HTTP } else { "---" }
+            $hCol = if($htStr -eq "OK") {"Green"} elseif($htStr -eq "---") {"DarkGray"} else {"Red"}
+            Out-Str $httpStart $currentRow $htStr.PadRight($httpWidth).Substring(0, $httpWidth) $hCol
+
+            $t12Str = if ($res.T12) { [string]$res.T12 } else { "---" }
+            $t12Col = if($t12Str -eq "OK") {"Green"} elseif($t12Str -eq "---") {"DarkGray"} else {"Red"}
+            Out-Str $t12Start $currentRow $t12Str.PadRight($t12Width).Substring(0, $t12Width) $t12Col
+
+            $t13Str = if ($res.T13) { [string]$res.T13 } else { "---" }
+            $t13Col = if($t13Str -eq "OK") {"Green"} elseif($t13Str -eq "N/A" -or $t13Str -eq "---") {"DarkGray"} else {"Red"}
+            Out-Str $t13Start $currentRow $t13Str.PadRight($t13Width).Substring(0, $t13Width) $t13Col
+
+            $latStr = if ($res.Lat) { [string]$res.Lat } else { "---" }
+            $latCol = if($latStr -eq "---") {"DarkGray"} else {"Cyan"}
+            Out-Str $latStart $currentRow $latStr.PadRight($latWidth).Substring(0, $latWidth) $latCol
+
+            $verStr = if ($res.Verdict) { [string]$res.Verdict } else { "UNKNOWN" }
+            Out-Str $verStart $currentRow $verStr.PadRight($verWidth).Substring(0, $verWidth) $res.Color
+        } else {
+            # Пустые строки
+            Out-Str $ipStart $currentRow ("---.---.---.---".PadRight($ipWidth).Substring(0, $ipWidth)) "DarkGray"
+            Out-Str $httpStart $currentRow ("--".PadRight($httpWidth).Substring(0, $httpWidth)) "DarkGray"
+            Out-Str $t12Start $currentRow ("--".PadRight($t12Width).Substring(0, $t12Width)) "DarkGray"
+            Out-Str $t13Start $currentRow ("--".PadRight($t13Width).Substring(0, $t13Width)) "DarkGray"
+            Out-Str $latStart $currentRow ("----".PadRight($latWidth).Substring(0, $latWidth)) "DarkGray"
+            Out-Str $verStart $currentRow ("IDLE".PadRight($verWidth).Substring(0, $verWidth)) "DarkGray"
+        }
     }
-    
-    # Нижняя граница таблицы
+
     Out-Str 0 ($y + 3 + $Targets.Count) ("=" * $width) "DarkCyan"
 }
+
 
 function Get-ScanAnim($f, $row) {
     $frames = "[=   ]", "[ =  ]", "[  = ]", "[   =]", "[  = ]", "[ =  ]"
@@ -573,40 +789,51 @@ function Get-ScanAnim($f, $row) {
 
 function Write-ResultLine($row, $result) {
     if ($row -lt 0 -or $row -ge [Console]::BufferHeight) { return }
-    
-    # Подготовка строк
+
+    $pos = if ($script:DynamicColPos) { $script:DynamicColPos } else { $CONST.UI }
+    $ipWidth = if ($script:IpColumnWidth) { $script:IpColumnWidth } else { 16 }
+
+    # Номер строки
     $numStr = if ($result.Number) { $result.Number.ToString().PadRight(4) } else { "    " }
-    $ipStr  = if ($result.IP) { [string]$result.IP } else { "---" }
-    $htStr  = if ($result.HTTP) { [string]$result.HTTP } else { "---" }
-    $t12Str = if ($result.T12) { [string]$result.T12 } else { "---" }
-    $t13Str = if ($result.T13) { [string]$result.T13 } else { "---" }
-    $latStr = if ($result.Lat) { [string]$result.Lat } else { "---" }
-    $v      = if ($result.Verdict) { [string]$result.Verdict } else { "UNKNOWN" }
-    
-    if ($ipStr.Length -gt 15) { 
-    # Сокращаем IPv6 для таблицы: "2a00:14...:c0f"
-    $ipStr = $ipStr.Substring(0,9) + ".." + $ipStr.Substring($ipStr.Length-4) 
-    }
-    
-    # ВЫВОД ДАННЫХ ПО КОЛОНКАМ (без предварительной очистки всей строки)
-    Out-Str $CONST.UI.Num $row $numStr "Cyan"
-    Out-Str $CONST.UI.Dom $row ($result.Target.PadRight(42).Substring(0, 42)) "Gray"
-    Out-Str $CONST.UI.IP  $row ($ipStr.PadRight(16).Substring(0, 16)) "DarkGray"
-    
+    Out-Str $pos.Num $row $numStr "Cyan"
+
+    # Домен
+    Out-Str $pos.Dom $row $result.Target.PadRight(42).Substring(0, 42) "Gray"
+
+    # IP
+    $ipStr = if ($result.IP) { [string]$result.IP } else { "---" }
+    if ($ipStr.Length -gt $ipWidth) { $ipStr = $ipStr.Substring(0, $ipWidth - 2) + ".." }
+    $ipPadded = $ipStr.PadRight($ipWidth)
+    Out-Str $pos.IP $row $ipPadded.Substring(0, $ipWidth) "DarkGray"
+
+    # HTTP
+    $htStr = if ($result.HTTP) { [string]$result.HTTP } else { "---" }
     $hCol = if($htStr -eq "OK") {"Green"} elseif($htStr -eq "---") {"DarkGray"} else {"Red"}
-    Out-Str $CONST.UI.HTTP $row ($htStr.PadRight(6)) $hCol
-    
+    $htPadded = $htStr.PadRight(6)
+    Out-Str $pos.HTTP $row $htPadded.Substring(0, 6) $hCol
+
+    # TLS 1.2
+    $t12Str = if ($result.T12) { [string]$result.T12 } else { "---" }
     $t12Col = if($t12Str -eq "OK") {"Green"} elseif($t12Str -eq "---") {"DarkGray"} else {"Red"}
-    Out-Str $CONST.UI.T12 $row ($t12Str.PadRight(8)) $t12Col
-    
+    $t12Padded = $t12Str.PadRight(8)
+    Out-Str $pos.T12 $row $t12Padded.Substring(0, 8) $t12Col
+
+    # TLS 1.3
+    $t13Str = if ($result.T13) { [string]$result.T13 } else { "---" }
     $t13Col = if($t13Str -eq "OK") {"Green"} elseif($t13Str -eq "N/A" -or $t13Str -eq "---") {"DarkGray"} else {"Red"}
-    Out-Str $CONST.UI.T13 $row ($t13Str.PadRight(8)) $t13Col
-    
+    $t13Padded = $t13Str.PadRight(8)
+    Out-Str $pos.T13 $row $t13Padded.Substring(0, 8) $t13Col
+
+    # LAT
+    $latStr = if ($result.Lat) { [string]$result.Lat } else { "---" }
     $latCol = if($latStr -eq "---") {"DarkGray"} else {"Cyan"}
-    Out-Str $CONST.UI.Lat $row ($latStr.PadRight(6)) $latCol
-    
-    # Последняя колонка затирает всё, что было раньше (анимацию SCANNING)
-    Out-Str $CONST.UI.Ver $row ($v.PadRight(30)) $result.Color
+    $latPadded = $latStr.PadRight(6)
+    Out-Str $pos.Lat $row $latPadded.Substring(0, 6) $latCol
+
+    # VERDICT
+    $verStr = if ($result.Verdict) { [string]$result.Verdict } else { "UNKNOWN" }
+    $verPadded = $verStr.PadRight(30)
+    Out-Str $pos.Ver $row $verPadded.Substring(0, 30) $result.Color
 }
 
 
@@ -1420,407 +1647,204 @@ function Connect-ThroughProxy {
 # СЕТЕВЫЕ ФУНКЦИИ
 # ====================================================================================
 function Invoke-WebRequestViaProxy($Url, $Method = "GET", $Timeout = $CONST.TimeoutMs) {
-    Write-DebugLog "Invoke-WebRequestViaProxy: $Method $Url, ProxyEnabled=$($global:ProxyConfig.Enabled)"
+    Write-DebugLog "Invoke-WebRequestViaProxy: $Method $Url"
     $uri = [System.Uri]$Url
-    if (-not $global:ProxyConfig.Enabled -or $global:ProxyConfig.Type -in @("HTTP", "HTTPS")) {
+    
+    # Режим прямого подключения или HTTP-прокси
+    if (-not $global:ProxyConfig.Enabled -or $global:ProxyConfig.Type -eq "HTTP") {
         try {
             $req = [System.Net.WebRequest]::Create($uri)
             $req.Timeout = $Timeout
             $req.UserAgent = $script:UserAgent
-            $req.KeepAlive = $false
             if ($global:ProxyConfig.Enabled) {
                 $wp = New-Object System.Net.WebProxy($global:ProxyConfig.Host, $global:ProxyConfig.Port)
                 if ($global:ProxyConfig.User) { $wp.Credentials = New-Object System.Net.NetworkCredential($global:ProxyConfig.User, $global:ProxyConfig.Pass) }
                 $req.Proxy = $wp
             } else { $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy() }
+            
             $resp = $req.GetResponse()
             $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
             $content = $reader.ReadToEnd()
             $resp.Close()
-            Write-DebugLog "Invoke-WebRequestViaProxy успешно, длина ответа: $($content.Length)"
             return $content
-        } catch { 
-            Write-DebugLog "Invoke-WebRequestViaProxy ошибка: $_"
-            return "" 
-        }
-    } else {
-        Write-DebugLog "Invoke-WebRequestViaProxy через SOCKS"
+        } catch { return "" }
+    } 
+    # Режим SOCKS5 (Исправлено для HTTPS)
+    else {
         try {
             $conn = Connect-ThroughProxy $uri.Host $uri.Port $global:ProxyConfig $Timeout
-            $request = "$Method $($uri.PathAndQuery) HTTP/1.0`r`nHost: $($uri.Host)`r`nUser-Agent: $script:UserAgent`r`nConnection: close`r`n`r`n"
+            $stream = $conn.Stream
+
+            # --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: SSL-обертка для SOCKS ---
+            if ($uri.Scheme -eq "https") {
+                $sslStream = New-Object System.Net.Security.SslStream($stream, $false, { $true })
+                $sslStream.AuthenticateAsClient($uri.Host)
+                $stream = $sslStream
+            }
+
+            $request = "$Method $($uri.PathAndQuery) HTTP/1.1`r`nHost: $($uri.Host)`r`nUser-Agent: $script:UserAgent`r`nConnection: close`r`n`r`n"
             $reqBytes = [Text.Encoding]::ASCII.GetBytes($request)
-            $conn.Stream.Write($reqBytes, 0, $reqBytes.Length)
-            $buf = New-Object byte[] 4096
+            $stream.Write($reqBytes, 0, $reqBytes.Length)
+
+            $buf = New-Object byte[] 8192
             $respBytes = New-Object System.Collections.Generic.List[byte]
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            
             while ($sw.ElapsedMilliseconds -lt $Timeout) {
-                if ($conn.Stream.DataAvailable) {
-                    $read = $conn.Stream.Read($buf, 0, 4096)
-                    if ($read -gt 0) { for ($i=0; $i -lt $read; $i++) { $respBytes.Add($buf[$i]) } } else { break }
-                } elseif ($respBytes.Count -gt 0) { break }
-                else { Start-Sleep -Milliseconds 50 }
+                if ($conn.Tcp.Available -gt 0 -or ($uri.Scheme -eq "https" -and $true)) {
+                    try {
+                        $read = $stream.Read($buf, 0, 8192)
+                        if ($read -gt 0) { 
+                            for ($i=0; $i -lt $read; $i++) { $respBytes.Add($buf[$i]) } 
+                        } else { break }
+                    } catch { break }
+                } else { Start-Sleep -Milliseconds 50 }
             }
+            
+            $fullResponse = [Text.Encoding]::UTF8.GetString($respBytes.ToArray())
             $conn.Tcp.Close()
-            $parts = ([Text.Encoding]::UTF8.GetString($respBytes.ToArray())) -split "`r`n`r`n", 2
-            if ($parts.Length -eq 2) { 
-                Write-DebugLog "Invoke-WebRequestViaProxy (SOCKS) успешно, длина тела: $($parts[1].Length)"
-                return $parts[1] 
+            
+            # Извлекаем только тело ответа (после \r\n\r\n)
+            if ($fullResponse -match '(?s)\r\n\r\n(.*)') {
+                return $matches[1]
             }
+            return $fullResponse
         } catch {
-            Write-DebugLog "Invoke-WebRequestViaProxy (SOCKS) ошибка: $_"
+            Write-DebugLog "SOCKS WebRequest Error: $($_.Exception.Message)"
+            return ""
         }
-        return ""
     }
 }
 
 function Get-NetworkInfo {
     Write-DebugLog "Get-NetworkInfo: начало"
-    
-    # 1. Получаем DNS
     $dns = "UNKNOWN"
     try {
         $wmi = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | 
                Where-Object { $_.DNSServerSearchOrder -ne $null } | Select-Object -First 1
         if ($wmi) { $dns = $wmi.DNSServerSearchOrder[0] }
-        Write-DebugLog "DNS: $dns" "INFO"
-    } catch { Write-DebugLog "Ошибка получения DNS: $_" }
+    } catch { }
 
-    # 2. Определяем CDN узел
-    $rnd = [guid]::NewGuid().ToString().Substring(0,8)
     $cdn = "manifest.googlevideo.com"
-    $geoResponse = Invoke-WebRequestViaProxy "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd"
-    if ($geoResponse -match "=>\s+([\w-]+)") { 
-        $cdn = "r1.$($matches[1]).googlevideo.com"
-        Write-DebugLog "CDN определён: $cdn"
-    } else {
-        Write-DebugLog "CDN не определён, оставляем по умолчанию"
-    }
-
-    # 3. Получаем ISP и Локацию
     $isp = "UNKNOWN"; $loc = "UNKNOWN"
-    for ($i = 1; $i -le 2; $i++) {
-        $rawGeo = Invoke-WebRequestViaProxy "http://ip-api.com/json/?fields=status,countryCode,city,isp"
-        if ($rawGeo -match "(?s)(\{.*\})") {
+    
+    # Список провайдеров ГЕО (отсортированы по надежности через прокси)
+    $geoProviders = @(
+        @{ url = "http://ip-api.com/json/?fields=status,countryCode,city,isp"; type = "ip-api" },
+        @{ url = "https://ipapi.co/json/"; type = "ipapi-co" },
+        @{ url = "http://worldtimeapi.org/api/ip"; type = "worldtime" } # Резерв для LOC
+    )
+
+    :providerLoop foreach ($prov in $geoProviders) {
+        Write-DebugLog "Попытка ГЕО через $($prov.type)..."
+        $raw = Invoke-WebRequestViaProxy $prov.url -Timeout 5000
+        if ($raw -match '\{.*\}') {
             try {
-                $geo = $matches[1] | ConvertFrom-Json
-                if ($geo.status -eq "success") {
-                    $isp = $geo.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC)', ''
-                    if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
-                    $loc = "$($geo.city), $($geo.countryCode)"
-                    Write-DebugLog "Гео: $isp, $loc" "INFO"
-                    break
+                $data = $raw | ConvertFrom-Json
+                if ($prov.type -eq "ip-api" -and $data.status -eq "success") {
+                    $isp = $data.isp; $loc = "$($data.city), $($data.countryCode)"
                 }
-            } catch { Write-DebugLog "Ошибка парсинга гео: $_" }
-        }
-        if ($i -eq 1) { Start-Sleep -Milliseconds 500 }
-    }
-
-    # 4. Активная проверка работоспособности IPv6
-$hasV6 = $false
-try {
-    Write-DebugLog "Активная проверка IPv6 (подключение к ipv6.google.com:80)..."
-    $testTcp = New-Object System.Net.Sockets.TcpClient
-    $async = $testTcp.BeginConnect("ipv6.google.com", 80, $null, $null)
-    if ($async.AsyncWaitHandle.WaitOne(3000)) {
-        $testTcp.EndConnect($async)
-        $hasV6 = $true
-        Write-DebugLog "IPv6 РАБОТАЕТ: успешное подключение к ipv6.google.com:80" "INFO"
-    } else {
-        Write-DebugLog "IPv6 НЕ РАБОТАЕТ: таймаут подключения к ipv6.google.com:80" "WARN"
-    }
-    $testTcp.Close()
-} catch {
-    Write-DebugLog "IPv6 НЕ РАБОТАЕТ: $_" "WARN"
-}
-    # 5. ФОРМИРУЕМ ЕДИНЫЙ ОБЪЕКТ И ВОЗВРАЩАЕМ ЕГО
-    $info = @{ 
-        DNS            = $dns
-        CDN            = $cdn
-        ISP            = $isp
-        LOC            = $loc
-        TimestampTicks = (Get-Date).Ticks
-        HasIPv6        = $hasV6 
-    }
-    
-    return $info
-}
-
-function Test-ProxyConnection {
-    Write-DebugLog "Test-ProxyConnection: Запуск расширенного теста..."
-    [Console]::Clear()
-    
-    $w = [Console]::WindowWidth
-    if ($w -gt 80) { $w = 80 }
-    $line = "═" * $w
-    $dash = "─" * $w
-
-    # Заголовок
-    Write-Host "`n $line" -ForegroundColor Gray
-    Write-Host (Get-PaddedCenter "ДИАГНОСТИКА ПРОКСИ-СОЕДИНЕНИЯ" $w) -ForegroundColor Cyan
-    Write-Host " $line" -ForegroundColor Gray
-
-    if (-not $global:ProxyConfig.Enabled) {
-        Write-Host "`n  [!] ОШИБКА: Прокси не включен." -ForegroundColor Red
-        Write-Host "  Сначала настройте его кнопкой [P]." -ForegroundColor Gray
-        Start-Sleep -Seconds 3
-        return
-    }
-
-    Write-Host "`n  КОНФИГУРАЦИЯ:" -ForegroundColor White
-    Write-Host "  > АДРЕС:  $($global:ProxyConfig.Host):$($global:ProxyConfig.Port)" -ForegroundColor Gray
-    Write-Host "  > ТИП:    $($global:ProxyConfig.Type)" -ForegroundColor Gray
-    Write-Host "`n $dash" -ForegroundColor Gray
-
-    $steps = @(
-        "Подключение к прокси-хосту    ",
-        "Проверка порта и рукопожатие  ",
-        "Туннель до google.com:80      ",
-        "Получение HTTP ответа         "
-    )
-
-    # Локальная функция форматирования статуса
-    function Format-Status($s) {
-        $width = 6
-        $spaces = $width - $s.Length
-        if ($spaces -le 0) { return $s }
-        $left = [Math]::Floor($spaces / 2)
-        $right = $spaces - $left
-        return (" " * $left) + $s + (" " * $right)
-    }
-
-    # Сохраняем позиции строк для каждого шага
-    $stepRows = @()
-    for($i=0; $i -lt $steps.Count; $i++) {
-        $stepRows += [Console]::CursorTop
-        Write-Host "  [ " -NoNewline -ForegroundColor Gray
-        Write-Host (Format-Status "WAIT") -ForegroundColor Yellow -NoNewline
-        Write-Host " ] $($steps[$i])" -ForegroundColor White
-    }
-    $afterStepsRow = [Console]::CursorTop
-
-    # Функция обновления статуса (перерисовывает всю строку)
-    function Update-ProxyStep($idx, $status, $color) {
-        $row = $stepRows[$idx]
-        [Console]::SetCursorPosition(0, $row)
-        [Console]::Write(" " * [Console]::WindowWidth)  # Очищаем строку
-        [Console]::SetCursorPosition(0, $row)
-        # Полностью перерисовываем строку
-        Write-Host "  [ " -NoNewline -ForegroundColor Gray
-        Write-Host (Format-Status $status) -ForegroundColor $color -NoNewline
-        Write-Host " ] $($steps[$idx])" -ForegroundColor White
-    }
-
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $success = $false
-    $errDetail = "Неизвестная ошибка"
-    $latency = $null
-
-    try {
-        # Шаг 1: TCP Connect
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $asyn = $tcp.BeginConnect($global:ProxyConfig.Host, $global:ProxyConfig.Port, $null, $null)
-        if (-not $asyn.AsyncWaitHandle.WaitOne(3000)) { 
-            Update-ProxyStep 0 "FAIL" "Red"
-            throw "Прокси-сервер не отвечает (Timeout)" 
-        }
-        $tcp.EndConnect($asyn)
-        Update-ProxyStep 0 " OK " "Green"
-
-        # Шаг 2: Handshake (проверка прокси)
-        Update-ProxyStep 1 "WAIT" "Yellow"
-        $conn = Connect-ThroughProxy "google.com" 80 $global:ProxyConfig 4000
-        Update-ProxyStep 1 " OK " "Green"
-        
-        # Шаг 3: Туннель установлен (автоматически OK)
-        Update-ProxyStep 2 " OK " "Green"
-
-        # Шаг 4: HTTP Request
-        Update-ProxyStep 3 "WAIT" "Yellow"
-        $req = [Text.Encoding]::ASCII.GetBytes("HEAD / HTTP/1.1`r`nHost: google.com`r`nConnection: close`r`n`r`n")
-        $conn.Stream.Write($req, 0, $req.Length)
-        
-        $buf = New-Object byte[] 128
-        if ($conn.Stream.Read($buf, 0, 128) -gt 0) {
-            $latency = $sw.ElapsedMilliseconds
-            Update-ProxyStep 3 " OK " "Green"
-            $success = $true
-        } else { throw "Сервер Google не ответил через прокси" }
-
-        $conn.Tcp.Close()
-    } catch {
-        $errDetail = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
-        Write-DebugLog "Proxy Test Error: $errDetail"
-    }
-
-    # Перемещаем курсор на строку после всех шагов и очищаем её
-    [Console]::SetCursorPosition(0, $afterStepsRow)
-    [Console]::Write(" " * [Console]::WindowWidth)
-    [Console]::SetCursorPosition(0, $afterStepsRow)
-
-    # Итоговый блок
-    Write-Host " $dash" -ForegroundColor Gray
-    if ($success) {
-        Write-Host "  РЕЗУЛЬТАТ: " -NoNewline -ForegroundColor White
-        Write-Host "ПРОКСИ РАБОТАЕТ" -ForegroundColor Green
-        Write-Host "  ЗАДЕРЖКА:  " -NoNewline -ForegroundColor White
-        Write-Host "$($latency) ms" -ForegroundColor Cyan
-    } else {
-        Write-Host "  РЕЗУЛЬТАТ: " -NoNewline -ForegroundColor White
-        Write-Host "ОШИБКА СОЕДИНЕНИЯ" -ForegroundColor Red
-        if ($errDetail.Length -gt $w - 15) { $errDetail = $errDetail.Substring(0, $w - 18) + "..." }
-        Write-Host "  ДЕТАЛИ:    " -NoNewline -ForegroundColor White
-        Write-Host $errDetail -ForegroundColor Gray
-    }
-    Write-Host " $line" -ForegroundColor Gray
-
-    Write-Host "`n  Нажмите любую клавишу для возврата..." -ForegroundColor Gray
-    Clear-KeyBuffer
-    $null = [Console]::ReadKey($true)
-}
-
-# Универсальная функция для отрисовки блока
-function Draw-Block {
-    param(
-        [int]$X,
-        [int]$Y,
-        [string]$Title,
-        [array]$Content,
-        [int]$Width = 78,
-        [string]$TitleColor = "Yellow",
-        [string]$BorderColor = "DarkYellow"
-    )
-    
-    $line = "═" * ($Width - 2)
-    $dash = "─" * ($Width - 2)
-    $currentY = $Y
-    
-    # Верхняя граница
-    Out-Str $X $currentY ("╔" + $line + "╗") $BorderColor
-    $currentY++
-    
-    # Заголовок (если есть)
-    if ($Title -and $Title -ne "") {
-        $titleLine = "║" + " " * 3 + $Title + " " * ($Width - 2 - 3 - $Title.Length) + "║"
-        Out-Str $X $currentY $titleLine $TitleColor
-        $currentY++
-        Out-Str $X $currentY ("├" + $dash + "┤") $BorderColor
-        $currentY++
-    } else {
-        Out-Str $X $currentY ("║" + " " * ($Width - 2) + "║") $BorderColor
-        $currentY++
-    }
-    
-    # Содержимое
-    foreach ($item in $Content) {
-        $text = $item
-        if ($text.GetType().Name -eq "Hashtable") {
-            $text = $item.Text
-            $color = $item.Color
-        } else {
-            $color = "White"
-        }
-        $contentLine = "║" + $text.PadRight($Width - 2) + "║"
-        Out-Str $X $currentY $contentLine $color
-        $currentY++
-    }
-    
-    # Нижняя граница
-    Out-Str $X $currentY ("└" + $dash + "┘") $BorderColor
-    $currentY++
-    
-    return $currentY
-}
-
-function Parse-ProxyString {
-    param([string]$input)
-    
-    Write-DebugLog "Parse-ProxyString: Входная строка = '$input'"
-    
-    $result = @{
-        Valid = $false
-        Type = "AUTO"
-        Host = ""
-        Port = 0
-        User = ""
-        Pass = ""
-    }
-    
-    # Удаляем пробелы
-    $input = $input.Trim()
-    if ([string]::IsNullOrEmpty($input)) {
-        Write-DebugLog "Parse-ProxyString: Пустая строка, возвращаем невалидный результат"
-        return $result
-    }
-    
-    Write-DebugLog "Parse-ProxyString: После Trim = '$input'"
-    
-    # Проверяем наличие протокола
-    $protocol = ""
-    $rest = $input
-    
-    if ($input -match '^(?i)(http|socks5)://(.*)$') {
-        $protocol = $matches[1].ToUpper()
-        $rest = $matches[2]
-        $result.Type = $protocol
-        Write-DebugLog "Parse-ProxyString: Обнаружен протокол = '$protocol', остаток = '$rest'"
-    } else {
-        Write-DebugLog "Parse-ProxyString: Протокол не указан, тип = AUTO"
-    }
-    
-    # Проверяем наличие аутентификации
-    $userpass = ""
-    $hostport = $rest
-    
-    if ($rest -match '^([^@]+)@(.+)$') {
-        $userpass = $matches[1]
-        $hostport = $matches[2]
-        Write-DebugLog "Parse-ProxyString: Обнаружена аутентификация, userpass = '$userpass', hostport = '$hostport'"
-        
-        # Разбираем логин:пароль
-        if ($userpass -match '^([^:]+):(.+)$') {
-            $result.User = $matches[1]
-            $result.Pass = $matches[2]
-            Write-DebugLog "Parse-ProxyString: User = '$($result.User)', Pass = '***'"
-        } else {
-            Write-DebugLog "Parse-ProxyString: Ошибка формата аутентификации (ожидается user:pass)"
-            return $result
-        }
-    } else {
-        Write-DebugLog "Parse-ProxyString: Аутентификация не обнаружена"
-    }
-    
-    # Разбираем хост:порт
-    Write-DebugLog "Parse-ProxyString: Парсим hostport = '$hostport'"
-    $lastColon = $hostport.LastIndexOf(':')
-    Write-DebugLog "Parse-ProxyString: Последнее двоеточие на позиции $lastColon"
-    
-    if ($lastColon -gt 0) {
-        $result.Host = $hostport.Substring(0, $lastColon)
-        $portStr = $hostport.Substring($lastColon + 1)
-        Write-DebugLog "Parse-ProxyString: Host = '$($result.Host)', PortStr = '$portStr'"
-        
-        if ([int]::TryParse($portStr, [ref]$result.Port)) {
-            Write-DebugLog "Parse-ProxyString: Порт распарсен = $($result.Port)"
-            if ($result.Port -ge 1 -and $result.Port -le 65535) {
-                if ($result.Host.Length -gt 0) {
-                    $result.Valid = $true
-                    Write-DebugLog "Parse-ProxyString: УСПЕХ! Host='$($result.Host)', Port=$($result.Port), Type=$($result.Type), Valid=$($result.Valid)"
-                } else {
-                    Write-DebugLog "Parse-ProxyString: Ошибка - пустой хост"
+                elseif ($prov.type -eq "ipapi-co" -and $data.org) {
+                    $isp = $data.org; $loc = "$($data.city), $($data.country_code)"
                 }
-            } else {
-                Write-DebugLog "Parse-ProxyString: Ошибка - порт вне диапазона 1-65535 (получен $($result.Port))"
+                
+                if ($isp -ne "UNKNOWN" -and $isp -ne $null) {
+                    Write-DebugLog "Гео получено ($($prov.type)): $isp" "INFO"
+                    break providerLoop
+                }
+            } catch { }
+        }
+    }
+
+    # Очистка названия ISP
+    $isp = $isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation)', ''
+    if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
+
+    # Быстрый тест IPv6
+    # 4. Проверка IPv6 (только если не выбран режим IPv4 Only)
+    $hasV6 = $false
+    if ($script:Config.IpPreference -ne "IPv4") {
+        try {
+            $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
+            $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
+            if ($a.AsyncWaitHandle.WaitOne(1000)) { # Уменьшили до 1 сек
+                $t.EndConnect($a)
+                $hasV6 = $true 
             }
-        } else {
-            Write-DebugLog "Parse-ProxyString: Ошибка - не удалось распарсить порт из '$portStr'"
-        }
-    } else {
-        Write-DebugLog "Parse-ProxyString: Ошибка - не найдено двоеточие в '$hostport'"
+            $t.Close()
+        } catch { }
     }
-    
-    return $result
+
+    return @{ DNS=$dns; CDN=$cdn; ISP=$isp; LOC=$loc; TimestampTicks=(Get-Date).Ticks; HasIPv6=$hasV6 }
 }
 
+function Show-SettingsMenu {
+    while ($true) {
+        [Console]::Clear()
+        $w = [Console]::WindowWidth
+        if ($w -gt 80) { $w = 80 }
+        $line = "═" * $w
+        
+        Write-Host "`n $line" -ForegroundColor Cyan
+        Write-Host (Get-PaddedCenter "SETTINGS / НАСТРОЙКИ" $w) -ForegroundColor Yellow
+        Write-Host " $line" -ForegroundColor Cyan
+
+        # Безопасное получение текущей настройки
+        $curPref = "IPv6"
+        if ($script:Config -and $script:Config.IpPreference) { 
+            $curPref = $script:Config.IpPreference 
+        }
+
+        Write-Host "`n  1. Протокол IP : " -NoNewline -ForegroundColor White
+        if ($curPref -eq "IPv6") {
+            Write-Host "[ IPv6 ПРИОРИТЕТ ]" -ForegroundColor Green
+            Write-Host "     (Используется IPv6, если доступен. Откат на IPv4 при ошибках)" -ForegroundColor Gray
+        } else {
+            Write-Host "[ ТОЛЬКО IPv4 ]" -ForegroundColor Yellow
+            Write-Host "     (IPv6 полностью игнорируется)" -ForegroundColor Gray
+        }
+
+        Write-Host "`n  2. Сброс сетевого кэша" -ForegroundColor White
+        Write-Host "     (Очистка DNS-записей и данных о провайдере)" -ForegroundColor Gray
+
+        Write-Host "`n  0. Назад в главное меню" -ForegroundColor DarkGray
+        Write-Host "`n $line" -ForegroundColor Cyan
+        Write-Host " ВЫБЕРИТЕ ПУНКТ: " -NoNewline -ForegroundColor Yellow
+
+        $key = [Console]::ReadKey($true).KeyChar
+        
+        try {
+            if ($key -eq "1") {
+                $newVal = if ($curPref -eq "IPv6") { "IPv4" } else { "IPv6" }
+                
+                # Вместо прямого присвоения используем Add-Member с ключом -Force
+                # Это сработает, даже если поля не было
+                $script:Config | Add-Member -MemberType NoteProperty -Name "IpPreference" -Value $newVal -Force
+                
+                $script:DnsCache = [hashtable]::Synchronized(@{}) 
+                Save-Config $script:Config
+            }
+            elseif ($key -eq "2") {
+                # Безопасная очистка
+                $script:DnsCache = [hashtable]::Synchronized(@{})
+                
+                if ($script:Config.NetCache) {
+                    $script:Config.NetCache.ISP = "Loading..."
+                }
+                
+                Save-Config $script:Config
+                Write-Host "`n  [OK] Кэш очищен!" -ForegroundColor Green
+                Start-Sleep -Seconds 1
+            }
+            elseif ($key -eq "0" -or $key -eq "`r") {
+                break
+            }
+        } catch {
+            Write-DebugLog "Ошибка в меню настроек: $_" "ERROR"
+            # Ошибка не выводится в консоль, чтобы не пугать юзера, а пишется в лог
+        }
+    }
+}
 
 function Show-ProxyMenu {
     [Console]::Clear()
@@ -2230,34 +2254,28 @@ function Show-HelpMenu {
     Write-Host "`n [ КНОПКИ УПРАВЛЕНИЯ ]" -ForegroundColor White
     Write-Host "   ENTER          " -ForegroundColor Yellow -NoNewline; Write-Host "- Запустить проверку всех доменов" -ForegroundColor Gray
     Write-Host "   D (Deep Trace) " -ForegroundColor Yellow -NoNewline; Write-Host "- Трассировка (показывает, где именно блокировка)" -ForegroundColor Gray
-    Write-Host "   P (Proxy)      " -ForegroundColor Yellow -NoNewline; Write-Host "- Настроить прокси (формат IP:ПОРТ, например 127.0.0.1:1080)" -ForegroundColor Gray
-    Write-Host "   S (Save)       " -ForegroundColor Yellow -NoNewline; Write-Host "- Сохранить результаты в файл YT-DPI_Report.txt" -ForegroundColor Gray
+    Write-Host "   P (Proxy)      " -ForegroundColor Yellow -NoNewline; Write-Host "- Настроить прокси (SOCKS5/HTTP)" -ForegroundColor Gray
+    Write-Host "   R (Report)     " -ForegroundColor Yellow -NoNewline; Write-Host "- Сохранить результаты в YT-DPI_Report.txt" -ForegroundColor Gray
+    Write-Host "   S (Settings)   " -ForegroundColor Yellow -NoNewline; Write-Host "- Настройки (IPv4/IPv6, очистка кэша)" -ForegroundColor Gray
     Write-Host "   Q / ESC        " -ForegroundColor Yellow -NoNewline; Write-Host "- Выйти из программы" -ForegroundColor Gray
 
     # Статусы
     Write-Host "`n [ ЧТО ЗНАЧАТ ЦВЕТА ]" -ForegroundColor White
-    Write-Host "   AVAILABLE      " -ForegroundColor Green -NoNewline; Write-Host "- Всё хорошо, домен доступен." -ForegroundColor Gray
-    Write-Host "   DPI BLOCK/RESET" -ForegroundColor Red -NoNewline; Write-Host "- Блокировка провайдером (нужен обход SNI)." -ForegroundColor Gray
-    Write-Host "   IP BLOCK       " -ForegroundColor Red -NoNewline; Write-Host "- Сервер недоступен (заблокирован сам адрес)." -ForegroundColor Gray
+    Write-Host "   AVAILABLE      " -ForegroundColor Green -NoNewline; Write-Host "- Всё хорошо, домен полностью доступен." -ForegroundColor Gray
+    Write-Host "   THROTTLED      " -ForegroundColor Yellow -NoNewline; Write-Host "- Частичная блокировка (DPI мешает, один из протоколов сбоит)." -ForegroundColor Gray
+    Write-Host "   DPI BLOCK/RESET" -ForegroundColor Red -NoNewline; Write-Host "- Жесткая блокировка по SNI (нужен обход DPI)." -ForegroundColor Gray
+    Write-Host "   IP BLOCK       " -ForegroundColor Red -NoNewline; Write-Host "- Сервер недоступен (заблокирован сам адрес или нет интернета)." -ForegroundColor Gray
 
     # Решение проблем
-    Write-Host "`n [ ЕСЛИ ТЕСТ ЗЕЛЕНЫЙ, НО ВИДЕО НЕ ГРУЗИТСЯ ]" -ForegroundColor White
-    Write-Host "   1. Отключите QUIC в браузере: откройте " -ForegroundColor Gray -NoNewline
-    Write-Host "chrome://flags/#enable-quic" -ForegroundColor Cyan -NoNewline
-    Write-Host " -> Disabled" -ForegroundColor Gray
+    Write-Host "`n [ СОВЕТЫ ]" -ForegroundColor White
+    Write-Host "   1. Если YouTube тормозит при статусе " -ForegroundColor Gray -NoNewline
+    Write-Host "THROTTLED" -ForegroundColor Yellow -NoNewline
+    Write-Host ", включите средство обхода DPI." -ForegroundColor Gray
     
-    Write-Host "   2. Отключите Kyber: откройте " -ForegroundColor Gray -NoNewline
-    Write-Host "chrome://flags/#enable-tls13-kyber" -ForegroundColor Cyan -NoNewline
-    Write-Host " -> Disabled" -ForegroundColor Gray
+    Write-Host "   2. Отключите Kyber в браузере для стабильности: " -ForegroundColor Gray
+    Write-Host "      chrome://flags/#enable-tls13-kyber -> Disabled" -ForegroundColor Cyan
     
-    Write-Host "   3. Если Deep Trace не работает, запустите программу от имени Администратора." -ForegroundColor Gray
-
-    Write-Host "`n [ НАСТРОЙКА ПРОКСИ ]" -ForegroundColor White
-    Write-Host "   Примеры ввода:" -ForegroundColor Gray
-    Write-Host "     127.0.0.1:1080            - HTTP (автоопределение)" -ForegroundColor DarkGray
-    Write-Host "     socks5://192.168.1.1:2080 - SOCKS5 явно" -ForegroundColor DarkGray
-    Write-Host "     user:pass@proxy.com:3128  - с аутентификацией" -ForegroundColor DarkGray
-    Write-Host "     http://user:pass@proxy.com:3128 - HTTP с аутентификацией" -ForegroundColor DarkGray
+    Write-Host "   3. Если Deep Trace не работает, запустите скрипт от Администратора." -ForegroundColor Gray
 
     # Футер
     Write-Host "`n $($line)" -ForegroundColor Gray
@@ -2297,9 +2315,8 @@ function Add-ToProxyHistory {
 # РАБОЧИЙ ПОТОК
 # ====================================================================================
 $Worker = {
-    param($Target, $ProxyConfig, $CanTls13, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock, $NetInfo)
-
-    # Внутренняя функция логирования для воркера
+    param($Target, $ProxyConfig, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock, $NetInfo, $IpPreference)
+    
     function Write-DebugLog($msg, $level = "DEBUG") {
         if (-not $DEBUG_ENABLED) { return }
         $line = "[$(Get-Date -Format 'HH:mm:ss.fff')] [Worker $($Target)] [$($level)] $($msg)`r`n"
@@ -2422,90 +2439,86 @@ $Worker = {
         }
     }
 
-    $Result = [PSCustomObject]@{ IP="FAILED"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="UNKNOWN"; Color="White"; Target=$Target }
+    $Result = [PSCustomObject]@{ IP="FAILED"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="UNKNOWN"; Color="White"; Target=$Target; Number=0 }
     $TO = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { $CONST.TimeoutMs }
 
     Write-DebugLog "--- НАЧАЛО ПРОВЕРКИ ---"
 
     function Invoke-TcpConnectWithFallback {
-    param($TargetIp, $TargetPort, $TimeoutMs, $IsProxy = $false)
-    $tcp = $null
-    try {
-        $tcp = New-Object System.Net.Sockets.TcpClient
-        $async = $tcp.BeginConnect($TargetIp, $TargetPort, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "Timeout" }
-        $tcp.EndConnect($async)
-        return $tcp
-    } catch {
-        if ($_.Exception.Message -match "address family|None of the discovered") {
-            if ($usedIpv6 -and $v4Address) {
-                Write-DebugLog "Ошибка семейства адресов при использовании IPv6 ($TargetIp), переключаемся на IPv4: $v4Address"
-                # Обновляем кэш, чтобы больше не использовать этот IPv6
-                if ($DnsCacheLock.WaitOne(1000)) {
-                    $DnsCache[$Target] = $v4Address
-                    [void]$DnsCacheLock.ReleaseMutex()
+        param($TargetIp, $TargetPort, $TimeoutMs)
+        $tcp = $null
+        try {
+            $ipAddress = [System.Net.IPAddress]::Parse($TargetIp)
+            $tcp = New-Object System.Net.Sockets.TcpClient($ipAddress.AddressFamily)
+            $async = $tcp.BeginConnect($ipAddress, $TargetPort, $null, $null)
+            if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "Timeout" }
+            $tcp.EndConnect($async)
+            return $tcp
+        } catch {
+            if ($_.Exception.Message -match "address family|None of the discovered") {
+                # Если это IPv6, пытаемся получить IPv4
+                if ($TargetIp -match ':') {
+                    Write-DebugLog "Ошибка семейства адресов при использовании IPv6 ($TargetIp), пробуем получить IPv4 для $Target"
+                    $v4Address = $null
+                    try {
+                        $ips = [System.Net.Dns]::GetHostAddresses($Target)
+                        $v4 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
+                        if ($v4) {
+                            $v4Address = $v4.IPAddressToString
+                            Write-DebugLog "Найден IPv4: $v4Address"
+                            # Обновляем кэш
+                            if ($DnsCacheLock.WaitOne(1000)) {
+                                $DnsCache[$Target] = $v4Address
+                                [void]$DnsCacheLock.ReleaseMutex()
+                            }
+                            # Повторяем попытку с IPv4
+                            $ipAddressV4 = [System.Net.IPAddress]::Parse($v4Address)
+                            $tcp = New-Object System.Net.Sockets.TcpClient($ipAddressV4.AddressFamily)
+                            $async = $tcp.BeginConnect($ipAddressV4, $TargetPort, $null, $null)
+                            if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "Timeout after fallback" }
+                            $tcp.EndConnect($async)
+                            $Result.IP = $v4Address
+                            return $tcp
+                        } else {
+                            Write-DebugLog "Не удалось найти IPv4 для $Target"
+                        }
+                    } catch {
+                        Write-DebugLog "Ошибка резолвинга IPv4 для $Target : $_"
+                    }
                 }
-                # Повторяем попытку с IPv4
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $async = $tcp.BeginConnect($v4Address, $TargetPort, $null, $null)
-                if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "Timeout after fallback" }
-                $tcp.EndConnect($async)
-                # Обновляем Result.IP
-                $Result.IP = $v4Address
-                return $tcp
             }
+            throw $_
         }
-        throw $_
     }
-}
 
-    # 1. DNS с fallback на IPv4
+    # 1. DNS
     $ipStr = $null
-    $usedIpv6 = $false
-    $v4Address = $null   # сохраним IPv4 на случай падения IPv6
-
     if (-not $ProxyConfig.Enabled) {
         try {
             if ($DnsCacheLock.WaitOne(1000)) {
-                if ($DnsCache.ContainsKey($Target)) {
-                    $ipStr = $DnsCache[$Target]
-                    Write-DebugLog "DNS: Кэш HIT -> $($ipStr)"
-                }
+                if ($DnsCache.ContainsKey($Target)) { $ipStr = $DnsCache[$Target] }
                 [void]$DnsCacheLock.ReleaseMutex()
             }
             if (-not $ipStr) {
-                Write-DebugLog "DNS: Кэш MISS. Резолвинг..."
                 $ips = [System.Net.Dns]::GetHostAddresses($Target)
-                $v6 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetworkV6' } | Select-Object -First 1
                 $v4 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
-                if ($v4) { $v4Address = $v4.IPAddressToString }
+                $v6 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetworkV6' } | Select-Object -First 1
                 
-                if ($v6 -and $NetInfo.HasIPv6) {
+                # ЛОГИКА ВЫБОРА:
+                if ($IpPreference -eq "IPv6" -and $v6 -and $NetInfo.HasIPv6) {
                     $ipStr = $v6.IPAddressToString
-                    $usedIpv6 = $true
-                    Write-DebugLog "DNS: Выбран IPv6 -> $($ipStr)"
                 } else {
-                    $ipStr = $v4Address
-                    Write-DebugLog "DNS: Выбран IPv4 -> $($ipStr)"
+                    $ipStr = if ($v4) { $v4.IPAddressToString } else { $v6.IPAddressToString }
                 }
+
                 if ($DnsCacheLock.WaitOne(1000)) { 
                     $DnsCache[$Target] = $ipStr
                     [void]$DnsCacheLock.ReleaseMutex()
                 }
-            } else {
-                # Если взяли из кэша, определим, IPv6 ли это
-                $usedIpv6 = ($ipStr -match ':')
             }
-        } catch {
-            $ipStr = "DNS_ERR"
-            Write-DebugLog "DNS: Ошибка - $($_.Exception.Message)" "ERROR"
-        }
+        } catch { $ipStr = "DNS_ERR" }
         $Result.IP = $ipStr
-        if ($ipStr -eq "DNS_ERR") { $Result.Verdict = "DNS FAIL"; $Result.Color = "Red"; return $Result }
-    } else {
-        $Result.IP = "[ PROXIED ]"
-        Write-DebugLog "DNS: Пропущен (Proxy Mode)."
-    }
+    } else { $Result.IP = "[ PROXIED ]" }
 
     # 2. HTTP Проверка
     Write-DebugLog "HTTP: Тест порта 80..."
@@ -2527,92 +2540,111 @@ $Worker = {
         Write-DebugLog "HTTP: Ошибка -> $($_.Exception.Message)" "WARN"
     } finally { if ($conn) { $conn.Tcp.Close() } }
 
-    # 3. TLS Проверки (ПОСЛЕДОВАТЕЛЬНО)
-    $tlsTO = 3500
-    foreach ($ver in @("T12", "T13")) {
-        if ($ver -eq "T13" -and -not $CanTls13) {
-            $Result.T13 = "N/A"
-            Write-DebugLog "TLS 1.3: Пропуск (не поддерживается ОС)."
-            continue
+    if ($Result.HTTP -eq "ERR") {
+    $Result.T12 = "---"
+    $Result.T13 = "---"
+    $Result.Verdict = "IP BLOCK"
+    $Result.Color = "Red"
+    return $Result # Сразу выходим, не тратя время на TLS
+}
+
+    # 3. TLS Проверки
+    # Проверка TLS 1.3
+    $pHost = if ($ProxyConfig.Enabled) { $ProxyConfig.Host } else { "" }
+    $pPort = if ($ProxyConfig.Enabled) { [int]$ProxyConfig.Port } else { 0 }
+    $Result.T13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, 2000)
+    Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
+
+    # Проверка TLS 1.2
+    $conn = $null; $ssl = $null
+    try {
+        if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig 2000 }
+        else {
+            $tcp = [System.Net.Sockets.TcpClient]::new()
+            $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
+            if (-not $ar.AsyncWaitHandle.WaitOne(2000)) { throw "TcpTimeout" }
+            $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
         }
+        $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false, { $true })
+        $ssl.AuthenticateAsClient($Target, $null, "Tls12", $false)
+        $Result.T12 = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
+    } catch {
+        $m = $_.Exception.Message + $_.Exception.InnerException.Message
+        if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $Result.T12 = "RST" }
+        elseif ($m -match "certificate|сертификат|remote|success") { $Result.T12 = "OK" }
+        else { $Result.T12 = "DRP" }
+    } finally { if($ssl){$ssl.Close()}; if($conn){$conn.Tcp.Close()} }
 
-        Write-DebugLog "TLS $($ver): Запуск хендшейка..."
-        $conn = $null
-        $ssl = $null
-        try {
-            if ($ProxyConfig.Enabled) {
-                $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $tlsTO
-            } else {
-                # Используем новую функцию с fallback на IPv4
-                $tcp = Invoke-TcpConnectWithFallback -TargetIp $Result.IP -TargetPort 443 -TimeoutMs $tlsTO
-                $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
-            }
+    # 4. Логика вердикта
+    $t12Ok = ($Result.T12 -eq "OK")
+    $t13Ok = ($Result.T13 -eq "OK")
+    $t12Blocked = ($Result.T12 -eq "RST" -or $Result.T12 -eq "DRP")
+    $t13Blocked = ($Result.T13 -eq "RST" -or $Result.T13 -eq "DRP")
 
-            $ssl = New-Object System.Net.Security.SslStream($conn.Stream, $false)
-            $proto = if ($ver -eq "T12") { [System.Security.Authentication.SslProtocols]::Tls12 } else { 12288 }
-
-            $authAr = $ssl.BeginAuthenticateAsClient($Target, $null, $proto, $false, $null, $null)
-            if ($authAr.AsyncWaitHandle.WaitOne($tlsTO)) {
-                $ssl.EndAuthenticateAsClient($authAr)
-                if ($ver -eq "T12") { $Result.T12 = "OK" } else { $Result.T13 = "OK" }
-                Write-DebugLog "TLS $($ver): УСПЕШНО"
-            } else {
-                if ($ver -eq "T12") { $Result.T12 = "DRP" } else { $Result.T13 = "DRP" }
-                Write-DebugLog "TLS $($ver): ТАЙМАУТ (DROPPED)" "WARN"
-            }
-        } catch {
-            $m = $_.Exception.Message + $_.Exception.InnerException.Message
-            Write-DebugLog "TLS $($ver): Перехвачено исключение -> $($m)"
-
-            # Классификация результата TLS
-            if ($m -match "reset|сброс|forcibly|closed|разорвано") {
-                $res = "RST"
-            } elseif ($m -match "certificate|сертификат|remote|authentic|success|handshake|ssl|policy|chain") {
-                $res = "OK"
-            } elseif ($m -match "timeout|timed|тайм") {
-                $res = "DRP"
-            } else {
-                $res = "ERR"
-            }
-
-            if ($ver -eq "T12") { $Result.T12 = $res } else { $Result.T13 = $res }
-            Write-DebugLog "TLS $($ver): Финал (через catch) -> $($res)"
-        } finally {
-            if ($ssl) { $ssl.Close() }
-            if ($conn) { $conn.Tcp.Close() }
-        }
+    if ($t12Ok -and $t13Ok) {
+        $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
     }
-
-    # 4. Вердикт
-    if ($Result.T12 -eq "OK" -or $Result.T13 -eq "OK") {
-        $Result.Verdict = "AVAILABLE"
-        $Result.Color = "Green"
+    elseif ($t12Ok -or $t13Ok) {
+        # Один из протоколов работает, другой — нет
+        if ($t12Blocked -or $t13Blocked) {
+            $Result.Verdict = "THROTTLED"; $Result.Color = "Yellow"
+        } else {
+            # Например, один OK, а другой ERR (проблема настройки, а не блокировка)
+            $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
+        }
     }
     elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
-        $Result.Verdict = "DPI RESET"
-        $Result.Color = "Red"
+        $Result.Verdict = "DPI RESET"; $Result.Color = "Red"
     }
-    elseif ($Result.HTTP -eq "OK") {
-        $Result.Verdict = "DPI BLOCK"
-        $Result.Color = "Yellow"
+    elseif ($Result.T12 -eq "DRP" -or $Result.T13 -eq "DRP") {
+        $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red"
     }
     else {
-        $Result.Verdict = "IP BLOCK"
-        $Result.Color = "Red"
+        $Result.Verdict = "IP BLOCK"; $Result.Color = "Red"
     }
-
-    Write-DebugLog "--- ЗАВЕРШЕНО: $($Result.Verdict) ---"
     return $Result
 }
 # ====================================================================================
 # АСИНХРОННОЕ СКАНИРОВАНИЕ
 # ====================================================================================
-function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
+function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     Write-DebugLog "Start-ScanWithAnimation: Режим Ultra-Smooth Waterfall..."
     
+    # --- ДИНАМИЧЕСКИЙ РАСЧЁТ ПОЗИЦИЙ ДЛЯ АНИМАЦИИ ---
+    # Эти позиции ДОЛЖНЫ совпадать с теми, что используются в Draw-UI и Write-ResultLine
+    $domStart  = 6
+    $domWidth  = 42
+    $ipStart   = $domStart + $domWidth + 2
+    $ipWidth   = if ($script:IpColumnWidth) { $script:IpColumnWidth } else { 16 }
+    $httpStart = $ipStart + $ipWidth + 2
+    $httpWidth = 6
+    $t12Start  = $httpStart + $httpWidth + 2
+    $t12Width  = 8
+    $t13Start  = $t12Start + $t12Width + 2
+    $t13Width  = 8
+    $latStart  = $t13Start + $t13Width + 2
+    $latWidth  = 6
+    $verStart  = $latStart + $latWidth + 2
+    $verWidth  = 30
+    
+    # Сохраняем в глобальную переменную для Write-ResultLine
+    $script:DynamicColPos = @{
+        Num  = 1
+        Dom  = $domStart
+        IP   = $ipStart
+        HTTP = $httpStart
+        T12  = $t12Start
+        T13  = $t13Start
+        Lat  = $latStart
+        Ver  = $verStart
+    }
+    # --- КОНЕЦ РАСЧЁТА ПОЗИЦИЙ ---
+    
     $cpuCount = [Environment]::ProcessorCount
-    $maxThreads = [Math]::Min($Targets.Count, $cpuCount * 4)
-    if ($maxThreads -lt 1) { $maxThreads = 1 }
+    # Для сетевых задач ядра не важны, важна параллельность.
+    # Позволяем запускать до 50 проверок одновременно.
+    $maxThreads = [Math]::Min($Targets.Count, 50)
+    Write-DebugLog "Запуск пула потоков: $maxThreads воркеров."
     
     $pool = [runspacefactory]::CreateRunspacePool(1, $maxThreads)
     $pool.Open()
@@ -2624,7 +2656,17 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
     $waveChars = @("─     ", "──    ", "───   ", "────  ", "───── ", "──────", "───── ", "────  ", "───   ", "──    ")
     
     for ($i=0; $i -lt $Targets.Count; $i++) {
-        $ps = [PowerShell]::Create().AddScript($Worker).AddArgument($Targets[$i]).AddArgument($ProxyConfig).AddArgument($Tls13Supported).AddArgument($CONST).AddArgument($DebugLogFile).AddArgument($DEBUG_ENABLED).AddArgument($script:DnsCache).AddArgument($script:DnsCacheLock).AddArgument($script:NetInfo)
+        $ps = [PowerShell]::Create().AddScript($Worker).
+            AddArgument($Targets[$i]).            # 1. $Target
+            AddArgument($ProxyConfig).           # 2. $ProxyConfig
+            AddArgument($CONST).                 # 3. $CONST
+            AddArgument($DebugLogFile).          # 4. $DebugLogFile
+            AddArgument($DEBUG_ENABLED).         # 5. $DEBUG_ENABLED
+            AddArgument($script:DnsCache).       # 6. $DnsCache
+            AddArgument($script:DnsCacheLock).   # 7. $DnsCacheLock
+            AddArgument($script:NetInfo).        # 8. $NetInfo
+            AddArgument($script:Config.IpPreference) # 9. $IpPreference
+            
         $ps.RunspacePool = $pool
         $jobs += [PSCustomObject]@{
             PowerShell = $ps; Handle = $ps.BeginInvoke(); Index = $i; Number = $i + 1
@@ -2634,7 +2676,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
     
     $aborted = $false
     $frameCounter = 0
-    $revealIndex = -1 # Индекс строки, которую пора "раскрыть"
+    $revealIndex = -1
     $lastRevealTime = [System.Diagnostics.Stopwatch]::StartNew()
 
     # --- ЕДИНЫЙ ЦИКЛ (Скан + Плавный водопад) ---
@@ -2658,63 +2700,62 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
             }
         }
 
-        # 3. Логика "Водопада": если ВСЕ готово, начинаем раскрывать по одной строке
-        if ($completedTasks -eq $Targets.Count -and $revealIndex -lt ($Targets.Count - 1)) {
-            # Раскрываем следующую строку каждые 40мс - 30мс 
-            if ($lastRevealTime.ElapsedMilliseconds -gt 30) {
+        # 3. Логика "Водопада" (Real-time: показываем по мере готовности)
+        # Если текущая строка по списку готова, разрешаем её "раскрыть"
+        if ($revealIndex + 1 -lt $Targets.Count) {
+            if ($jobs[$revealIndex + 1].DoneInBg) {
                 $revealIndex++
                 $lastRevealTime.Restart()
             }
         }
 
-        # 4. ОТРИСОВКА КАДРА (Оптимизированный "один проход")
+        # 4. ОТРИСОВКА КАДРА (используем ДИНАМИЧЕСКИЕ позиции)
         for ($i = 0; $i -lt $Targets.Count; $i++) {
             $j = $jobs[$i]
             if ($j.Revealed) { continue }
 
             if ($i -le $revealIndex) {
                 $res = $j.Result
-                if ($null -eq $res) { $res = [PSCustomObject]@{ Target=$j.Target; Number=$j.Number; IP="ERR"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="TIMEOUT"; Color="Red" } }
-                
+                if ($null -eq $res) { 
+                    $res = [PSCustomObject]@{ 
+                        Target=$j.Target; Number=$j.Number; IP="ERR"; HTTP="---"; 
+                        T12="---"; T13="---"; Lat="---"; Verdict="TIMEOUT"; Color="Red" 
+                    } 
+                }
                 Write-ResultLine $j.Row $res
                 $j.Revealed = $true
-                
             } 
             else {
-                # Формируем ОДНУ строку для всей правой части таблицы (LAT + VERDICT)
+                # АНИМАЦИЯ с использованием ДИНАМИЧЕСКОЙ позиции LAT
                 $rowChar = Get-ScanAnim $frameCounter $j.Row
                 $statusText = " SCANNING $($rowChar)".PadRight(30)
                 $latWave = $waveChars[($frameCounter + $j.Row) % $waveChars.Length].PadRight(7)
                 
-                # Склеиваем данные в один блок, чтобы минимизировать прыжки курсора
                 $combinedFrame = "$($latWave)$($statusText)"
                 
                 $cacheKey = "R$($j.Row)"
                 if ($animationBuffer[$cacheKey] -ne $combinedFrame) {
-                    # Рисуем всё за один раз, начиная с колонки LAT
-                    Out-Str $CONST.UI.Lat $j.Row $combinedFrame "Cyan"
+                    # ВАЖНО: используем $script:DynamicColPos.Lat вместо $CONST.UI.Lat
+                    Out-Str $script:DynamicColPos.Lat $j.Row $combinedFrame "Cyan"
                     $animationBuffer[$cacheKey] = $combinedFrame
                 }
             }
         }
 
-        # Выход, если всё раскрыто
         if ($revealIndex -eq ($Targets.Count - 1)) { break }
-
-        # Тайминг кадра
         Start-Sleep -Milliseconds 30
     }
     
     $pool.Close(); $pool.Dispose()
     foreach ($j in $jobs) { try { $j.PowerShell.Dispose() } catch {} }
-    # После получения $results, проверяем, не связано ли тотальное IP BLOCK с ложным IPv6
+    
+    # Проверка на ложный IPv6
     $allIpBlock = ($results | Where-Object { $_.Verdict -ne "IP BLOCK" -and $_.Verdict -ne "UNKNOWN" }) -eq $null
     if ($allIpBlock -and $NetInfo.HasIPv6 -eq $true) {
-        Write-DebugLog "Все тесты дали IP BLOCK, но HasIPv6=true. Возможно, IPv6 не работает. Переключаем HasIPv6 в false." "WARN"
+        Write-DebugLog "Все тесты дали IP BLOCK, но HasIPv6=true. Переключаем HasIPv6 в false." "WARN"
         $script:NetInfo.HasIPv6 = $false
         $script:Config.NetCache.HasIPv6 = $false
         Save-Config $script:Config
-        # Можно также очистить кэш от IPv6
         if ($DnsCacheLock.WaitOne(1000)) {
             $toRemove = @()
             foreach ($key in $DnsCache.Keys) {
@@ -2724,117 +2765,65 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
             [void]$DnsCacheLock.ReleaseMutex()
         }
     }
-    return [PSCustomObject]@{ Results = $results; Aborted = $aborted }
-}
-
-# ====================================================================================
-# ПРОВЕРКА ПОДДЕРЖКИ TLS 1.3
-# ====================================================================================
-function Test-Tls13Support {
-    Write-DebugLog "Проверка поддержки TLS 1.3"
-    try {
-        $testTcp = New-Object System.Net.Sockets.TcpClient
-        $asyn = $testTcp.BeginConnect("google.com", 443, $null, $null)
-        if ($asyn.AsyncWaitHandle.WaitOne(1500)) {
-            $testTcp.EndConnect($asyn)
-            $testSsl = New-Object System.Net.Security.SslStream($testTcp.GetStream(), $false)
-            $testSsl.AuthenticateAsClient("google.com", $null, $CONST.Tls13Proto, $false)
-            $testSsl.Close()
-        }
-        $testTcp.Close()
-        Write-DebugLog "TLS 1.3 поддерживается"
-        return $true
-    } catch {
-        Write-DebugLog "TLS 1.3 НЕ поддерживается: $_" "WARNING"
-        if ($_.Exception.Message -match "not supported|algorithm|поддерживается|алгоритм") {
-            return $false
-        }
-        return $true
+    
+    # Обновляем ширину IP колонки на основе реальных результатов
+    if ($results) {
+        $maxIp = ($results | ForEach-Object { 
+            if ($_.IP -and $_.IP -ne "[ PROXIED ]") { $_.IP.Length } else { 16 } 
+        } | Measure-Object -Maximum).Maximum
+        $script:IpColumnWidth = [Math]::Max($maxIp, 16)
     }
+    
+    return [PSCustomObject]@{ Results = $results; Aborted = $aborted }
 }
 
 # ====================================================================================
 # ГЛАВНЫЙ ЦИКЛ ПРОГРАММЫ (ENGINE START)
 # ====================================================================================
-# 1. Загрузка конфигурации (Один раз)
+
+# 1. Загрузка конфигурации (Мгновенно)
 $script:Config = Load-Config
 $global:ProxyConfig = $script:Config.Proxy
-#---
-# Если нужно сбрасывать состояние прокси при каждом запуске
-# $global:ProxyConfig.Enabled = $false
-#---
 $script:Config.RunCount++
 
-# 2. Восстановление системных параметров
-if ($null -ne $script:Config.Tls13Supported) {
-    $global:Tls13Supported = $script:Config.Tls13Supported
-    Write-DebugLog "TLS 1.3: Используем кэшированное значение ($global:Tls13Supported)"
-} else {
-    $global:Tls13Supported = Test-Tls13Support
-    $script:Config.Tls13Supported = $global:Tls13Supported
-}
-
-# 3. Синхронизация DNS кэша (Потокобезопасная)
+# 2. Синхронизация DNS кэша
 $script:DnsCache = [hashtable]::Synchronized(@{})
 if ($script:Config.DnsCache -and $script:Config.DnsCache.PSObject) {
     foreach ($prop in $script:Config.DnsCache.PSObject.Properties) {
-        # Игнорируем системные свойства самого объекта
-        if ($prop.MemberType -eq "NoteProperty") {
-            $script:DnsCache[$prop.Name] = $prop.Value
-        }
+        if ($prop.MemberType -eq "NoteProperty") { $script:DnsCache[$prop.Name] = $prop.Value }
     }
 }
-Write-DebugLog "DNS Кэш инициализирован: $($script:DnsCache.Count) записей."
 
-# 4. Применяем настройки прокси из конфига
-$global:ProxyConfig = $script:Config.Proxy
-$script:CurrentWindowWidth = 0
-$script:CurrentWindowHeight = 0
-
-# 5. Проверка обновлений (Раз в 5 запусков)
-$shouldPrompt = ($script:Config.RunCount - $script:Config.LastPromptRun) -ge 5
-if ($shouldPrompt) {
-    Write-DebugLog "--- ПЛАНОВАЯ ПРОВЕРКА ОБНОВЛЕНИЙ ---" "INFO"
-    $newVer = Check-UpdateVersion -Repo "Shiperoid/YT-DPI" -LastCheckedVersion $script:Config.LastCheckedVersion
-    if ($newVer) {
-        [Console]::Clear()
-        Write-Host "`n  === ДОСТУПНО ОБНОВЛЕНИЕ ===" -ForegroundColor Cyan
-        Write-Host "  Версия: $newVer (текущая $scriptVersion)" -ForegroundColor Yellow
-        Write-Host "  Обновить сейчас? (Y/N)" -ForegroundColor White
-        $key = [Console]::ReadKey($true).KeyChar
-        if ($key -eq 'y' -or $key -eq 'Y') {
-            Write-DebugLog "Обновление подтверждено: $newVer"
-            $currentFile = $script:OriginalFilePath
-            $downloadUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.bat"
-            Start-Updater $currentFile $downloadUrl
-            exit
-        } else {
-            $script:Config.LastCheckedVersion = $newVer
-        }
-    }
-    $script:Config.LastPromptRun = $script:Config.RunCount
-    Save-Config $script:Config # Фиксируем напоминание
-}
-
-# 6. Инициализация сети (Кэш или Живой поиск)
+# 3. !!! МГНОВЕННАЯ ОТРИСОВКА UI !!!
+# Используем данные из кэша, чтобы не ждать сеть
 $script:NetInfo = $script:Config.NetCache
-if ($script:Config.NetCacheStale -or $script:Config.RunCount -eq 1 -or $script:NetInfo.ISP -eq "Loading...") {
-    Write-DebugLog "Обновление сетевого статуса..." "INFO"
-    $script:NetInfo = Get-NetworkInfo
-    # КРИТИЧЕСКИ ВАЖНО: записываем новые данные обратно в объект конфига для сохранения
-    $script:Config.NetCache = $script:NetInfo
-}
-
-# 7. Подготовка целей и отрисовка UI (ЕДИНСТВЕННЫЙ РАЗ)
 $script:Targets = Get-Targets -NetInfo $script:NetInfo
 [Console]::Clear()
-Draw-UI $script:NetInfo $script:Targets $false
-Draw-StatusBar -Message $CONST.NavStr
+Draw-UI $script:NetInfo $script:Targets $null $false
+Draw-StatusBar -Message "[ WAIT ] INITIALIZING NETWORK..." -Fg "Black" -Bg "Yellow"
 
-# 8. Сброс временных флагов
-$FirstRun = $false
-Clear-KeyBuffer
+
+# 5. Обновление сети только если кэш устарел или это первый запуск
+if ($script:Config.NetCacheStale -or $script:Config.RunCount -le 1 -or $script:NetInfo.ISP -eq "Loading...") {
+    $script:NetInfo = Get-NetworkInfo
+    $script:Config.NetCache = $script:NetInfo
+    # Перерисовываем UI с новыми данными об ISP без полной очистки
+    Draw-UI $script:NetInfo $script:Targets $null $false
+}
+
+# 6. Проверка обновлений (только раз в 10 запусков, чтобы не бесить)
+if ($script:Config.RunCount % 10 -eq 0) {
+    $newVer = Check-UpdateVersion -Repo "Shiperoid/YT-DPI" -LastCheckedVersion $script:Config.LastCheckedVersion
+    if ($newVer) {
+        Draw-StatusBar -Message "[ UPDATE ] NEW VERSION v$newVer AVAILABLE! PRESS 'U' TO UPDATE." -Fg "White" -Bg "DarkMagenta"
+        Start-Sleep -Seconds 3
+    }
+}
+
+Draw-StatusBar -Message $CONST.NavStr
 Write-DebugLog "--- СИСТЕМА ГОТОВА ---" "INFO"
+Clear-KeyBuffer
+$FirstRun = $false
 
 while ($true) {
     if ($FirstRun) {
@@ -2842,7 +2831,7 @@ while ($true) {
         $script:NetInfo = Get-NetworkInfo
         $script:Targets = Get-Targets -NetInfo $script:NetInfo
         Write-DebugLog "Целей: $($script:Targets.Count)"
-        Draw-UI $script:NetInfo $script:Targets $true
+        Draw-UI $script:NetInfo $script:Targets $null $true
         Draw-StatusBar
         $FirstRun = $false
     }
@@ -3031,6 +3020,14 @@ while ($true) {
         }
         
         elseif ($k -eq "S") { 
+            Write-DebugLog "Открыты настройки"
+            Show-SettingsMenu
+            Draw-UI $script:NetInfo $script:Targets $true
+            Draw-StatusBar
+            continue 
+        }
+
+        elseif ($k -eq "R") { 
             Write-DebugLog "Сохранение отчёта"
             Draw-StatusBar -Message "[ WAIT ] SAVING RESULTS TO FILE..." -Fg "Black" -Bg "Cyan"
             $logPath = Join-Path -Path (Get-Location).Path -ChildPath "YT-DPI_Report.txt"
@@ -3117,7 +3114,7 @@ while ($true) {
             Draw-StatusBar -Message "[ WAIT ] SCANNING IN PROGRESS..." -Fg "Black" -Bg "Cyan"
             
             # Запуск движка
-            $scanResult = Start-ScanWithAnimation $script:Targets $global:ProxyConfig $global:Tls13Supported
+            $scanResult = Start-ScanWithAnimation $script:Targets $global:ProxyConfig
             $script:LastScanResults = $scanResult.Results
             
             # --- ПАУЗА ПЕРЕД ФИНАЛОМ ---
