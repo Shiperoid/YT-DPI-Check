@@ -2546,6 +2546,14 @@ $Worker = {
         Write-DebugLog "HTTP: Ошибка -> $($_.Exception.Message)" "WARN"
     } finally { if ($conn) { $conn.Tcp.Close() } }
 
+    if ($Result.HTTP -eq "ERR") {
+    $Result.T12 = "---"
+    $Result.T13 = "---"
+    $Result.Verdict = "IP BLOCK"
+    $Result.Color = "Red"
+    return $Result # Сразу выходим, не тратя время на TLS
+}
+
     # 3. TLS Проверки
     # Проверка TLS 1.3
     $pHost = if ($ProxyConfig.Enabled) { $ProxyConfig.Host } else { "" }
@@ -2639,8 +2647,10 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     # --- КОНЕЦ РАСЧЁТА ПОЗИЦИЙ ---
     
     $cpuCount = [Environment]::ProcessorCount
-    $maxThreads = [Math]::Min($Targets.Count, $cpuCount * 4)
-    if ($maxThreads -lt 1) { $maxThreads = 1 }
+    # Для сетевых задач ядра не важны, важна параллельность.
+    # Позволяем запускать до 50 проверок одновременно.
+    $maxThreads = [Math]::Min($Targets.Count, 50)
+    Write-DebugLog "Запуск пула потоков: $maxThreads воркеров."
     
     $pool = [runspacefactory]::CreateRunspacePool(1, $maxThreads)
     $pool.Open()
@@ -2696,9 +2706,10 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
             }
         }
 
-        # 3. Логика "Водопада"
-        if ($completedTasks -eq $Targets.Count -and $revealIndex -lt ($Targets.Count - 1)) {
-            if ($lastRevealTime.ElapsedMilliseconds -gt 30) {
+        # 3. Логика "Водопада" (Real-time: показываем по мере готовности)
+        # Если текущая строка по списку готова, разрешаем её "раскрыть"
+        if ($revealIndex + 1 -lt $Targets.Count) {
+            if ($jobs[$revealIndex + 1].DoneInBg) {
                 $revealIndex++
                 $lastRevealTime.Restart()
             }
