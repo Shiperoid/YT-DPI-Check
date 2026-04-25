@@ -1,7 +1,7 @@
 <# :
 @echo off
 set "SCRIPT_PATH=%~f0"
-title YT-DPI v2.1.7
+title YT-DPI v2.2.1
 chcp 65001 >nul
 
 :: Проверяем наличие PowerShell 7 (pwsh.exe)
@@ -31,7 +31,7 @@ $DebugPreference = "SilentlyContinue"
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.1.7"   # текущая версия yt-dpi
+$scriptVersion = "2.2.1"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $DEBUG_ENABLED = $true
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
@@ -130,8 +130,8 @@ $script:UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 
 # --- КОНСТАНТЫ ---
 $SCRIPT:CONST = @{
-    TimeoutMs    = 3000
-    ProxyTimeout = 4000
+    TimeoutMs    = 1500
+    ProxyTimeout = 2500
     HttpPort     = 80
     HttpsPort    = 443
     Tls13Proto   = 12288
@@ -168,7 +168,6 @@ public class TlsScanner {
     public static string TestT13(string targetIp, string host, string proxyHost, int proxyPort, string user, string pass, int timeout) {
         try {
             using (TcpClient tcp = new TcpClient()) {
-                // 1. Подключение (Direct или Proxy)
                 string connectHost = string.IsNullOrEmpty(proxyHost) ? targetIp : proxyHost;
                 int connectPort = string.IsNullOrEmpty(proxyHost) ? 443 : proxyPort;
 
@@ -180,7 +179,6 @@ public class TlsScanner {
                 stream.ReadTimeout = timeout;
                 stream.WriteTimeout = timeout;
 
-                // 2. Если есть прокси - делаем рукопожатие SOCKS5
                 if (!string.IsNullOrEmpty(proxyHost)) {
                     byte[] greeting = new byte[] { 0x05, 0x01, 0x00 };
                     stream.Write(greeting, 0, greeting.Length);
@@ -194,22 +192,34 @@ public class TlsScanner {
                     if (connResp[1] != 0x00) return "PRX_ERR";
                 }
 
-                // 3. Формируем "Chrome-like" TLS 1.3 Hello
+                // Шлем исправленный пакет
                 byte[] hello = BuildModernHello(host);
                 stream.Write(hello, 0, hello.Length);
 
-                // 4. Анализ ответа
                 byte[] header = new byte[5];
-                int read = stream.Read(header, 0, 5);
+                int read = 0;
+                try {
+                    read = stream.Read(header, 0, 5);
+                } catch (System.IO.IOException ex) {
+                    string m = ex.Message.ToLower();
+                    if (m.Contains("reset") || m.Contains("сброс")) return "RST";
+                    return "DRP";
+                }
+
                 if (read < 5) return "DRP";
 
-                if (header[0] == 0x16) return "OK"; // Handshake (Server Hello)
-                if (header[0] == 0x15) return "RST"; // Alert
+                // 0x16 = Handshake (Server Hello) - Успех
+                if (header[0] == 0x16) return "OK"; 
+                
+                // 0x15 = TLS Alert. Если сервер прислал это, значит пакет валиден, 
+                // но серверу что-то не нравится. Для теста доступности это "OK" (сервер ответил).
+                if (header[0] == 0x15) return "OK"; 
+                
                 return "DRP";
             }
         } catch (Exception ex) {
             string m = ex.Message.ToLower();
-            if (m.Contains("reset") || m.Contains("closed") || m.Contains("aborted")) return "RST";
+            if (m.Contains("reset") || m.Contains("closed")) return "RST";
             return "DRP";
         }
     }
@@ -226,35 +236,56 @@ public class TlsScanner {
 
     private static byte[] BuildModernHello(string host) {
         List<byte> body = new List<byte>();
-        body.AddRange(new byte[] { 0x03, 0x03 }); // Version
-        for (int i = 0; i < 32; i++) body.Add(0x07); // Random
-        body.Add(0x00); // Session ID
-        body.AddRange(new byte[] { 0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03 }); // Ciphers
-        body.AddRange(new byte[] { 0x01, 0x00 }); // Compression
+        body.AddRange(new byte[] { 0x03, 0x03 }); // TLS 1.2 (for compatibility header)
+        
+        Random rand = new Random();
+        byte[] random = new byte[32];
+        rand.NextBytes(random);
+        body.AddRange(random);
+
+        body.Add(0x00); // Session ID len
+        body.AddRange(new byte[] { 0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03 }); // Ciphers: TLS_AES_128_GCM_SHA256 и др.
+        body.Add(0x20); // Length 32
+        byte[] sessId = new byte[32]; rand.NextBytes(sessId);
+        body.AddRange(sessId);
 
         List<byte> exts = new List<byte>();
-        // SNI
+        
+        // 1. SNI
         byte[] h = Encoding.ASCII.GetBytes(host);
-        exts.AddRange(new byte[] { 0x00, 0x00 });
+        exts.AddRange(new byte[] { 0x00, 0x00 }); // Type SNI
         int sniLen = h.Length + 5;
         exts.Add((byte)(sniLen >> 8)); exts.Add((byte)(sniLen & 0xFF));
         exts.Add((byte)((h.Length + 3) >> 8)); exts.Add((byte)((h.Length + 3) & 0xFF));
-        exts.Add(0x00);
+        exts.Add(0x00); // Name type: host_name
         exts.Add((byte)(h.Length >> 8)); exts.Add((byte)(h.Length & 0xFF));
         exts.AddRange(h);
 
-        // Supported Versions (1.3)
-        exts.AddRange(new byte[] { 0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04 });
-        // Supported Groups (X25519)
+        // 2. Extended Master Secret (0x0017)
+        exts.AddRange(new byte[] { 0x00, 0x17, 0x00, 0x00 });
+
+        // 3. Supported Groups (0x000a) - x25519
         exts.AddRange(new byte[] { 0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1d });
-        // Key Share (Важно для TLS 1.3!)
+
+        // 4. Signature Algorithms (0x000d) - КРИТИЧНО ДЛЯ GOOGLE
+        // ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256, rsa_pkcs1_sha256
+        exts.AddRange(new byte[] { 0x00, 0x0d, 0x00, 0x08, 0x00, 0x06, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01 });
+
+        // 5. Supported Versions (0x002b) - TLS 1.3
+        exts.AddRange(new byte[] { 0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04 });
+
+        // 6. PSK Key Exchange Modes (0x002d) - КРИТИЧНО ДЛЯ TLS 1.3
+        exts.AddRange(new byte[] { 0x00, 0x2d, 0x00, 0x02, 0x01, 0x01 });
+
+        // 7. Key Share (0x0033)
         exts.AddRange(new byte[] { 0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20 });
-        for (int i = 0; i < 32; i++) exts.Add(0x09);
+        byte[] key = new byte[32]; rand.NextBytes(key);
+        exts.AddRange(key);
 
         body.Add((byte)(exts.Count >> 8)); body.Add((byte)(exts.Count & 0xFF));
         body.AddRange(exts);
 
-        List<byte> pkt = new List<byte> { 0x16, 0x03, 0x01 };
+        List<byte> pkt = new List<byte> { 0x16, 0x03, 0x01 }; // Record Header
         pkt.Add((byte)(body.Count >> 8)); pkt.Add((byte)(body.Count & 0xFF));
         pkt.AddRange(body);
         return pkt.ToArray();
@@ -292,7 +323,6 @@ function New-ConfigObject {
         RunCount = 0
         LastPromptRun = 0
         LastCheckedVersion = ""
-        Tls13Supported = $null
         IpPreference = "IPv6"   # <--- НОВОЕ: "IPv6" (приоритет) или "IPv4"
         Proxy = @{ Enabled = $false; Type = "HTTP"; Host = ""; Port = 0; User = ""; Pass = "" }
         ProxyHistory = @()
@@ -360,7 +390,6 @@ function Save-Config($config) {
         # Обновляем DNS кэш перед сохранением
         $config.DnsCache = $script:DnsCache
         $config.Proxy = $global:ProxyConfig
-        $config.Tls13Supported = $global:Tls13Supported
         
         # Удаляем временное поле
         if ($config.PSObject.Properties['NetCacheStale']) { $config.PSObject.Properties.Remove('NetCacheStale') }
@@ -665,7 +694,7 @@ function Draw-UI ($NetInfo, $Targets, $Results, $ClearScreen = $true) {
     Out-Str 45 6 '╚══════╝╚═╝╚═╝' 'Gray'
 
     Out-Str 65 1 "> SYS STATUS: [ ONLINE ]" "Green"
-    Out-Str 65 2 "> ENGINE: Barebuh Pro v1.7.6" "Red"
+    Out-Str 65 2 "> ENGINE: Barebuh Pro v2.3.4" "Red"
     Out-Str 65 3 ("> LOCAL DNS: " + $NetInfo.DNS).PadRight(50) "Cyan"
     Out-Str 65 4 ("> CDN NODE: " + $NetInfo.CDN).PadRight(50) "Yellow"
     Out-Str 65 5 "> AUTHOR: github.com/Shiperoid" "Green"
@@ -679,10 +708,7 @@ function Draw-UI ($NetInfo, $Targets, $Results, $ClearScreen = $true) {
 
     $proxyStatus = if ($global:ProxyConfig.Enabled) { "> PROXY: $($global:ProxyConfig.Type) $($global:ProxyConfig.Host):$($global:ProxyConfig.Port) Connected" } else { "> PROXY: [ OFF ]" }
     Out-Str 65 7 ($proxyStatus.PadRight(58)) "DarkYellow"
-    $tlsStatusColor = if ($global:Tls13Supported) { "Green" } else { "Gray" }
-    $tlsStatusText = if ($global:Tls13Supported) { "[ OK ]" } else { "[ UNSUPPORTED ]" }
-    Out-Str 65 8 "> TLS 1.3: $tlsStatusText" $tlsStatusColor
-    Out-Str 65 9 "> TG: t.me/YT_DPI | VERSION: $scriptVersion" "Green"
+    Out-Str 65 8 "> TG: t.me/YT_DPI | VERSION: $scriptVersion" "Green"
 
     # --- Таблица ---
     $y = 9
@@ -2295,7 +2321,7 @@ function Add-ToProxyHistory {
 # РАБОЧИЙ ПОТОК
 # ====================================================================================
 $Worker = {
-    param($Target, $ProxyConfig, $CanTls13, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock, $NetInfo, $IpPreference)
+    param($Target, $ProxyConfig, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock, $NetInfo, $IpPreference)
     
     function Write-DebugLog($msg, $level = "DEBUG") {
         if (-not $DEBUG_ENABLED) { return }
@@ -2521,49 +2547,57 @@ $Worker = {
     } finally { if ($conn) { $conn.Tcp.Close() } }
 
     # 3. TLS Проверки
-    foreach ($ver in @("T12", "T13")) {
-        if ($ver -eq "T13") {
-            # Вызываем наш новый C# движок с поддержкой прокси
-            $pHost = if ($ProxyConfig.Enabled) { $ProxyConfig.Host } else { "" }
-            $pPort = if ($ProxyConfig.Enabled) { [int]$ProxyConfig.Port } else { 0 }
-            
-            $res = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, 3000)
-            $Result.T13 = $res
-            Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$res"
-            continue
+    # Проверка TLS 1.3
+    $pHost = if ($ProxyConfig.Enabled) { $ProxyConfig.Host } else { "" }
+    $pPort = if ($ProxyConfig.Enabled) { [int]$ProxyConfig.Port } else { 0 }
+    $Result.T13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, 2000)
+    Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
+
+    # Проверка TLS 1.2
+    $conn = $null; $ssl = $null
+    try {
+        if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig 2000 }
+        else {
+            $tcp = [System.Net.Sockets.TcpClient]::new()
+            $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
+            if (-not $ar.AsyncWaitHandle.WaitOne(2000)) { throw "TcpTimeout" }
+            $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
         }
+        $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false, { $true })
+        $ssl.AuthenticateAsClient($Target, $null, "Tls12", $false)
+        $Result.T12 = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
+    } catch {
+        $m = $_.Exception.Message + $_.Exception.InnerException.Message
+        if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $Result.T12 = "RST" }
+        elseif ($m -match "certificate|сертификат|remote|success") { $Result.T12 = "OK" }
+        else { $Result.T12 = "DRP" }
+    } finally { if($ssl){$ssl.Close()}; if($conn){$conn.Tcp.Close()} }
 
-        # Код для TLS 1.2 (через SslStream, он там работает нормально)
-        $conn = $null; $ssl = $null
-        try {
-            if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig 3000 }
-            else {
-                $tcp = [System.Net.Sockets.TcpClient]::new()
-                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
-                if (-not $ar.AsyncWaitHandle.WaitOne(3000)) { throw "TcpTimeout" }
-                $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
-            }
-            $cb = [System.Net.Security.RemoteCertificateValidationCallback] { $true }
-            $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false, $cb)
-            $ssl.AuthenticateAsClient($Target, $null, "Tls12", $false)
-            $res = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
-        } catch {
-            $m = $_.Exception.Message + $_.Exception.InnerException.Message
-            if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $res = "RST" }
-            elseif ($m -match "certificate|сертификат|remote|success") { $res = "OK" }
-            else { $res = "DRP" }
-        } finally { if($ssl){$ssl.Close()}; if($conn){$conn.Tcp.Close()} }
-        $Result.T12 = $res
-    }
+    # 4. Логика вердикта
+    $t12Ok = ($Result.T12 -eq "OK")
+    $t13Ok = ($Result.T13 -eq "OK")
+    $t12Blocked = ($Result.T12 -eq "RST" -or $Result.T12 -eq "DRP")
+    $t13Blocked = ($Result.T13 -eq "RST" -or $Result.T13 -eq "DRP")
 
-    # 4. Вердикт
-    if ($Result.T12 -eq "OK" -or $Result.T13 -eq "OK") {
+    if ($t12Ok -and $t13Ok) {
         $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
-    } elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
+    }
+    elseif ($t12Ok -or $t13Ok) {
+        # Один из протоколов работает, другой — нет
+        if ($t12Blocked -or $t13Blocked) {
+            $Result.Verdict = "THROTTLED"; $Result.Color = "Yellow"
+        } else {
+            # Например, один OK, а другой ERR (проблема настройки, а не блокировка)
+            $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
+        }
+    }
+    elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
         $Result.Verdict = "DPI RESET"; $Result.Color = "Red"
-    } elseif ($Result.T12 -eq "DRP" -or $Result.T13 -eq "DRP") {
+    }
+    elseif ($Result.T12 -eq "DRP" -or $Result.T13 -eq "DRP") {
         $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red"
-    } else {
+    }
+    else {
         $Result.Verdict = "IP BLOCK"; $Result.Color = "Red"
     }
     return $Result
@@ -2571,7 +2605,7 @@ $Worker = {
 # ====================================================================================
 # АСИНХРОННОЕ СКАНИРОВАНИЕ
 # ====================================================================================
-function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
+function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     Write-DebugLog "Start-ScanWithAnimation: Режим Ultra-Smooth Waterfall..."
     
     # --- ДИНАМИЧЕСКИЙ РАСЧЁТ ПОЗИЦИЙ ДЛЯ АНИМАЦИИ ---
@@ -2618,18 +2652,16 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
     $waveChars = @("─     ", "──    ", "───   ", "────  ", "───── ", "──────", "───── ", "────  ", "───   ", "──    ")
     
     for ($i=0; $i -lt $Targets.Count; $i++) {
-        # Добавлен последний аргумент: $script:Config.IpPreference
         $ps = [PowerShell]::Create().AddScript($Worker).
-            AddArgument($Targets[$i]).
-            AddArgument($ProxyConfig).
-            AddArgument($Tls13Supported).
-            AddArgument($CONST).
-            AddArgument($DebugLogFile).
-            AddArgument($DEBUG_ENABLED).
-            AddArgument($script:DnsCache).
-            AddArgument($script:DnsCacheLock).
-            AddArgument($script:NetInfo).
-            AddArgument($script:Config.IpPreference) # <--- ПЕРЕДАЕМ НАСТРОЙКУ
+            AddArgument($Targets[$i]).            # 1. $Target
+            AddArgument($ProxyConfig).           # 2. $ProxyConfig
+            AddArgument($CONST).                 # 3. $CONST
+            AddArgument($DebugLogFile).          # 4. $DebugLogFile
+            AddArgument($DEBUG_ENABLED).         # 5. $DEBUG_ENABLED
+            AddArgument($script:DnsCache).       # 6. $DnsCache
+            AddArgument($script:DnsCacheLock).   # 7. $DnsCacheLock
+            AddArgument($script:NetInfo).        # 8. $NetInfo
+            AddArgument($script:Config.IpPreference) # 9. $IpPreference
             
         $ps.RunspacePool = $pool
         $jobs += [PSCustomObject]@{
@@ -2741,14 +2773,6 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, $Tls13Supported) {
 }
 
 # ====================================================================================
-# ПРОВЕРКА ПОДДЕРЖКИ TLS 1.3
-# ====================================================================================
-function Test-Tls13Support {
-    Write-DebugLog "Движок TLS 1.3 (Raw Sockets) активирован."
-    return $true
-}
-
-# ====================================================================================
 # ГЛАВНЫЙ ЦИКЛ ПРОГРАММЫ (ENGINE START)
 # ====================================================================================
 
@@ -2773,14 +2797,6 @@ $script:Targets = Get-Targets -NetInfo $script:NetInfo
 Draw-UI $script:NetInfo $script:Targets $null $false
 Draw-StatusBar -Message "[ WAIT ] INITIALIZING NETWORK..." -Fg "Black" -Bg "Yellow"
 
-# 4. Фоновые проверки (теперь они не блокируют появление окна)
-if ($null -ne $script:Config.Tls13Supported) {
-    $global:Tls13Supported = $script:Config.Tls13Supported
-} else {
-    # Делаем проверку быстрой
-    $global:Tls13Supported = Test-Tls13Support
-    $script:Config.Tls13Supported = $global:Tls13Supported
-}
 
 # 5. Обновление сети только если кэш устарел или это первый запуск
 if ($script:Config.NetCacheStale -or $script:Config.RunCount -le 1 -or $script:NetInfo.ISP -eq "Loading...") {
@@ -3093,7 +3109,7 @@ while ($true) {
             Draw-StatusBar -Message "[ WAIT ] SCANNING IN PROGRESS..." -Fg "Black" -Bg "Cyan"
             
             # Запуск движка
-            $scanResult = Start-ScanWithAnimation $script:Targets $global:ProxyConfig $global:Tls13Supported
+            $scanResult = Start-ScanWithAnimation $script:Targets $global:ProxyConfig
             $script:LastScanResults = $scanResult.Results
             
             # --- ПАУЗА ПЕРЕД ФИНАЛОМ ---
