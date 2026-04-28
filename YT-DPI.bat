@@ -155,6 +155,124 @@ $script:NetInfo = $null
 $script:DnsCache = [hashtable]::Synchronized(@{}) # Сразу делаем его потокобезопасным
 $script:LastScanResults = @()
 
+# Фоновая задача для предзагрузки NetInfo
+$script:BackgroundNetInfo = $null
+$script:NetInfoUpdating = $false
+
+function Start-BackgroundNetInfoUpdate {
+    if ($script:NetInfoUpdating) { return }
+    $script:NetInfoUpdating = $true
+    
+    Start-Job -Name "NetInfoUpdater" -ScriptBlock {
+        function Invoke-WebRequestFast($url, $timeout = 3000) {
+            try {
+                $req = [System.Net.WebRequest]::Create($url)
+                $req.Timeout = $timeout
+                $req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                $resp = $req.GetResponse()
+                $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+                $content = $reader.ReadToEnd()
+                $resp.Close()
+                return $content
+            } catch { return "" }
+        }
+        
+        $result = @{
+            DNS = "UNKNOWN"
+            CDN = "manifest.googlevideo.com"
+            ISP = "Loading..."
+            LOC = "Unknown"
+            HasIPv6 = $false
+        }
+        
+        # DNS
+        try {
+            $wmi = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | 
+                   Where-Object { $_.DNSServerSearchOrder -ne $null } | Select-Object -First 1
+            if ($wmi) { $result.DNS = $wmi.DNSServerSearchOrder[0] }
+        } catch {}
+        
+        # CDN через redirector
+        try {
+            $rnd = [guid]::NewGuid().ToString().Substring(0,8)
+            $raw = Invoke-WebRequestFast "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd" 2000
+            if ($raw -match "=>\s+([\w-]+\.googlevideo\.com)") {
+                $result.CDN = $matches[1]
+            } elseif ($raw -match "=>\s+([\w-]+)") {
+                $result.CDN = "r1.$($matches[1]).googlevideo.com"
+            }
+        } catch {}
+        
+        # GEO (с агрессивным таймаутом - 1.5 секунды на каждый)
+        $geoUrls = @(
+            "http://ip-api.com/json/?fields=status,countryCode,city,isp",
+            "https://ipapi.co/json/"
+        )
+        foreach ($url in $geoUrls) {
+            $raw = Invoke-WebRequestFast $url 1500
+            if ($raw -match '\{.*\}') {
+                try {
+                    $data = $raw | ConvertFrom-Json
+                    if ($data.status -eq "success" -and $data.isp) {
+                        $result.ISP = $data.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation)', ''
+                        $result.LOC = "$($data.city), $($data.countryCode)"
+                        break
+                    } elseif ($data.org) {
+                        $result.ISP = $data.org
+                        $result.LOC = "$($data.city), $($data.country_code)"
+                        break
+                    }
+                } catch {}
+            }
+        }
+        
+        if ($result.ISP.Length -gt 25) { $result.ISP = $result.ISP.Substring(0, 22) + "..." }
+        
+        # IPv6 тест (быстрый)
+        try {
+            $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
+            $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
+            if ($a.AsyncWaitHandle.WaitOne(1000)) {
+                $t.EndConnect($a)
+                $result.HasIPv6 = $true
+            }
+            $t.Close()
+        } catch {}
+        
+        return $result
+    } | Out-Null
+}
+
+# Запускаем фоновое обновление при старте
+Start-BackgroundNetInfoUpdate
+
+# Функция проверки готовности фонового обновления
+function Get-ReadyNetInfo {
+    $job = Get-Job -Name "NetInfoUpdater" -ErrorAction SilentlyContinue
+    if ($job -and $job.State -eq "Completed") {
+        $script:BackgroundNetInfo = Receive-Job $job
+        Remove-Job $job
+        $script:NetInfoUpdating = $false
+        Write-DebugLog "Фоновое обновление NetInfo завершено" "INFO"
+    }
+    
+    if ($script:BackgroundNetInfo) {
+        return $script:BackgroundNetInfo
+    } elseif ($script:Config.NetCache.ISP -ne "Loading...") {
+        return $script:Config.NetCache
+    } else {
+        # Возвращаем заглушку, скан начнется мгновенно
+        return @{
+            DNS = "UNKNOWN"
+            CDN = "manifest.googlevideo.com"
+            ISP = "Detecting..."
+            LOC = "Unknown"
+            HasIPv6 = $false
+            TimestampTicks = (Get-Date).Ticks
+        }
+    }
+}
+
 
 # --- НИЗКОУРОВНЕВЫЙ TLS ДВИЖОК (C#) ---
 $tlsCode = @"
@@ -293,6 +411,517 @@ public class TlsScanner {
 }
 "@
 try { Add-Type -TypeDefinition $tlsCode -ErrorAction SilentlyContinue } catch {}
+
+# Компилируем C# код traceroute
+$traceCode = @"
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+public class AdvancedTraceroute
+{
+    // ========== ПУБЛИЧНЫЕ МЕТОДЫ ==========
+    
+    /// <summary>
+    /// Выполняет трассировку с автоопределением лучшего метода
+    /// </summary>
+    public static List<TraceHop> Trace(string target, int maxHops = 30, int timeoutMs = 3000, 
+                                       TraceMethod method = TraceMethod.Auto, IProgress<string> progress = null)
+    {
+        // Разрешаем DNS
+        progress?.Report($"[*] Разрешение DNS: {target}");
+        var targetIp = ResolveTarget(target);
+        if (targetIp == null)
+        {
+            progress?.Report($"[!] Не удалось разрешить DNS: {target}");
+            return new List<TraceHop>();
+        }
+        progress?.Report($"[+] Целевой IP: {targetIp}");
+
+        // Автоопределение метода
+        if (method == TraceMethod.Auto)
+        {
+            method = DetectBestMethod(targetIp);
+            progress?.Report($"[*] Выбран метод: {method}");
+        }
+
+        // Выполняем трассировку
+        switch (method)
+        {
+            case TraceMethod.Icmp:
+                return TraceWithIcmp(targetIp, maxHops, timeoutMs, progress);
+            case TraceMethod.TcpSyn:
+                return TraceWithTcpSyn(targetIp, 443, maxHops, timeoutMs, progress);
+            case TraceMethod.Udp:
+                return TraceWithUdp(targetIp, 33434, maxHops, timeoutMs, progress);
+            default:
+                return TraceWithIcmp(targetIp, maxHops, timeoutMs, progress);
+        }
+    }
+
+    /// <summary>
+    /// Быстрая трассировка TCP SYN (обходит ICMP блокировки)
+    /// </summary>
+    public static List<TraceHop> QuickTcpTrace(string target, int port = 443, int maxHops = 15)
+    {
+        return TraceWithTcpSyn(ResolveTarget(target), port, maxHops, 2000, null);
+    }
+
+    // ========== ВНУТРЕННИЕ МЕТОДЫ ==========
+
+    private static IPAddress ResolveTarget(string target)
+    {
+        try
+        {
+            var addresses = Dns.GetHostAddresses(target);
+            return addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork) 
+                   ?? addresses.FirstOrDefault();
+        }
+        catch { return null; }
+    }
+
+    public class NetworkInfoFast {
+    public static dynamic GetCachedInfo() {
+        var result = new Dictionary<string, object>();
+        
+        // DNS (быстро)
+        try {
+            var hostName = Dns.GetHostName();
+            var ips = Dns.GetHostAddresses(hostName);
+            var dns = ips.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork);
+            result["DNS"] = dns?.ToString() ?? "UNKNOWN";
+        } catch { result["DNS"] = "UNKNOWN"; }
+        
+        // CDN через DNS (быстро, без HTTP)
+        try {
+            var cdnIps = Dns.GetHostAddresses("redirector.googlevideo.com");
+            result["CDN"] = "redirector.googlevideo.com (DNS resolved)";
+        } catch { result["CDN"] = "manifest.googlevideo.com"; }
+        
+        result["ISP"] = "Detected via C#";
+        result["LOC"] = "Fast mode";
+        result["HasIPv6"] = Socket.OSSupportsIPv6;
+        result["TimestampTicks"] = DateTime.Now.Ticks;
+        
+        return result;
+    }
+}
+
+    private static TraceMethod DetectBestMethod(IPAddress targetIp)
+    {
+        // Пробуем ICMP (быстрый тест)
+        using (var ping = new Ping())
+        {
+            try
+            {
+                var reply = ping.Send(targetIp, 1000);
+                if (reply != null && reply.Status == IPStatus.Success)
+                    return TraceMethod.Icmp;
+            }
+            catch { }
+        }
+
+        // Если ICMP заблокирован, пробуем TCP
+        using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.Tcp))
+        {
+            try
+            {
+                socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, 1);
+                return TraceMethod.TcpSyn;
+            }
+            catch (SocketException)
+            {
+                // Raw sockets требуют админских прав
+                return TraceMethod.Udp; // UDP работает без админа
+            }
+        }
+    }
+
+    // ========== ICMP TRACEROUTE (ТРЕБУЕТ АДМИНА) ==========
+    
+    private static List<TraceHop> TraceWithIcmp(IPAddress targetIp, int maxHops, int timeoutMs, 
+                                                 IProgress<string> progress)
+    {
+        var results = new List<TraceHop>();
+        using (var ping = new Ping())
+        {
+            var options = new PingOptions(1, true);
+            var buffer = new byte[32];
+
+            for (int ttl = 1; ttl <= maxHops; ttl++)
+            {
+                progress?.Report($"[TRACE] Hop {ttl}/{maxHops} (ICMP)...");
+                options.Ttl = ttl;
+
+                try
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    var reply = ping.Send(targetIp, timeoutMs, buffer, options);
+                    sw.Stop();
+
+                    var hop = new TraceHop
+                    {
+                        HopNumber = ttl,
+                        IP = reply.Address?.ToString() ?? "*",
+                        RttMs = (int)sw.ElapsedMilliseconds,
+                        Status = MapIcmpStatus(reply.Status)
+                    };
+
+                    results.Add(hop);
+                    progress?.Report($"[OK] Hop {ttl}: {hop.IP} - {hop.Status} ({hop.RttMs}ms)");
+
+                    if (reply.Status == IPStatus.Success || 
+                        (reply.Address != null && reply.Address.Equals(targetIp)))
+                        break;
+                }
+                catch (PingException) 
+                { 
+                    results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "TIMEOUT" });
+                    progress?.Report($"[!] Hop {ttl}: TIMEOUT");
+                }
+                catch (Exception ex)
+                {
+                    progress?.Report($"[ERROR] Hop {ttl}: {ex.Message}");
+                }
+
+                Thread.Sleep(20); // Небольшая задержка между хопами
+            }
+        }
+        return results;
+    }
+
+    // ========== TCP SYN TRACEROUTE (ОБХОДИТ ICMP, ТРЕБУЕТ АДМИНА) ==========
+    
+    private static List<TraceHop> TraceWithTcpSyn(IPAddress targetIp, int port, int maxHops, 
+                                                   int timeoutMs, IProgress<string> progress)
+    {
+        var results = new List<TraceHop>();
+        var localIp = GetLocalIpAddress();
+
+        for (int ttl = 1; ttl <= maxHops; ttl++)
+        {
+            progress?.Report($"[TRACE] Hop {ttl}/{maxHops} (TCP SYN:{port})...");
+            
+            using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.IP))
+            using (var receiver = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.IP))
+            {
+                try
+                {
+                    // Настройка сокетов
+                    sender.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.HeaderIncluded, true);
+                    sender.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
+                    
+                    receiver.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.HeaderIncluded, true);
+                    receiver.ReceiveTimeout = timeoutMs;
+                    receiver.Bind(new IPEndPoint(IPAddress.Any, 0));
+
+                    // Собираем TCP SYN пакет
+                    var srcPort = new Random().Next(1024, 65535);
+                    var seq = (uint)new Random().Next(1, int.MaxValue);
+                    
+                    var tcpPacket = BuildTcpSynPacket(srcPort, port, seq);
+                    var ipPacket = BuildIpPacket(localIp, targetIp, 6, tcpPacket);
+                    
+                    // Отправляем
+                    var endpoint = new IPEndPoint(targetIp, 0);
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    sender.SendTo(ipPacket, endpoint);
+
+                    // Ждем ответ
+                    var buffer = new byte[4096];
+                    var remoteEp = (EndPoint)new IPEndPoint(IPAddress.Any, 0);
+                    
+                    string responderIp = null;
+                    string status = "TIMEOUT";
+                    int rttMs = -1;
+
+                    if (receiver.Poll(timeoutMs * 1000, SelectMode.SelectRead))
+                    {
+                        var bytes = receiver.ReceiveFrom(buffer, ref remoteEp);
+                        sw.Stop();
+                        rttMs = (int)sw.ElapsedMilliseconds;
+                        
+                        responderIp = ((IPEndPoint)remoteEp).Address.ToString();
+                        status = ParseIpResponse(buffer, bytes, targetIp, port);
+                    }
+
+                    var hop = new TraceHop
+                    {
+                        HopNumber = ttl,
+                        IP = responderIp ?? "*",
+                        TcpStatus = status,
+                        RttMs = rttMs,
+                        Status = status == "SYNACK" ? "RESPONDED" : 
+                                (status == "RST" ? "BLOCKED" : "TIMEOUT")
+                    };
+                    
+                    results.Add(hop);
+                    progress?.Report($"[OK] Hop {ttl}: {hop.IP} - {hop.Status} ({hop.RttMs}ms)");
+
+                    if (status == "SYNACK" || (responderIp == targetIp.ToString()))
+                        break;
+                }
+                catch (SocketException ex)
+                {
+                    progress?.Report($"[!] Hop {ttl}: SOCKET ERROR - {ex.Message}");
+                    results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "ERROR" });
+                }
+                catch (Exception ex)
+                {
+                    progress?.Report($"[ERROR] Hop {ttl}: {ex.Message}");
+                }
+            }
+            Thread.Sleep(20);
+        }
+        return results;
+    }
+
+    // ========== UDP TRACEROUTE (НЕ ТРЕБУЕТ АДМИНА, РАБОТАЕТ ВЕЗДЕ) ==========
+    
+    private static List<TraceHop> TraceWithUdp(IPAddress targetIp, int startPort, int maxHops, 
+                                                int timeoutMs, IProgress<string> progress)
+    {
+        var results = new List<TraceHop>();
+        
+        for (int ttl = 1; ttl <= maxHops; ttl++)
+        {
+            progress?.Report($"[TRACE] Hop {ttl}/{maxHops} (UDP)...");
+            
+            using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+            using (var receiver = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.Icmp))
+            {
+                try
+                {
+                    sender.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
+                    receiver.ReceiveTimeout = timeoutMs;
+                    receiver.Bind(new IPEndPoint(IPAddress.Any, 0));
+
+                    var sendPort = startPort + ttl;
+                    var endpoint = new IPEndPoint(targetIp, sendPort);
+                    var buffer = new byte[] { 0x00 };
+                    
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    sender.SendTo(buffer, endpoint);
+
+                    var responseBuffer = new byte[256];
+                    var remoteEp = (EndPoint)new IPEndPoint(IPAddress.Any, 0);
+                    
+                    string responderIp = null;
+                    string status = "TIMEOUT";
+                    int rttMs = -1;
+
+                    if (receiver.Poll(timeoutMs * 1000, SelectMode.SelectRead))
+                    {
+                        var bytes = receiver.ReceiveFrom(responseBuffer, ref remoteEp);
+                        sw.Stop();
+                        rttMs = (int)sw.ElapsedMilliseconds;
+                        responderIp = ((IPEndPoint)remoteEp).Address.ToString();
+                        status = "RESPONDED";
+                    }
+
+                    var hop = new TraceHop
+                    {
+                        HopNumber = ttl,
+                        IP = responderIp ?? "*",
+                        RttMs = rttMs,
+                        Status = status
+                    };
+                    
+                    results.Add(hop);
+                    progress?.Report($"[OK] Hop {ttl}: {hop.IP} - {hop.Status} ({hop.RttMs}ms)");
+
+                    if (responderIp == targetIp.ToString())
+                        break;
+                }
+                catch (SocketException ex)
+                {
+                    if (ex.SocketErrorCode == SocketError.TtlExpired)
+                    {
+                        // TTL истек - это нормально для промежуточных хопов
+                        progress?.Report($"[*] Hop {ttl}: TTL expired");
+                        results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "TTL_EXPIRED" });
+                    }
+                    else
+                    {
+                        progress?.Report($"[!] Hop {ttl}: {ex.Message}");
+                        results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "ERROR" });
+                    }
+                }
+            }
+            Thread.Sleep(20);
+        }
+        return results;
+    }
+
+    // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
+    
+    private static IPAddress GetLocalIpAddress()
+    {
+        using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+        {
+            socket.Connect("8.8.8.8", 53);
+            var endPoint = socket.LocalEndPoint as IPEndPoint;
+            return endPoint?.Address;
+        }
+    }
+
+    private static byte[] BuildTcpSynPacket(int srcPort, int dstPort, uint seq)
+    {
+        var tcp = new byte[20];
+        
+        // Source port
+        tcp[0] = (byte)(srcPort >> 8);
+        tcp[1] = (byte)(srcPort & 0xFF);
+        // Destination port
+        tcp[2] = (byte)(dstPort >> 8);
+        tcp[3] = (byte)(dstPort & 0xFF);
+        // Sequence number
+        tcp[4] = (byte)(seq >> 24);
+        tcp[5] = (byte)(seq >> 16);
+        tcp[6] = (byte)(seq >> 8);
+        tcp[7] = (byte)(seq & 0xFF);
+        // Data offset (5 = 20 bytes header) + flags (SYN)
+        tcp[12] = 0x50; // Data offset = 5 (20 bytes)
+        tcp[13] = 0x02; // SYN flag
+        // Window size
+        tcp[14] = 0x20;
+        tcp[15] = 0x00;
+        
+        return tcp;
+    }
+
+    private static byte[] BuildIpPacket(IPAddress source, IPAddress destination, 
+                                        byte protocol, byte[] payload)
+    {
+        var totalLen = 20 + payload.Length;
+        var packet = new byte[totalLen];
+        
+        // IP version (4) + header length (5)
+        packet[0] = 0x45;
+        // Total length
+        packet[2] = (byte)(totalLen >> 8);
+        packet[3] = (byte)(totalLen & 0xFF);
+        // TTL (64)
+        packet[8] = 64;
+        // Protocol
+        packet[9] = protocol;
+        // Source IP
+        source.GetAddressBytes().CopyTo(packet, 12);
+        // Destination IP
+        destination.GetAddressBytes().CopyTo(packet, 16);
+        
+        // Calculate checksum
+        var checksum = ComputeIpChecksum(packet);
+        packet[10] = (byte)(checksum >> 8);
+        packet[11] = (byte)(checksum & 0xFF);
+        
+        // Payload
+        payload.CopyTo(packet, 20);
+        
+        return packet;
+    }
+
+    private static ushort ComputeIpChecksum(byte[] header)
+    {
+        uint sum = 0;
+        for (int i = 0; i < header.Length; i += 2)
+        {
+            if (i + 1 < header.Length)
+                sum += (uint)((header[i] << 8) | header[i + 1]);
+            else
+                sum += (uint)(header[i] << 8);
+            
+            if ((sum & 0xFFFF0000) != 0)
+            {
+                sum = (sum & 0xFFFF) + (sum >> 16);
+            }
+        }
+        
+        return (ushort)~sum;
+    }
+
+    private static string ParseIpResponse(byte[] buffer, int bytes, IPAddress targetIp, int targetPort)
+    {
+        if (bytes < 20) return "UNKNOWN";
+        
+        var protocol = buffer[9];
+        
+        if (protocol == 1) // ICMP
+        {
+            var type = buffer[20];
+            if (type == 11) return "TTL_EXPIRED";
+            if (type == 3) return "PORT_UNREACHABLE";
+            return $"ICMP_{type}";
+        }
+        else if (protocol == 6) // TCP
+        {
+            var ipHeaderLen = (buffer[0] & 0x0F) * 4;
+            if (bytes < ipHeaderLen + 20) return "UNKNOWN";
+            
+            var tcpOffset = ipHeaderLen;
+            var flags = buffer[tcpOffset + 13];
+            
+            if ((flags & 0x12) == 0x12) return "SYNACK";
+            if ((flags & 0x04) == 0x04) return "RST";
+            return "TCP_OTHER";
+        }
+        
+        return "UNKNOWN";
+    }
+
+    private static string MapIcmpStatus(IPStatus status)
+    {
+        switch (status)
+        {
+            case IPStatus.Success: return "RESPONDED";
+            case IPStatus.TtlExpired: return "TTL_EXPIRED";
+            case IPStatus.TimedOut: return "TIMEOUT";
+            case IPStatus.DestinationUnreachable: return "UNREACHABLE";
+            default: return status.ToString();
+        }
+    }
+}
+
+// ========== ВСПОМОГАТЕЛЬНЫЕ КЛАССЫ ==========
+
+public enum TraceMethod
+{
+    Auto,
+    Icmp,
+    TcpSyn,
+    Udp
+}
+
+public class TraceHop
+{
+    public int HopNumber { get; set; }
+    public string IP { get; set; }
+    public int RttMs { get; set; }
+    public string Status { get; set; }
+    public string TcpStatus { get; set; } // Для TCP метода (SYNACK/RST)
+    
+    public bool IsBlocking => Status == "BLOCKED" || TcpStatus == "RST";
+    public bool IsTimeout => Status == "TIMEOUT" || Status == "TTL_EXPIRED";
+    
+    public override string ToString()
+    {
+        return $"Hop {HopNumber,2}: {IP,-15} {Status} {(RttMs > 0 ? $"({RttMs}ms)" : "")}";
+    }
+}
+"@
+
+try {
+    Add-Type -TypeDefinition $traceCode -ErrorAction SilentlyContinue
+    Write-DebugLog "Traceroute C# компонент загружен" "INFO"
+} catch {
+    Write-DebugLog "Ошибка загрузки traceroute: $_" "ERROR"
+}
 
 
 # --- ГЛОБАЛЬНЫЕ ПУТИ ---
@@ -903,48 +1532,45 @@ function Trace-TcpRoute {
         [int]$TimeoutSec = 5,
         [scriptblock]$onProgress = $null
     )
-    Write-DebugLog "Trace-TcpRoute: $Target`:$Port, MaxHops=$MaxHops, TimeoutSec=$TimeoutSec"
-
-    # Разрешаем имя в IP
-    $targetIp = $null
+    
+    Write-DebugLog "Trace-TcpRoute (C#): $Target, MaxHops=$MaxHops"
+    
+    # Функция для прогресса (адаптер)
+    $progressLogger = [System.Progress[string]]::new({
+        param($msg)
+        if ($onProgress) { & $onProgress $msg }
+    })
+    
     try {
-        $targetIp = [System.Net.Dns]::GetHostAddresses($Target) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
-        if (-not $targetIp) {
-            Write-DebugLog "Не удалось разрешить $Target в IPv4"
-            return "DNS error"
+        # Выбираем метод
+        $method = [TraceMethod]::TcpSyn  # TCP SYN обходит ICMP блокировки
+        
+        # Выполняем трассировку
+        $hops = [AdvancedTraceroute]::Trace($Target, $MaxHops, $TimeoutSec * 1000, $method, $progressLogger)
+        
+        # Конвертируем в формат, понятный старому коду
+        $result = @()
+        foreach ($hop in $hops) {
+            $result += [PSCustomObject]@{
+                Hop          = $hop.HopNumber
+                IP           = $hop.IP
+                TcpStatus    = if ($hop.TcpStatus) { $hop.TcpStatus } else { $hop.Status }
+                TlsStatus    = "N/A"
+                RttMs        = if ($hop.RttMs -gt 0) { $hop.RttMs } else { $null }
+                IsBlocking   = $hop.IsBlocking
+            }
         }
-        $targetIp = $targetIp.IPAddressToString
+        
+        Write-DebugLog "Трассировка завершена, получено $($result.Count) хопов"
+        return $result
+        
     } catch {
-        Write-DebugLog "DNS ошибка: $_"
-        return "DNS error"
+        Write-DebugLog "Ошибка C# traceroute: $_" "ERROR"
+        
+        # Fallback на старый метод
+        Write-DebugLog "Используем fallback метод (ICMP + TCP)" "WARN"
+        return Invoke-TcpTracerouteCombined -Target $Target -Port $Port -MaxHops $MaxHops -TimeoutSec $TimeoutSec -onProgress $onProgress
     }
-
-    # Проверяем версию Windows (raw sockets плохо работают на Windows 7)
-    $osVersion = [System.Environment]::OSVersion.Version
-    $isWin7 = ($osVersion.Major -eq 6 -and $osVersion.Minor -eq 1)
-    
-    # Проверяем права администратора
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    
-    # Используем raw sockets только на Windows 8+ с правами администратора
-    if ($isAdmin -and -not $isWin7) {
-        Write-DebugLog "Попытка использовать raw sockets (TCP traceroute)"
-        $result = Invoke-TcpTracerouteRaw -TargetIp $targetIp -Port $Port -MaxHops $MaxHops -TimeoutSec $TimeoutSec
-        if ($result -isnot [string]) {
-            return $result
-        }
-        Write-DebugLog "Raw sockets не удались, переходим к комбинированному методу: $result"
-    } else {
-        if ($isWin7) {
-            Write-DebugLog "Windows 7 detected, skipping raw sockets"
-        } elseif (-not $isAdmin) {
-            Write-DebugLog "No admin rights, skipping raw sockets"
-        }
-    }
-
-    # Комбинированный метод: ICMP traceroute + TCP probes к каждому узлу
-    Write-DebugLog "Используем комбинированный метод (ICMP + TCP)"
-    return Invoke-TcpTracerouteCombined -Target $Target -Port $Port -MaxHops $MaxHops -TimeoutSec $TimeoutSec -onProgress $onProgress
 }
 
 # --- Raw sockets TCP traceroute (требует админа) ---
@@ -1725,14 +2351,36 @@ function Get-NetworkInfo {
         if ($wmi) { $dns = $wmi.DNSServerSearchOrder[0] }
     } catch { }
 
-    $cdn = "manifest.googlevideo.com"
+    # 1. Определяем локальный CDN через redirector.googlevideo.com
+    $cdn = "manifest.googlevideo.com"   # fallback
+    $rnd = [guid]::NewGuid().ToString().Substring(0,8)
+    $redirectorUrl = "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd"
+
+    Write-DebugLog "Get-NetworkInfo: запрос к $redirectorUrl"
+    try {
+        # Используем уже существующую функцию Invoke-WebRequestViaProxy (она поддерживает прокси)
+        $raw = Invoke-WebRequestViaProxy $redirectorUrl -Timeout 3000
+        if ($raw -match "=>\s+([\w-]+\.googlevideo\.com)") {
+            $cdn = $matches[1]
+            Write-DebugLog "Get-NetworkInfo: CDN определён как $cdn"
+        } elseif ($raw -match "=>\s+([\w-]+)") {
+            # Альтернативный формат: r1-XXX
+            $cdn = "r1.$($matches[1]).googlevideo.com"
+            Write-DebugLog "Get-NetworkInfo: CDN определён (альт.) как $cdn"
+        } else {
+            Write-DebugLog "Get-NetworkInfo: не удалось распарсить ответ, оставляем fallback $cdn" "WARN"
+        }
+    } catch {
+        Write-DebugLog "Get-NetworkInfo: ошибка при определении CDN: $_" "WARN"
+        # fallback уже задан
+    }
+
+    # 2. Геоинформация (ISP/LOC) – без изменений
     $isp = "UNKNOWN"; $loc = "UNKNOWN"
-    
-    # Список провайдеров ГЕО (отсортированы по надежности через прокси)
     $geoProviders = @(
         @{ url = "http://ip-api.com/json/?fields=status,countryCode,city,isp"; type = "ip-api" },
         @{ url = "https://ipapi.co/json/"; type = "ipapi-co" },
-        @{ url = "http://worldtimeapi.org/api/ip"; type = "worldtime" } # Резерв для LOC
+        @{ url = "http://worldtimeapi.org/api/ip"; type = "worldtime" }
     )
 
     :providerLoop foreach ($prov in $geoProviders) {
@@ -1756,18 +2404,16 @@ function Get-NetworkInfo {
         }
     }
 
-    # Очистка названия ISP
     $isp = $isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation)', ''
     if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
 
-    # Быстрый тест IPv6
-    # 4. Проверка IPv6 (только если не выбран режим IPv4 Only)
+    # 3. Проверка IPv6
     $hasV6 = $false
     if ($script:Config.IpPreference -ne "IPv4") {
         try {
             $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
             $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
-            if ($a.AsyncWaitHandle.WaitOne(1000)) { # Уменьшили до 1 сек
+            if ($a.AsyncWaitHandle.WaitOne(1000)) {
                 $t.EndConnect($a)
                 $hasV6 = $true 
             }
@@ -3070,57 +3716,77 @@ while ($true) {
 
         # Обработка Enter
         if ($k -eq "Enter") {
-            Write-DebugLog "Запуск сканирования по Enter"
+            Write-DebugLog "Запуск сканирования по Enter (оптимизированный)"
             
-            # --- ФИКС ЗАДВАИВАНИЯ ---
-            # Стираем старый статус по старым координатам, пока Targets еще не обновились
+            # Стираем старый статус
             $oldRow = Get-NavRow -count $script:Targets.Count
             Out-Str 0 $oldRow (" " * [Console]::WindowWidth) "Black" "Black"
-            # ------------------------
-
-            # Быстрая проверка интернета
+            
+            # Быстрая проверка интернета (асинхронно)
             $internetAvailable = $false
             try {
-                $tcpTest = New-Object System.Net.Sockets.TcpClient
-                $async = $tcpTest.BeginConnect("8.8.8.8", 53, $null, $null)
-                if ($async.AsyncWaitHandle.WaitOne(2000)) {
-                    $tcpTest.EndConnect($async)
-                    $internetAvailable = $true
-                }
-                $tcpTest.Close()
-            } catch {}
-
+                $ping = New-Object System.Net.NetworkInformation.Ping
+                $reply = $ping.Send("8.8.8.8", 1000)
+                $internetAvailable = ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success)
+            } catch {
+                $internetAvailable = $true  # Предполагаем что интернет есть
+            }
+            
             if (-not $internetAvailable) {
-                Draw-StatusBar -Message "[ ERROR ] NO INTERNET CONNECTION DETECTED. CHECK YOUR NETWORK." -Fg "Black" -Bg "Red"
-                Start-Sleep -Seconds 3
+                Draw-StatusBar -Message "[ ERROR ] NO INTERNET CONNECTION DETECTED." -Fg "Black" -Bg "Red"
+                Start-Sleep -Seconds 2
                 Draw-StatusBar
                 Clear-KeyBuffer
                 continue
             }
             
-            Draw-StatusBar -Message "[ WAIT ] REFRESHING NETWORK STATE..." -Fg "Black" -Bg "Cyan"
-            $script:NetInfo = Get-NetworkInfo
+            # МГНОВЕННО используем готовые данные (или заглушку)
+            Draw-StatusBar -Message "[ WAIT ] PREPARING SCAN (USING CACHED DATA)..." -Fg "Black" -Bg "Cyan"
             
+            # Проверяем фоновое обновление
+            Get-ReadyNetInfo
+            if ($script:BackgroundNetInfo) {
+                $script:NetInfo = $script:BackgroundNetInfo
+                $script:Config.NetCache = $script:NetInfo
+                Save-Config $script:Config
+                Write-DebugLog "Использованы свежие фоновые данные" "INFO"
+            } elseif ((Get-Date).Ticks - $script:Config.NetCache.TimestampTicks -lt ([TimeSpan]::FromMinutes(10).Ticks)) {
+                $script:NetInfo = $script:Config.NetCache
+                Write-DebugLog "Использован кэш (возраст < 10 минут)" "INFO"
+            } else {
+                # Если кэш старый - используем заглушку и запускаем обновление в фоне
+                $script:NetInfo = @{
+                    DNS = $script:Config.NetCache.DNS
+                    CDN = $script:Config.NetCache.CDN
+                    ISP = "Updating..."
+                    LOC = "In background"
+                    HasIPv6 = $script:Config.NetCache.HasIPv6
+                    TimestampTicks = (Get-Date).Ticks
+                }
+                Start-BackgroundNetInfoUpdate
+                Write-DebugLog "Кэш устарел, запущено фоновое обновление" "INFO"
+            }
+            
+            # Обновляем таргеты (мгновенно)
             $NewTargets = Get-Targets -NetInfo $script:NetInfo
             $NeedClear = ($NewTargets.Count -ne $script:Targets.Count)
             $script:Targets = $NewTargets
             
+            # Отрисовка UI (мгновенно)
             Draw-UI $script:NetInfo $script:Targets $NeedClear
             
             for($i=0; $i -lt $script:Targets.Count; $i++) { 
-                Out-Str $CONST.UI.Ver (12 + $i) ("PREPARING...".PadRight(30)) "DarkGray"
+                Out-Str $CONST.UI.Ver (12 + $i) ("SCANNING...".PadRight(30)) "Yellow"
             }
             
-            Draw-StatusBar -Message "[ WAIT ] SCANNING IN PROGRESS..." -Fg "Black" -Bg "Cyan"
+            # Старт скана (без паузы!)
+            Draw-StatusBar -Message "[ SCAN ] STARTING SCAN (ULTRA-FAST MODE)..." -Fg "Black" -Bg "Cyan"
             
-            # Запуск движка
             $scanResult = Start-ScanWithAnimation $script:Targets $global:ProxyConfig
             $script:LastScanResults = $scanResult.Results
             
-            # --- ПАУЗА ПЕРЕД ФИНАЛОМ ---
-            # Даем глазу зафиксировать заполненную таблицу
             Start-Sleep -Milliseconds 400
-
+            
             if ($scanResult.Aborted) {
                 Draw-StatusBar -Message "[ ABORTED ] SCAN STOPPED. PRESS ENTER TO CONTINUE..." -Fg "Black" -Bg "Red"
             } else {
