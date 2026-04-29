@@ -5,14 +5,15 @@ title YT-DPI v2.2.1
 chcp 65001 >nul
 
 :: Проверяем наличие PowerShell 7 (pwsh.exe)
-where pwsh >nul 2>nul
-if %ERRORLEVEL% equ 0 (
-    set "PS_EXE=pwsh"
+where /q pwsh.exe
+if not errorlevel 1 (
+    set "PS_EXE=pwsh.exe"
 ) else (
-    set "PS_EXE=powershell"
+    set "PS_EXE=powershell.exe"
 )
 
-%PS_EXE% -NoProfile -ExecutionPolicy Bypass -Command "iex ([System.IO.File]::ReadAllText('%~f0', [System.Text.Encoding]::UTF8))"
+rem Запускаем PowerShell-часть файла безопасно без iex и без -File для .bat
+"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$s=[System.IO.File]::ReadAllText($env:SCRIPT_PATH,[System.Text.Encoding]::UTF8); & ([ScriptBlock]::Create($s))"
 exit /b
 #>
 $script:OriginalFilePath = [System.Environment]::GetEnvironmentVariable("SCRIPT_PATH", "Process")
@@ -27,7 +28,12 @@ $script:CurrentWindowHeight = 0
 [Console]::CursorVisible = $false
 $ErrorActionPreference = "Continue"
 $DebugPreference = "SilentlyContinue"
-[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+
+# Безопасно по умолчанию: не отключаем проверку TLS-сертификатов
+$script:AllowInsecureTls = $false
+if ($script:AllowInsecureTls) {
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+}
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
@@ -37,6 +43,20 @@ $DEBUG_ENABLED = $false
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
 $DebugLogMutex = New-Object System.Threading.Mutex($false, "Global\YT-DPI-Debug-Mutex")
 $script:LogLock = New-Object System.Object
+
+# ===== ЛОГИРОВАНИЕ И РОТАЦИЯ =====
+$maxLogSizeBytes = 5 * 1024 * 1024
+if (Test-Path $DebugLogFile) {
+    try {
+        $fileInfo = Get-Item $DebugLogFile
+        if ($fileInfo.Length -gt $maxLogSizeBytes) {
+            $backupName = [System.IO.Path]::GetFileNameWithoutExtension($DebugLogFile) + "_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + ".log"
+            Move-Item $DebugLogFile (Join-Path (Split-Path $DebugLogFile -Parent) $backupName) -Force
+        } else {
+            Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue
+        }
+    } catch { Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue }
+}
 
 function Write-DebugLog($msg, $level = "DEBUG") {
     if (-not $DEBUG_ENABLED) { return }
@@ -57,20 +77,6 @@ function Write-DebugLog($msg, $level = "DEBUG") {
             [System.Threading.Monitor]::Exit($script:LogLock)
         }
     }
-}
-
-# ===== ЛОГИРОВАНИЕ И РОТАЦИЯ =====
-$maxLogSizeBytes = 5 * 1024 * 1024
-if (Test-Path $DebugLogFile) {
-    try {
-        $fileInfo = Get-Item $DebugLogFile
-        if ($fileInfo.Length -gt $maxLogSizeBytes) {
-            $backupName = [System.IO.Path]::GetFileNameWithoutExtension($DebugLogFile) + "_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + ".log"
-            Move-Item $DebugLogFile (Join-Path (Split-Path $DebugLogFile -Parent) $backupName) -Force
-        } else {
-            Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue
-        }
-    } catch { Remove-Item $DebugLogFile -Force -ErrorAction SilentlyContinue }
 }
 
 # ТЕПЕРЬ ПИШЕМ ИНФО-БЛОК (Когда файл уже чистый)
@@ -163,6 +169,12 @@ function Start-BackgroundNetInfoUpdate {
     if ($script:NetInfoUpdating) { return }
     $script:NetInfoUpdating = $true
     
+    $existing = Get-Job -Name "NetInfoUpdater" -ErrorAction SilentlyContinue
+    if ($existing) {
+        try { Stop-Job $existing -ErrorAction SilentlyContinue } catch {}
+        try { Remove-Job $existing -Force -ErrorAction SilentlyContinue } catch {}
+    }
+
     Start-Job -Name "NetInfoUpdater" -ScriptBlock {
         function Invoke-WebRequestFast($url, $timeout = 3000) {
             try {
@@ -196,16 +208,22 @@ function Start-BackgroundNetInfoUpdate {
         try {
             $rnd = [guid]::NewGuid().ToString().Substring(0,8)
             $raw = Invoke-WebRequestFast "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd" 2000
-            if ($raw -match "=>\s+([\w-]+\.googlevideo\.com)") {
-                $result.CDN = $matches[1]
-            } elseif ($raw -match "=>\s+([\w-]+)") {
-                $result.CDN = "r1.$($matches[1]).googlevideo.com"
+            $cdnShort = $null
+            if ($raw -match '=>\s+([\w-]+)') {
+                $cdnShort = $matches[1]
+            }
+            if ($cdnShort -and $cdnShort -ne 'r1') {
+                $result.CDN = "r1.$cdnShort.googlevideo.com"
+            } else {
+                if ($raw -match '=>\s*([a-zA-Z0-9.\-]+\.googlevideo\.com)') {
+                    $result.CDN = $matches[1]
+                }
             }
         } catch {}
         
         # GEO (с агрессивным таймаутом - 1.5 секунды на каждый)
         $geoUrls = @(
-            "http://ip-api.com/json/?fields=status,countryCode,city,isp",
+            "https://ip-api.com/json/?fields=status,countryCode,city,isp",
             "https://ipapi.co/json/"
         )
         foreach ($url in $geoUrls) {
@@ -239,6 +257,7 @@ function Start-BackgroundNetInfoUpdate {
             $t.Close()
         } catch {}
         
+        $result.TimestampTicks = (Get-Date).Ticks
         return $result
     } | Out-Null
 }
@@ -952,7 +971,8 @@ function New-ConfigObject {
         RunCount = 0
         LastPromptRun = 0
         LastCheckedVersion = ""
-        IpPreference = "IPv6"   # <--- НОВОЕ: "IPv6" (приоритет) или "IPv4"
+        IpPreference = "IPv6"   
+        TlsMode = "Auto"       # NEW: "Auto", "TLS12", "TLS13"
         Proxy = @{ Enabled = $false; Type = "HTTP"; Host = ""; Port = 0; User = ""; Pass = "" }
         ProxyHistory = @()
         NetCache = @{ 
@@ -986,7 +1006,6 @@ function Load-Config {
             # --- МИГРАЦИЯ: Добавляем недостающие поля из дефолтного конфига ---
             foreach ($prop in $default.PSObject.Properties) {
                 if ($null -eq $config.$($prop.Name)) {
-                    # Используем Add-Member, чтобы расширить объект «на лету»
                     $config | Add-Member -MemberType NoteProperty -Name $prop.Name -Value $prop.Value -Force
                     Write-DebugLog "Миграция: Добавлено отсутствующее поле $($prop.Name)" "INFO"
                 }
@@ -1039,9 +1058,8 @@ function Start-Updater {
     $logFile = Join-Path $env:TEMP "yt_updater_debug.log"
     $updaterPath = Join-Path $env:TEMP "yt_run_updater.ps1"
 
-    Write-DebugLog "Запуск финальной версии апдейтера. Лог: $logFile"
+    Write-DebugLog "Запуск апдейтера. Лог: $logFile"
 
-    # Одинарные кавычки защищают код от раскрытия переменных
     $updaterTemplate = @'
 $parentPid = "REPLACE_PID"
 $currentFile = "REPLACE_FILE"
@@ -1055,34 +1073,53 @@ function Write-Log($m) {
 }
 
 Write-Log "--- UPDATER SESSION START ---"
-Write-Log "Waiting for PID $parentPid to exit..."
 
-# 1. Ждем завершения процесса (до 15 секунд)
+# 1. Принудительно убиваем старый процесс
+Write-Log "Killing old process $parentPid..."
+try {
+    Stop-Process -Id $parentPid -Force -ErrorAction Stop
+    Write-Log "Process killed successfully"
+} catch {
+    Write-Log "Could not kill process: $_"
+}
+Start-Sleep -Seconds 1
+
+# 2. Дополнительная проверка, что процесс действительно завершён
 $count = 0
 while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {
-    if ($count -gt 150) { Write-Log "Force killing $parentPid"; Stop-Process -Id $parentPid -Force; break }
+    if ($count -gt 30) { 
+        Write-Log "Force killing again"
+        Stop-Process -Id $parentPid -Force -ErrorAction SilentlyContinue
+        break 
+    }
     Start-Sleep -Milliseconds 100
     $count++
 }
-Start-Sleep -Seconds 1 # Дополнительная пауза для снятия блокировки файла
+Start-Sleep -Seconds 1
 
+# 3. Скачивание и замена файла (с конвертацией CRLF)
 try {
     Write-Log "Downloading from $downloadUrl..."
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
     $web = New-Object System.Net.WebClient
     $web.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-    $web.DownloadFile($downloadUrl, $tempFile)
-
+    $bytes = $web.DownloadData($downloadUrl)
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    # Конвертируем LF -> CRLF
+    $text = $text -replace "`r`n", "`n" -replace "`n", "`r`n"
+    # Удаляем BOM
+    if ($text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+    
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($tempFile, $text, $utf8NoBom)
+    
+    Write-Log "Downloaded and fixed. Size: $($text.Length)"
+    
     if (Test-Path $tempFile) {
         $size = (Get-Item $tempFile).Length
         $content = Get-Content $tempFile -Raw -Encoding UTF8
-        Write-Log "Downloaded size: $size bytes."
-
-        # ПРОВЕРКА ЦЕЛОСТНОСТИ (более гибкая)
         if ($size -gt 10000 -and ($content -match "scriptVersion" -or $content -match "YT-DPI")) {
             Write-Log "Integrity check passed."
-            
-            # 2. Пытаемся заменить файл (с повторами, если файл занят)
             $replaced = $false
             for ($i=1; $i -le 5; $i++) {
                 try {
@@ -1095,16 +1132,15 @@ try {
                     Start-Sleep -Seconds 1
                 }
             }
-
             if ($replaced) {
                 Write-Log "Update successful! Restarting..."
                 Start-Process $currentFile
             } else {
-                Write-Log "CRITICAL: Could not overwrite file after 5 attempts."
+                Write-Log "CRITICAL: Could not overwrite file."
                 Start-Process $currentFile
             }
         } else {
-            Write-Log "Integrity FAIL: Content check failed (size $size)."
+            Write-Log "Integrity FAIL."
             Start-Process $currentFile
         }
     }
@@ -1114,12 +1150,10 @@ try {
     if (Test-Path $currentFile) { Start-Process $currentFile }
 }
 
-# Очистка
-if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
 Write-Log "--- UPDATER SESSION END ---"
 '@
 
-    # Заполнение путей
     $updaterContent = $updaterTemplate.
         Replace("REPLACE_PID", $parentPid).
         Replace("REPLACE_FILE", $currentFile).
@@ -1127,20 +1161,19 @@ Write-Log "--- UPDATER SESSION END ---"
         Replace("REPLACE_TEMP", $tempFile).
         Replace("REPLACE_LOG", $logFile)
 
-    try {
-        Set-Content -Path $updaterPath -Value $updaterContent -Encoding UTF8 -Force
-        
-        $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $pInfo.FileName = "powershell.exe"
-        $pInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$updaterPath`""
-        $pInfo.WindowStyle = "Hidden"
-        [System.Diagnostics.Process]::Start($pInfo) | Out-Null
-        
-        # Мгновенно убиваем текущий процесс
-        [System.Diagnostics.Process]::GetCurrentProcess().Kill()
-    } catch {
-        Write-DebugLog "Ошибка запуска апдейтера: $_"
-    }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($updaterPath, $updaterContent, $utf8NoBom)
+    
+    $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $pInfo.FileName = "powershell.exe"
+    $pInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$updaterPath`""
+    $pInfo.WindowStyle = "Hidden"
+    [System.Diagnostics.Process]::Start($pInfo) | Out-Null
+    
+    # Даём апдейтеру время на запуск и убийство процесса
+    Start-Sleep -Milliseconds 500
+    # Выходим без лишних действий
+    [System.Environment]::Exit(0)
 }
 
 # ====================================================================================
@@ -1703,7 +1736,7 @@ function Invoke-TcpTracerouteCombined {
         try {
             $pinfo = New-Object System.Diagnostics.ProcessStartInfo
             $pinfo.FileName = "tracert"
-            $pinfo.Arguments = "-h $MaxHops -w 500 -4 $Target"
+            $pinfo.Arguments = "-d -h $MaxHops -w 350 -4 $Target"
             $pinfo.UseShellExecute = $false
             $pinfo.RedirectStandardOutput = $true
             $pinfo.RedirectStandardError = $true
@@ -1713,13 +1746,18 @@ function Invoke-TcpTracerouteCombined {
             $p.StartInfo = $pinfo
             $p.Start() | Out-Null
             
-            $output = $p.StandardOutput.ReadToEnd()
-            $completed = $p.WaitForExit($TimeoutSec * 1000)
+            # Реальный лимит времени для tracert: 3 пробы на хоп + запас.
+            $traceTimeoutMs = [Math]::Max(12000, $MaxHops * 1400)
+            $completed = $p.WaitForExit($traceTimeoutMs)
             
             if (-not $completed) {
-                Write-DebugLog "tracert превысил таймаут, убиваем процесс"
+                Write-DebugLog "tracert превысил лимит (${traceTimeoutMs}ms), убиваем процесс"
                 try { $p.Kill() } catch { }
+                try { $p.WaitForExit(1000) | Out-Null } catch {}
             }
+
+            $output = ""
+            try { $output = $p.StandardOutput.ReadToEnd() } catch {}
             
             if ($output) {
                 $lines = $output -split "`r`n"
@@ -1878,7 +1916,11 @@ function Test-TlsHandshake {
         $tcp.ReceiveTimeout = $hopTimeout
         $tcp.SendTimeout = $hopTimeout
         
-        $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $true, { $true })
+        if ($script:AllowInsecureTls) {
+            $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $true, { $true })
+        } else {
+            $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $true)
+        }
         
         $sslAsync = $ssl.BeginAuthenticateAsClient($TargetIp, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false, $null, $null)
         
@@ -2303,7 +2345,11 @@ function Invoke-WebRequestViaProxy($Url, $Method = "GET", $Timeout = $CONST.Time
 
             # --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: SSL-обертка для SOCKS ---
             if ($uri.Scheme -eq "https") {
-                $sslStream = New-Object System.Net.Security.SslStream($stream, $false, { $true })
+                if ($script:AllowInsecureTls) {
+                    $sslStream = New-Object System.Net.Security.SslStream($stream, $false, { $true })
+                } else {
+                    $sslStream = New-Object System.Net.Security.SslStream($stream, $false)
+                }
                 $sslStream.AuthenticateAsClient($uri.Host)
                 $stream = $sslStream
             }
@@ -2342,72 +2388,146 @@ function Invoke-WebRequestViaProxy($Url, $Method = "GET", $Timeout = $CONST.Time
     }
 }
 
+# ===== ГЕО-КЭШ С ПРОДЛЕННЫМ TTL =====
+$script:GeoCacheFile = Join-Path $script:ConfigDir "geo_cache.json"
+$script:LastGeoUpdate = $null
+
+function Get-CachedGeoInfo {
+    param([int]$MaxAgeHours = 24)
+    
+    if (Test-Path $script:GeoCacheFile) {
+        try {
+            $cached = Get-Content $script:GeoCacheFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            $cacheAge = (Get-Date).Ticks - $cached.TimestampTicks
+            $ageHours = [TimeSpan]::FromTicks($cacheAge).TotalHours
+            
+            if ($ageHours -lt $MaxAgeHours) {
+                Write-DebugLog "Используем GEO кэш (возраст: $([math]::Round($ageHours,1)) часов)" "INFO"
+                return @{
+                    ISP = $cached.ISP
+                    LOC = $cached.LOC
+                    IsCached = $true
+                    AgeHours = $ageHours
+                }
+            } else {
+                Write-DebugLog "GEO кэш устарел (возраст: $([math]::Round($ageHours,1)) часов)" "INFO"
+            }
+        } catch {
+            Write-DebugLog "Ошибка чтения GEO кэша: $_" "WARN"
+        }
+    }
+    return $null
+}
+
+function Save-GeoCache {
+    param($isp, $loc)
+    
+    $cacheData = @{
+        ISP = $isp
+        LOC = $loc
+        TimestampTicks = (Get-Date).Ticks
+        ScriptVersion = $scriptVersion
+    }
+    
+    try {
+        $cacheData | ConvertTo-Json | Set-Content $script:GeoCacheFile -Encoding UTF8 -Force
+        Write-DebugLog "GEO кэш сохранен: $isp / $loc" "INFO"
+    } catch {
+        Write-DebugLog "Ошибка сохранения GEO кэша: $_" "WARN"
+    }
+}
+
 function Get-NetworkInfo {
     Write-DebugLog "Get-NetworkInfo: начало"
+    
+    # 1. БЫСТРЫЙ DNS
     $dns = "UNKNOWN"
     try {
         $wmi = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | 
                Where-Object { $_.DNSServerSearchOrder -ne $null } | Select-Object -First 1
-        if ($wmi) { $dns = $wmi.DNSServerSearchOrder[0] }
+        if ($wmi -and $wmi.DNSServerSearchOrder) { 
+            $dns = $wmi.DNSServerSearchOrder[0] 
+        }
     } catch { }
 
-    # 1. Определяем локальный CDN через redirector.googlevideo.com
-    $cdn = "manifest.googlevideo.com"   # fallback
-    $rnd = [guid]::NewGuid().ToString().Substring(0,8)
-    $redirectorUrl = "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd"
-
-    Write-DebugLog "Get-NetworkInfo: запрос к $redirectorUrl"
+    # 2. CDN через redirector с синхронным получением (ждём результат)
+    $cdn = "manifest.googlevideo.com"
     try {
-        # Используем уже существующую функцию Invoke-WebRequestViaProxy (она поддерживает прокси)
-        $raw = Invoke-WebRequestViaProxy $redirectorUrl -Timeout 3000
-        if ($raw -match "=>\s+([\w-]+\.googlevideo\.com)") {
-            $cdn = $matches[1]
-            Write-DebugLog "Get-NetworkInfo: CDN определён как $cdn"
-        } elseif ($raw -match "=>\s+([\w-]+)") {
-            # Альтернативный формат: r1-XXX
-            $cdn = "r1.$($matches[1]).googlevideo.com"
-            Write-DebugLog "Get-NetworkInfo: CDN определён (альт.) как $cdn"
+        $rnd = [guid]::NewGuid().ToString().Substring(0,8)
+        $redirectorUrl = "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd"
+        
+        $req = [System.Net.WebRequest]::Create($redirectorUrl)
+        $req.Timeout = 3000
+        $req.UserAgent = $script:UserAgent
+        
+        if ($global:ProxyConfig.Enabled) {
+            $wp = New-Object System.Net.WebProxy($global:ProxyConfig.Host, $global:ProxyConfig.Port)
+            if ($global:ProxyConfig.User) {
+                $wp.Credentials = New-Object System.Net.NetworkCredential($global:ProxyConfig.User, $global:ProxyConfig.Pass)
+            }
+            $req.Proxy = $wp
         } else {
-            Write-DebugLog "Get-NetworkInfo: не удалось распарсить ответ, оставляем fallback $cdn" "WARN"
+            $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
+        }
+        
+        $resp = $req.GetResponse()
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $raw = $reader.ReadToEnd()
+        $resp.Close()
+        
+        if ($raw -match '=>\s+([\w-]+)') {
+            $cdnShort = $matches[1]
+            if ($cdnShort -and $cdnShort -ne 'r1') {
+                $cdn = "r1.$cdnShort.googlevideo.com"
+            }
+        } elseif ($raw -match '=>\s*([a-zA-Z0-9.\-]+\.googlevideo\.com)') {
+            $cdn = $matches[1]
         }
     } catch {
-        Write-DebugLog "Get-NetworkInfo: ошибка при определении CDN: $_" "WARN"
-        # fallback уже задан
+        Write-DebugLog "CDN определение не удалось: $_"
     }
 
-    # 2. Геоинформация (ISP/LOC) – без изменений
-    $isp = "UNKNOWN"; $loc = "UNKNOWN"
-    $geoProviders = @(
-        @{ url = "http://ip-api.com/json/?fields=status,countryCode,city,isp"; type = "ip-api" },
-        @{ url = "https://ipapi.co/json/"; type = "ipapi-co" },
-        @{ url = "http://worldtimeapi.org/api/ip"; type = "worldtime" }
-    )
-
-    :providerLoop foreach ($prov in $geoProviders) {
-        Write-DebugLog "Попытка ГЕО через $($prov.type)..."
-        $raw = Invoke-WebRequestViaProxy $prov.url -Timeout 5000
-        if ($raw -match '\{.*\}') {
-            try {
+    # 3. ГЕО-ИНФОРМАЦИЯ (синхронно, с таймаутом)
+    $isp = "Detecting..."
+    $loc = "Please wait"
+    
+    # Сначала пробуем кэш
+    $cachedGeo = Get-CachedGeoInfo -MaxAgeHours 24
+    if ($cachedGeo) {
+        $isp = $cachedGeo.ISP
+        $loc = $cachedGeo.LOC
+        Write-DebugLog "GEO из кэша: $isp / $loc"
+    } else {
+        # Синхронный запрос с таймаутом 2 секунды
+        try {
+            $geoUrl = "https://ip-api.com/json/?fields=status,countryCode,city,isp"
+            $req = [System.Net.WebRequest]::Create($geoUrl)
+            $req.Timeout = 2000
+            $req.UserAgent = $script:UserAgent
+            
+            $resp = $req.GetResponse()
+            $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+            $raw = $reader.ReadToEnd()
+            $resp.Close()
+            
+            if ($raw -match '\{.*\}') {
                 $data = $raw | ConvertFrom-Json
-                if ($prov.type -eq "ip-api" -and $data.status -eq "success") {
-                    $isp = $data.isp; $loc = "$($data.city), $($data.countryCode)"
+                if ($data.status -eq "success" -and $data.isp) {
+                    $isp = $data.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation|Ltd|Limited)', ''
+                    $loc = "$($data.city), $($data.countryCode)"
+                    Save-GeoCache -isp $isp -loc $loc
                 }
-                elseif ($prov.type -eq "ipapi-co" -and $data.org) {
-                    $isp = $data.org; $loc = "$($data.city), $($data.country_code)"
-                }
-                
-                if ($isp -ne "UNKNOWN" -and $isp -ne $null) {
-                    Write-DebugLog "Гео получено ($($prov.type)): $isp" "INFO"
-                    break providerLoop
-                }
-            } catch { }
+            }
+        } catch {
+            Write-DebugLog "GEO запрос не удался: $_"
+            $isp = "Geo unavailable"
+            $loc = "Use --fast-mode"
         }
     }
+    
+    if ($isp.Length -gt 30) { $isp = $isp.Substring(0, 27) + "..." }
 
-    $isp = $isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation)', ''
-    if ($isp.Length -gt 25) { $isp = $isp.Substring(0, 22) + '...' }
-
-    # 3. Проверка IPv6
+    # 4. IPv6 тест
     $hasV6 = $false
     if ($script:Config.IpPreference -ne "IPv4") {
         try {
@@ -2421,7 +2541,16 @@ function Get-NetworkInfo {
         } catch { }
     }
 
-    return @{ DNS=$dns; CDN=$cdn; ISP=$isp; LOC=$loc; TimestampTicks=(Get-Date).Ticks; HasIPv6=$hasV6 }
+    $result = @{ 
+        DNS = $dns
+        CDN = $cdn
+        ISP = $isp
+        LOC = $loc
+        TimestampTicks = (Get-Date).Ticks
+        HasIPv6 = $hasV6
+    }
+    
+    return $result
 }
 
 function Show-SettingsMenu {
@@ -2452,7 +2581,7 @@ function Show-SettingsMenu {
 
         Write-Host "`n  2. Сброс сетевого кэша" -ForegroundColor White
         Write-Host "     (Очистка DNS-записей и данных о провайдере)" -ForegroundColor Gray
-
+        Write-Host "`n  3. TLS Mode: $($curTls)" -ForegroundColor Cyan
         Write-Host "`n  0. Назад в главное меню" -ForegroundColor DarkGray
         Write-Host "`n $line" -ForegroundColor Cyan
         Write-Host " ВЫБЕРИТЕ ПУНКТ: " -NoNewline -ForegroundColor Yellow
@@ -3087,6 +3216,9 @@ $Worker = {
 
     $Result = [PSCustomObject]@{ IP="FAILED"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="UNKNOWN"; Color="White"; Target=$Target; Number=0 }
     $TO = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { $CONST.TimeoutMs }
+    $HttpTimeoutFast = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { [Math]::Min($TO, 1200) }
+    $TlsTimeoutFast  = if ($ProxyConfig.Enabled) { 2200 } else { 1600 }
+    $TlsTimeoutRetry = if ($ProxyConfig.Enabled) { [Math]::Max(2600, $CONST.ProxyTimeout) } else { 2600 }
 
     Write-DebugLog "--- НАЧАЛО ПРОВЕРКИ ---"
 
@@ -3175,7 +3307,7 @@ $Worker = {
             $conn = Connect-ThroughProxy $Target 80 $ProxyConfig $TO 
         } else {
             # Используем новую функцию с fallback на IPv4
-            $tcp = Invoke-TcpConnectWithFallback -TargetIp $Result.IP -TargetPort 80 -TimeoutMs $TO
+            $tcp = Invoke-TcpConnectWithFallback -TargetIp $Result.IP -TargetPort 80 -TimeoutMs $HttpTimeoutFast
             $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
         }
         $Result.Lat = "$($sw.ElapsedMilliseconds)ms"
@@ -3198,28 +3330,93 @@ $Worker = {
     # Проверка TLS 1.3
     $pHost = if ($ProxyConfig.Enabled) { $ProxyConfig.Host } else { "" }
     $pPort = if ($ProxyConfig.Enabled) { [int]$ProxyConfig.Port } else { 0 }
-    $Result.T13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, 2000)
+    $Result.T13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
     Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
+    if ($Result.T13 -eq "DRP") {
+        Write-DebugLog "TLS T13: повтор с увеличенным таймаутом ($TlsTimeoutRetry ms)" "INFO"
+        $retryT13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
+        if ($retryT13 -eq "OK" -or $retryT13 -eq "RST") { $Result.T13 = $retryT13 }
+    }
 
     # Проверка TLS 1.2
     $conn = $null; $ssl = $null
+    $t12TimedOut = $false
     try {
-        if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig 2000 }
+        if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutFast }
         else {
             $tcp = [System.Net.Sockets.TcpClient]::new()
             $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
-            if (-not $ar.AsyncWaitHandle.WaitOne(2000)) { throw "TcpTimeout" }
+            if (-not $ar.AsyncWaitHandle.WaitOne($TlsTimeoutFast)) { throw "TcpTimeout" }
             $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
         }
-        $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false, { $true })
-        $ssl.AuthenticateAsClient($Target, $null, "Tls12", $false)
+
+        $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false)
+
+        # ВАЖНО: делаем handshake асинхронным, чтобы реально ограничить время операции.
+        $enabled = [System.Security.Authentication.SslProtocols]::Tls12
+        $auth = $ssl.BeginAuthenticateAsClient($Target, $null, $enabled, $false, $null, $null)
+        if (-not $auth.AsyncWaitHandle.WaitOne($TlsTimeoutFast)) {
+            $t12TimedOut = $true
+            try { $ssl.Close() } catch {}
+            throw "TLS12_TIMEOUT"
+        }
+
+        $ssl.EndAuthenticateAsClient($auth)
         $Result.T12 = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
     } catch {
-        $m = $_.Exception.Message + $_.Exception.InnerException.Message
-        if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $Result.T12 = "RST" }
-        elseif ($m -match "certificate|сертификат|remote|success") { $Result.T12 = "OK" }
-        else { $Result.T12 = "DRP" }
-    } finally { if($ssl){$ssl.Close()}; if($conn){$conn.Tcp.Close()} }
+        if ($_.Exception.Message -eq "TLS12_TIMEOUT") {
+            $Result.T12 = "DRP"
+        } else {
+            $m = $_.Exception.Message
+            if ($_.Exception.InnerException) { $m += " | Inner: $($_.Exception.InnerException.Message)" }
+            if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $Result.T12 = "RST" }
+            elseif ($m -match "certificate|сертификат|remote|success") { $Result.T12 = "OK" }
+            else { $Result.T12 = "DRP" }
+        }
+    } finally {
+        if($ssl){ try { $ssl.Close() } catch {} }
+        if($conn){ try { $conn.Tcp.Close() } catch {} }
+    }
+
+    # Retry делаем только при реальном timeout и только если TLS1.3 показал OK.
+    # Это сильно уменьшает хвост по времени и не теряет точность на "медленных" сетях.
+    if ($t12TimedOut -and $Result.T13 -eq "OK") {
+        Write-DebugLog "TLS T12: retry после timeout ($TlsTimeoutRetry ms)" "INFO"
+        $conn = $null; $ssl = $null
+        try {
+            if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutRetry }
+            else {
+                $tcp = [System.Net.Sockets.TcpClient]::new()
+                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
+                if (-not $ar.AsyncWaitHandle.WaitOne($TlsTimeoutRetry)) { throw "TcpTimeout" }
+                $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+            }
+
+            $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false)
+            $enabled = [System.Security.Authentication.SslProtocols]::Tls12
+            $auth = $ssl.BeginAuthenticateAsClient($Target, $null, $enabled, $false, $null, $null)
+            if (-not $auth.AsyncWaitHandle.WaitOne($TlsTimeoutRetry)) {
+                $Result.T12 = "DRP"
+                try { $ssl.Close() } catch {}
+                throw "TLS12_TIMEOUT"
+            }
+            $ssl.EndAuthenticateAsClient($auth)
+            $Result.T12 = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
+        } catch {
+            if ($_.Exception.Message -eq "TLS12_TIMEOUT") {
+                $Result.T12 = "DRP"
+            } else {
+                $m = $_.Exception.Message
+                if ($_.Exception.InnerException) { $m += " | Inner: $($_.Exception.InnerException.Message)" }
+                if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $Result.T12 = "RST" }
+                elseif ($m -match "certificate|сертификат|remote|success") { $Result.T12 = "OK" }
+                else { $Result.T12 = "DRP" }
+            }
+        } finally {
+            if($ssl){ try { $ssl.Close() } catch {} }
+            if($conn){ try { $conn.Tcp.Close() } catch {} }
+        }
+    }
 
     # 4. Логика вердикта
     $t12Ok = ($Result.T12 -eq "OK")
@@ -3287,10 +3484,14 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     # --- КОНЕЦ РАСЧЁТА ПОЗИЦИЙ ---
     
     $cpuCount = [Environment]::ProcessorCount
-    # Для сетевых задач ядра не важны, важна параллельность.
-    # Позволяем запускать до 50 проверок одновременно.
-    $maxThreads = [Math]::Min($Targets.Count, 50)
-    Write-DebugLog "Запуск пула потоков: $maxThreads воркеров."
+    # Для сетевых задач CPU не главный лимит, поэтому увеличиваем конкурентность,
+    # но держим разумные пределы, чтобы не перегружать сокеты/прокси.
+    $recommendedThreads = [Math]::Max(8, [Math]::Min(24, $cpuCount * 3))
+    if ($ProxyConfig.Enabled) {
+        $recommendedThreads = [Math]::Min($recommendedThreads, 12)
+    }
+    $maxThreads = [Math]::Min($Targets.Count, $recommendedThreads)
+    Write-DebugLog "Запуск пула потоков: $maxThreads воркеров (CPU=$cpuCount, proxy=$($ProxyConfig.Enabled))."
     
     $pool = [runspacefactory]::CreateRunspacePool(1, $maxThreads)
     $pool.Open()
@@ -3322,10 +3523,8 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     
     $aborted = $false
     $frameCounter = 0
-    $revealIndex = -1
-    $lastRevealTime = [System.Diagnostics.Stopwatch]::StartNew()
 
-    # --- ЕДИНЫЙ ЦИКЛ (Скан + Плавный водопад) ---
+    # --- ЭТАП 1: только сканирование и плейсхолдеры ---
     while (-not $aborted) {
         $frameCounter++
         
@@ -3346,55 +3545,138 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
             }
         }
 
-        # 3. Логика "Водопада" (Real-time: показываем по мере готовности)
-        # Если текущая строка по списку готова, разрешаем её "раскрыть"
-        if ($revealIndex + 1 -lt $Targets.Count) {
-            if ($jobs[$revealIndex + 1].DoneInBg) {
-                $revealIndex++
-                $lastRevealTime.Restart()
-            }
-        }
-
-        # 4. ОТРИСОВКА КАДРА (используем ДИНАМИЧЕСКИЕ позиции)
+        # 3. ОТРИСОВКА КАДРА: до завершения скана показываем только анимацию ожидания.
         for ($i = 0; $i -lt $Targets.Count; $i++) {
             $j = $jobs[$i]
-            if ($j.Revealed) { continue }
+            # АНИМАЦИЯ с использованием ДИНАМИЧЕСКОЙ позиции LAT
+            $rowChar = Get-ScanAnim $frameCounter $j.Row
+            $latWave = $waveChars[($frameCounter + $j.Row) % $waveChars.Length].PadRight(7)
 
-            if ($i -le $revealIndex) {
-                $res = $j.Result
-                if ($null -eq $res) { 
-                    $res = [PSCustomObject]@{ 
-                        Target=$j.Target; Number=$j.Number; IP="ERR"; HTTP="---"; 
-                        T12="---"; T13="---"; Lat="---"; Verdict="TIMEOUT"; Color="Red" 
-                    } 
-                }
-                Write-ResultLine $j.Row $res
-                $j.Revealed = $true
-            } 
-            else {
-                # АНИМАЦИЯ с использованием ДИНАМИЧЕСКОЙ позиции LAT
-                $rowChar = Get-ScanAnim $frameCounter $j.Row
+            if ($j.DoneInBg) {
+                # Визуально не "замораживаем" строку: воркер уже готов, но раскрытие будет в этапе 2.
+                $tag = if ($j.Result -and $j.Result.Verdict) { "SCANNING $($rowChar)" } else { " READY " }
+                $statusText = (" "+$tag+" ").PadRight(30)
+            } else {
                 $statusText = " SCANNING $($rowChar)".PadRight(30)
-                $latWave = $waveChars[($frameCounter + $j.Row) % $waveChars.Length].PadRight(7)
-                
-                $combinedFrame = "$($latWave)$($statusText)"
-                
-                $cacheKey = "R$($j.Row)"
-                if ($animationBuffer[$cacheKey] -ne $combinedFrame) {
-                    # ВАЖНО: используем $script:DynamicColPos.Lat вместо $CONST.UI.Lat
-                    Out-Str $script:DynamicColPos.Lat $j.Row $combinedFrame "Cyan"
-                    $animationBuffer[$cacheKey] = $combinedFrame
-                }
+            }
+            
+            $combinedFrame = "$($latWave)$($statusText)"
+            
+            $cacheKey = "R$($j.Row)"
+            if ($animationBuffer[$cacheKey] -ne $combinedFrame) {
+                Out-Str $script:DynamicColPos.Lat $j.Row $combinedFrame "Cyan"
+                $animationBuffer[$cacheKey] = $combinedFrame
             }
         }
 
-        if ($revealIndex -eq ($Targets.Count - 1)) { break }
-        Start-Sleep -Milliseconds 30
+        if ($completedTasks -ge $Targets.Count) { break }
+        Start-Sleep -Milliseconds 20
     }
     
     $pool.Close(); $pool.Dispose()
     foreach ($j in $jobs) { try { $j.PowerShell.Dispose() } catch {} }
+
+    # --- ЭТАП 2: красивое последовательное раскрытие с живой анимацией ---
+    if (-not $aborted) {
+        $totalCount = $Targets.Count
+        $statusRow = Get-NavRow -count $totalCount
+        $width = [Console]::WindowWidth
+        $frameCounter = 0
+        
+        for ($i = 0; $i -lt $totalCount; $i++) {
+            $frameCounter++
+            
+            $j = $jobs[$i]
+            $res = $results[$i]
+            
+            if ($null -eq $res) {
+                $res = [PSCustomObject]@{
+                    Target=$j.Target; Number=$j.Number; IP="ERR"; HTTP="---";
+                    T12="---"; T13="---"; Lat="---"; Verdict="TIMEOUT"; Color="Red"
+                }
+                $results[$i] = $res
+            }
+            
+            # Выводим результат для текущей строки
+            Write-ResultLine $j.Row $res
+            
+            # ОБНОВЛЯЕМ АНИМАЦИЮ ДЛЯ НЕРАСКРЫТЫХ СТРОК
+            for ($k = $i + 1; $k -lt $totalCount; $k++) {
+                $j2 = $jobs[$k]
+                $rowChar = Get-ScanAnim $frameCounter $j2.Row
+                $latWave = $("─" * (($frameCounter + $j2.Row) % 7)).PadRight(7)
+                $statusText = " SCANNING $($rowChar)".PadRight(30)
+                $combinedFrame = "$($latWave)$($statusText)"
+                Out-Str $script:DynamicColPos.Lat $j2.Row $combinedFrame "Cyan"
+            }
+            
+            # Обновляем статус-бар
+            $progressMsg = "[ REVEAL ] Раскрыто $($i+1) из $totalCount результатов..."
+            Out-Str 2 $statusRow $progressMsg -Fg "Yellow" -Bg "Black"
+            
+            $remaining = $width - (2 + $progressMsg.Length)
+            if ($remaining -gt 0) {
+                Out-Str (2 + $progressMsg.Length) $statusRow (" " * $remaining) "Black"
+            }
+            
+            Start-Sleep -Milliseconds 35
+        }
+        
+        Draw-StatusBar
+    }
     
+    # --- В конце Start-ScanWithAnimation, ПОСЛЕ раскрытия результатов ---
+    # Обновляем NetInfo ТОЛЬКО если он устарел или изменился
+
+    $currentISP = $script:NetInfo.ISP
+    $currentLOC = $script:NetInfo.LOC
+    $cacheAge = (Get-Date).Ticks - $script:NetInfo.TimestampTicks
+    $ageMinutes = [TimeSpan]::FromTicks($cacheAge).TotalMinutes
+
+    # Проверяем, нужно ли обновление
+    $needUpdate = $false
+    if ($ageMinutes -gt 30) {
+        Write-DebugLog "NetInfo устарел (${ageMinutes} мин), обновляем"
+        $needUpdate = $true
+    }
+    if ($currentISP -eq "Loading..." -or $currentISP -eq "Detecting..." -or $currentISP -eq "Unknown") {
+        Write-DebugLog "ISP не определён, обновляем"
+        $needUpdate = $true
+    }
+    if ($currentISP -eq "Background update" -or $currentLOC -eq "Next scan") {
+        Write-DebugLog "ISP временный (фон), обновляем"
+        $needUpdate = $true
+    }
+
+    # Обновляем только если нужно
+    if ($needUpdate) {
+        Write-DebugLog "Запуск синхронного обновления NetInfo..."
+        Draw-StatusBar -Message "[ NET ] Обновление информации о сети..." -Fg "Black" -Bg "Cyan"
+        
+        $newNetInfo = Get-NetworkInfo
+        
+        # Проверяем, что новое значение не хуже старого
+        if ($newNetInfo.ISP -ne "Unknown" -and $newNetInfo.ISP -ne "Loading...") {
+            $script:NetInfo = $newNetInfo
+            $script:Config.NetCache = $newNetInfo
+            Save-Config $script:Config
+            
+            # Обновляем только строку с ISP в UI (без полной перерисовки)
+            $ispStr = "> ISP / LOC: $($newNetInfo.ISP) ($($newNetInfo.LOC))"
+            Out-Str 65 6 ($ispStr.PadRight(80).Substring(0, 80)) "Magenta"
+            
+            Write-DebugLog "NetInfo обновлён: ISP=$($newNetInfo.ISP), LOC=$($newNetInfo.LOC)"
+        } else {
+            Write-DebugLog "Новые данные не лучше старых, оставляем текущий ISP: $currentISP"
+        }
+        
+        Draw-StatusBar
+    } else {
+        Write-DebugLog "NetInfo актуален, пропускаем обновление (ISP=$currentISP, возраст=${ageMinutes} мин)"
+    }
+
+    return [PSCustomObject]@{ Results = $results; Aborted = $aborted }
+
     # Проверка на ложный IPv6
     $allIpBlock = ($results | Where-Object { $_.Verdict -ne "IP BLOCK" -and $_.Verdict -ne "UNKNOWN" }) -eq $null
     if ($allIpBlock -and $NetInfo.HasIPv6 -eq $true) {
@@ -3441,12 +3723,24 @@ if ($script:Config.DnsCache -and $script:Config.DnsCache.PSObject) {
 }
 
 # 3. !!! МГНОВЕННАЯ ОТРИСОВКА UI !!!
-# Используем данные из кэша, чтобы не ждать сеть
-$script:NetInfo = $script:Config.NetCache
+# Сначала показываем заглушку
+$script:NetInfo = @{ 
+    DNS = "Loading..."; CDN = "Loading..."; ISP = "Loading..."; 
+    LOC = "Please wait"; HasIPv6 = $false; TimestampTicks = (Get-Date).Ticks 
+}
 $script:Targets = Get-Targets -NetInfo $script:NetInfo
 [Console]::Clear()
 Draw-UI $script:NetInfo $script:Targets $null $false
 Draw-StatusBar -Message "[ WAIT ] INITIALIZING NETWORK..." -Fg "Black" -Bg "Yellow"
+
+# 4. СИНХРОННОЕ получение сетевой информации (ждём реальных данных)
+$script:NetInfo = Get-NetworkInfo
+$script:Config.NetCache = $script:NetInfo
+$script:Targets = Get-Targets -NetInfo $script:NetInfo
+
+# Перерисовываем с реальными данными
+Draw-UI $script:NetInfo $script:Targets $true
+Draw-StatusBar
 
 
 # 5. Обновление сети только если кэш устарел или это первый запуск
@@ -3531,7 +3825,7 @@ while ($true) {
                 $target = $script:Targets[$idx-1]
                 
                 # Показываем сообщение о начале трассировки
-                $traceMsg = "[ TRACE ] Tracing #$idx - $target ... (may take 60-90 seconds)"
+                $traceMsg = "[ TRACE ] Tracing #$idx - $target ... press ESC to cancel"
                 Out-Str 2 $row $traceMsg -Fg "White" -Bg "DarkCyan"
                 # Добиваем пробелами до конца строки, чтобы стереть остатки
                 $remaining = $width - (2 + $traceMsg.Length)
@@ -3560,12 +3854,15 @@ while ($true) {
                 
                 # Очищаем строку перед результатом
                 Out-Str 0 $row (" " * $width) "Black"
+                $bgColor = "DarkGray"
                 
                 if ($trace -is [string]) {
                     $resultMsg = "[ TRACE ] $($target): $trace"
+                    $bgColor = "DarkRed"
                     Out-Str 2 $row $resultMsg -Fg "White" -Bg "DarkRed"
                 } elseif ($trace.Count -eq 0) {
                     $resultMsg = "[ TRACE ] $($target): No hops found"
+                    $bgColor = "DarkRed"
                     Out-Str 2 $row $resultMsg -Fg "White" -Bg "DarkRed"
                 } else {
                     # Анализируем результат
@@ -3574,7 +3871,7 @@ while ($true) {
                     $errorHops = $trace | Where-Object { $_.TcpStatus -eq "Error" }
                     
                     $resultMsg = ""
-                    $bgColor = ""
+                    $bgColor = "DarkGray"
                     
                     if ($firstResponsive) {
                         if ($firstResponsive.TcpStatus -eq "RST") {
@@ -3612,9 +3909,24 @@ while ($true) {
                     }
                 }
                 
-                Start-Sleep -Seconds 4
-                
-                # Восстанавливаем статус-бар
+                $hintMsg = " [ ENTER/ESC ] return"
+                $fullMsg = $resultMsg + $hintMsg
+                if ($fullMsg.Length -lt $width - 2) {
+                    Out-Str 2 $row $fullMsg -Fg "White" -Bg $bgColor
+                    $remaining = $width - (2 + $fullMsg.Length)
+                    if ($remaining -gt 0) {
+                        Out-Str (2 + $fullMsg.Length) $row (" " * $remaining) "Black"
+                    }
+                }
+
+                while ($true) {
+                    if ([Console]::KeyAvailable) {
+                        $traceKey = [Console]::ReadKey($true).Key
+                        if ($traceKey -in @("Enter", "Escape", "Spacebar")) { break }
+                    }
+                    Start-Sleep -Milliseconds 50
+                }
+
                 Out-Str 0 $row (" " * $width) "Black"
                 Draw-StatusBar
                 Clear-KeyBuffer
@@ -3630,9 +3942,14 @@ while ($true) {
                     Out-Str (2 + $errorMsg.Length) $row (" " * $remaining) "Black"
                 }
                 
-                Start-Sleep -Seconds 2
-                
-                # Восстанавливаем статус-бар
+                while ($true) {
+                    if ([Console]::KeyAvailable) {
+                        $traceKey = [Console]::ReadKey($true).Key
+                        if ($traceKey -in @("Enter", "Escape", "Spacebar")) { break }
+                    }
+                    Start-Sleep -Milliseconds 50
+                }
+
                 Out-Str 0 $row (" " * $width) "Black"
                 Draw-StatusBar
                 Clear-KeyBuffer
@@ -3716,86 +4033,226 @@ while ($true) {
 
         # Обработка Enter
         if ($k -eq "Enter") {
-            Write-DebugLog "Запуск сканирования по Enter (оптимизированный)"
+            Write-DebugLog "Запуск сканирования по Enter (ULTRA-FAST MODE)"
             
-            # Стираем старый статус
+            # Стираем старый статус-бар
             $oldRow = Get-NavRow -count $script:Targets.Count
             Out-Str 0 $oldRow (" " * [Console]::WindowWidth) "Black" "Black"
             
-            # Быстрая проверка интернета (асинхронно)
+            # === МГНОВЕННАЯ ПРОВЕРКА ИНТЕРНЕТА ===
+            Draw-StatusBar -Message "[ CHECK ] Проверка интернета..." -Fg "Black" -Bg "Cyan"
             $internetAvailable = $false
             try {
+                # Самый быстрый тест - ping до 8.8.8.8
                 $ping = New-Object System.Net.NetworkInformation.Ping
                 $reply = $ping.Send("8.8.8.8", 1000)
                 $internetAvailable = ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success)
+                $ping.Dispose()
             } catch {
-                $internetAvailable = $true  # Предполагаем что интернет есть
+                # Если ping не работает, пробуем TCP
+                try {
+                    $tcpTest = New-Object System.Net.Sockets.TcpClient
+                    $async = $tcpTest.BeginConnect("8.8.8.8", 53, $null, $null)
+                    if ($async.AsyncWaitHandle.WaitOne(1000)) {
+                        $tcpTest.EndConnect($async)
+                        $internetAvailable = $true
+                    }
+                    $tcpTest.Close()
+                } catch { $internetAvailable = $false }
             }
             
             if (-not $internetAvailable) {
-                Draw-StatusBar -Message "[ ERROR ] NO INTERNET CONNECTION DETECTED." -Fg "Black" -Bg "Red"
-                Start-Sleep -Seconds 2
+                Draw-StatusBar -Message "[ ERROR ] НЕТ ИНТЕРНЕТА! ПРОВЕРЬТЕ ПОДКЛЮЧЕНИЕ." -Fg "Black" -Bg "Red"
+                Start-Sleep -Seconds 3
                 Draw-StatusBar
                 Clear-KeyBuffer
                 continue
             }
             
-            # МГНОВЕННО используем готовые данные (или заглушку)
-            Draw-StatusBar -Message "[ WAIT ] PREPARING SCAN (USING CACHED DATA)..." -Fg "Black" -Bg "Cyan"
+            # === МГНОВЕННАЯ ЗАГРУЗКА NETINFO (ИЗ КЭША) ===
+            Draw-StatusBar -Message "[ CACHE ] Загрузка сетевых данных..." -Fg "Black" -Bg "Cyan"
             
-            # Проверяем фоновое обновление
-            Get-ReadyNetInfo
-            if ($script:BackgroundNetInfo) {
-                $script:NetInfo = $script:BackgroundNetInfo
-                $script:Config.NetCache = $script:NetInfo
-                Save-Config $script:Config
-                Write-DebugLog "Использованы свежие фоновые данные" "INFO"
-            } elseif ((Get-Date).Ticks - $script:Config.NetCache.TimestampTicks -lt ([TimeSpan]::FromMinutes(10).Ticks)) {
-                $script:NetInfo = $script:Config.NetCache
-                Write-DebugLog "Использован кэш (возраст < 10 минут)" "INFO"
-            } else {
-                # Если кэш старый - используем заглушку и запускаем обновление в фоне
-                $script:NetInfo = @{
-                    DNS = $script:Config.NetCache.DNS
-                    CDN = $script:Config.NetCache.CDN
-                    ISP = "Updating..."
-                    LOC = "In background"
-                    HasIPv6 = $script:Config.NetCache.HasIPv6
-                    TimestampTicks = (Get-Date).Ticks
+            # Используем кэшированные данные (всегда свежие из Config)
+            $script:NetInfo = $script:Config.NetCache
+            
+            # Проверяем, не пора ли обновить кэш в фоне
+            $cacheAge = (Get-Date).Ticks - $script:NetInfo.TimestampTicks
+            $ageMinutes = [TimeSpan]::FromTicks($cacheAge).TotalMinutes
+            
+            if ($ageMinutes -gt 10 -or $script:NetInfo.ISP -eq "Loading...") {
+                Write-DebugLog "Кэш устарел ($([math]::Round($ageMinutes,1)) мин), запускаем фоновое обновление" "INFO"
+                
+                # Запускаем обновление в фоне (не блокируем скан!)
+                $existing = Get-Job -Name "NetInfoUpdater" -ErrorAction SilentlyContinue
+                if ($existing) {
+                    try { Stop-Job $existing -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Job $existing -Force -ErrorAction SilentlyContinue } catch {}
                 }
-                Start-BackgroundNetInfoUpdate
-                Write-DebugLog "Кэш устарел, запущено фоновое обновление" "INFO"
+
+                Start-Job -Name "NetInfoUpdater" -ScriptBlock {
+                    param($configDir, $debugLog, $userAgent)
+                    
+                    function Write-BgLog($msg) {
+                        try { Add-Content -Path $debugLog -Value "[$(Get-Date -Format 'HH:mm:ss')] [BG] $msg" -Encoding UTF8 } catch {}
+                    }
+                    
+                    Write-BgLog "Фоновое обновление NetInfo начато"
+                    
+                    # Быстрое получение DNS
+                    $dns = "UNKNOWN"
+                    try {
+                        $wmi = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" | 
+                            Where-Object { $_.DNSServerSearchOrder -ne $null } | Select-Object -First 1
+                        if ($wmi) { $dns = $wmi.DNSServerSearchOrder[0] }
+                    } catch {}
+                    
+                    # 2. Локальный CDN через redirector (ИСПРАВЛЕННАЯ версия)
+                    $cdn = "manifest.googlevideo.com"  # fallback
+                    try {
+                        $rnd = [guid]::NewGuid().ToString().Substring(0,8)
+                        $redirectorUrl = "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd"
+                        
+                        Write-BgLog "Запрос локального CDN: $redirectorUrl"
+                        
+                        $req = [System.Net.WebRequest]::Create($redirectorUrl)
+                        $req.Timeout = 3000
+                        if ($userAgent) { $req.UserAgent = $userAgent }
+                        
+                        $resp = $req.GetResponse()
+                        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+                        $raw = $reader.ReadToEnd()
+                        $resp.Close()
+                        
+                        Write-BgLog "Ответ redirector: [$raw]"
+                        
+                        # НОВЫЙ, более надежный парсинг
+                        # Пример ответа: " => r1.freedom-voz3.googlevideo.com"
+                        # Или: "=> r1.freedom-voz3.googlevideo.com"
+                        # Или: "=> r1-123.googlevideo.com"
+                        
+                        $cdnShort = $null
+                        if ($raw -match '=>\s+([\w-]+)') {
+                            $cdnShort = $matches[1]
+                        }
+
+                        if ($cdnShort -and $cdnShort -ne 'r1') {
+                            # как в cdn-tester: => <short>  -> r1.<short>.googlevideo.com
+                            $cdn = "r1.$cdnShort.googlevideo.com"
+                            Write-BgLog "Найден локальный CDN (короткая форма): $cdn"
+                        }
+                        elseif ($raw -match '=>\s*([a-zA-Z0-9.\-]+\.googlevideo\.com)') {
+                            $cdn = $matches[1]
+                            Write-BgLog "Найден локальный CDN (full domain): $cdn"
+                        }
+                        else {
+                            Write-BgLog "Не удалось распарсить ответ, используем fallback: $cdn"
+                        }
+                        
+                    } catch {
+                        Write-BgLog "CDN определение не удалось: $($_.Exception.Message)"
+                        $cdn = "manifest.googlevideo.com"
+                    }
+
+                    # Финальная очистка - только чистое значение
+                    $cdn = $cdn.Trim()
+                    Write-BgLog "Финальный CDN: '$cdn'"
+
+                    # Дополнительная очистка - убираем пробелы и дубликаты
+                    $cdn = ($cdn -split '\s+')[0]  # Берем только первое слово, если вдруг их несколько
+                    
+                    # GEO из кэша (не обновляем, чтобы не тратить время)
+                    $isp = "Background update"
+                    $loc = "Next scan"
+                    
+                    # IPv6
+                    $hasV6 = $false
+                    try {
+                        $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
+                        $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
+                        if ($a.AsyncWaitHandle.WaitOne(1000)) {
+                            $t.EndConnect($a)
+                            $hasV6 = $true
+                        }
+                        $t.Close()
+                    } catch {}
+                    
+                    $result = @{
+                        DNS = $dns
+                        CDN = $cdn
+                        ISP = $isp
+                        LOC = $loc
+                        TimestampTicks = (Get-Date).Ticks
+                        HasIPv6 = $hasV6
+                    }
+                    
+                    # Сохраняем в файл конфига
+                    $configFile = Join-Path $configDir "YT-DPI_config.json"
+                    if (Test-Path $configFile) {
+                        try {
+                            $config = Get-Content $configFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                            $config.NetCache = $result
+                            $config | ConvertTo-Json -Depth 5 -Compress | Set-Content $configFile -Encoding UTF8 -Force
+                            Write-BgLog "NetInfo обновлен в конфиге"
+                        } catch { Write-BgLog "Ошибка сохранения: $_" }
+                    }
+                    
+                    Write-BgLog "Фоновое обновление завершено"
+                    return $result
+                } -ArgumentList $script:ConfigDir, $DebugLogFile, $script:UserAgent | Out-Null
+            } else {
+                Write-DebugLog "Используем свежий кэш (возраст: $([math]::Round($ageMinutes,1)) мин)" "INFO"
             }
             
-            # Обновляем таргеты (мгновенно)
+            # === БЫСТРОЕ ОБНОВЛЕНИЕ ТАРГЕТОВ ===
             $NewTargets = Get-Targets -NetInfo $script:NetInfo
             $NeedClear = ($NewTargets.Count -ne $script:Targets.Count)
             $script:Targets = $NewTargets
             
-            # Отрисовка UI (мгновенно)
+            # === МГНОВЕННАЯ ОТРИСОВКА UI ===
             Draw-UI $script:NetInfo $script:Targets $NeedClear
             
+            # Подготавливаем строки для сканирования
             for($i=0; $i -lt $script:Targets.Count; $i++) { 
                 Out-Str $CONST.UI.Ver (12 + $i) ("SCANNING...".PadRight(30)) "Yellow"
             }
             
-            # Старт скана (без паузы!)
-            Draw-StatusBar -Message "[ SCAN ] STARTING SCAN (ULTRA-FAST MODE)..." -Fg "Black" -Bg "Cyan"
+            # === МГНОВЕННЫЙ СТАРТ СКАНА ===
+            Draw-StatusBar -Message "[ SCAN ] Запуск сканирования (ULTRA-FAST MODE)..." -Fg "Black" -Bg "Green"
+            Start-Sleep -Milliseconds 200  # Минимальная пауза для визуального отклика
             
+            # Запускаем асинхронный скан
             $scanResult = Start-ScanWithAnimation $script:Targets $global:ProxyConfig
             $script:LastScanResults = $scanResult.Results
             
+            # === ФИНИШ ===
             Start-Sleep -Milliseconds 400
             
             if ($scanResult.Aborted) {
-                Draw-StatusBar -Message "[ ABORTED ] SCAN STOPPED. PRESS ENTER TO CONTINUE..." -Fg "Black" -Bg "Red"
+                Draw-StatusBar -Message "[ ABORTED ] Скан прерван. Нажмите ENTER для продолжения..." -Fg "Black" -Bg "Red"
             } else {
-                Draw-StatusBar -Message "[ SUCCESS ] SCAN FINISHED. PRESS ENTER TO CONTINUE..." -Fg "Black" -Bg "Green"
+                # Проверяем, обновился ли фоном NetInfo
+                $bgJob = Get-Job -Name "NetInfoUpdater" -ErrorAction SilentlyContinue
+                if ($bgJob -and $bgJob.State -eq "Completed") {
+                    $newNetInfo = Receive-Job $bgJob
+                    Remove-Job $bgJob
+                    if ($newNetInfo -and $newNetInfo.ISP -ne "Background update") {
+                        Write-DebugLog "NetInfo обновлен в фоне, обновляем UI" "INFO"
+                        $script:Config.NetCache = $newNetInfo
+                        $script:NetInfo = $newNetInfo
+                        Save-Config $script:Config
+                        # Обновляем только строку с ISP без полной перерисовки
+                        $ispStr = "> ISP / LOC: $($newNetInfo.ISP) ($($newNetInfo.LOC))"
+                        Out-Str 65 6 ($ispStr.PadRight(80).Substring(0, 80)) "Magenta"
+                    }
+                }
+                
+                Draw-StatusBar -Message "[ SUCCESS ] Скан завершен! Нажмите ENTER для продолжения..." -Fg "Black" -Bg "Green"
             }
             
             Start-Sleep -Seconds 2
             Draw-StatusBar
             Clear-KeyBuffer
+            continue
         }
     }
     
