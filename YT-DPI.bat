@@ -1,7 +1,7 @@
 <# :
 @echo off
 set "SCRIPT_PATH=%~f0"
-title YT-DPI v2.2.1
+title YT-DPI v2.2.2
 chcp 65001 >nul
 
 :: Проверяем наличие PowerShell 7 (pwsh.exe)
@@ -37,7 +37,7 @@ if ($script:AllowInsecureTls) {
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.2.1"   # текущая версия yt-dpi
+$scriptVersion = "2.2.2"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $DEBUG_ENABLED = $false
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
