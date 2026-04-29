@@ -39,7 +39,7 @@ if ($script:AllowInsecureTls) {
 
 $scriptVersion = "2.2.2"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
-$DEBUG_ENABLED = $false
+$DEBUG_ENABLED = $true
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
 $DebugLogMutex = New-Object System.Threading.Mutex($false, "Global\YT-DPI-Debug-Mutex")
 $script:LogLock = New-Object System.Object
@@ -2450,81 +2450,117 @@ function Get-NetworkInfo {
         }
     } catch { }
 
-    # 2. CDN через redirector с синхронным получением (ждём результат)
-    $cdn = "manifest.googlevideo.com"
-    try {
-        $rnd = [guid]::NewGuid().ToString().Substring(0,8)
-        $redirectorUrl = "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd"
-        
-        $req = [System.Net.WebRequest]::Create($redirectorUrl)
-        $req.Timeout = 3000
-        $req.UserAgent = $script:UserAgent
-        
-        if ($global:ProxyConfig.Enabled) {
-            $wp = New-Object System.Net.WebProxy($global:ProxyConfig.Host, $global:ProxyConfig.Port)
-            if ($global:ProxyConfig.User) {
-                $wp.Credentials = New-Object System.Net.NetworkCredential($global:ProxyConfig.User, $global:ProxyConfig.Pass)
-            }
-            $req.Proxy = $wp
-        } else {
-            $req.Proxy = [System.Net.GlobalProxySelection]::GetEmptyWebProxy()
-        }
-        
-        $resp = $req.GetResponse()
-        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-        $raw = $reader.ReadToEnd()
-        $resp.Close()
-        
-        if ($raw -match '=>\s+([\w-]+)') {
-            $cdnShort = $matches[1]
-            if ($cdnShort -and $cdnShort -ne 'r1') {
-                $cdn = "r1.$cdnShort.googlevideo.com"
-            }
-        } elseif ($raw -match '=>\s*([a-zA-Z0-9.\-]+\.googlevideo\.com)') {
-            $cdn = $matches[1]
-        }
-    } catch {
-        Write-DebugLog "CDN определение не удалось: $_"
-    }
-
-    # 3. ГЕО-ИНФОРМАЦИЯ (синхронно, с таймаутом)
+    # 3. ГЕО-ИНФОРМАЦИЯ (синхронно, с таймаутом, несколько провайдеров + прокси)
     $isp = "Detecting..."
     $loc = "Please wait"
-    
-    # Сначала пробуем кэш
+
     $cachedGeo = Get-CachedGeoInfo -MaxAgeHours 24
     if ($cachedGeo) {
         $isp = $cachedGeo.ISP
         $loc = $cachedGeo.LOC
         Write-DebugLog "GEO из кэша: $isp / $loc"
-    } else {
-        # Синхронный запрос с таймаутом 2 секунды
-        try {
-            $geoUrl = "https://ip-api.com/json/?fields=status,countryCode,city,isp"
-            $req = [System.Net.WebRequest]::Create($geoUrl)
-            $req.Timeout = 2000
-            $req.UserAgent = $script:UserAgent
-            
-            $resp = $req.GetResponse()
-            $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-            $raw = $reader.ReadToEnd()
-            $resp.Close()
-            
-            if ($raw -match '\{.*\}') {
-                $data = $raw | ConvertFrom-Json
-                if ($data.status -eq "success" -and $data.isp) {
-                    $isp = $data.isp -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation|Ltd|Limited)', ''
-                    $loc = "$($data.city), $($data.countryCode)"
-                    Save-GeoCache -isp $isp -loc $loc
+    }
+    else {
+        # Список провайдеров (URL, проверка, извлечение ISP / LOC)
+        $providers = @(
+            [PSCustomObject]@{
+                Name   = "ip-api.com"
+                Url    = "https://ip-api.com/json/?fields=status,countryCode,city,isp"
+                Check  = { param($j) $j.status -eq "success" }
+                GetISP = { param($j) $j.isp }
+                GetLOC = { param($j) "$($j.city), $($j.countryCode)" }
+            }
+            [PSCustomObject]@{
+                Name   = "ifconfig.co"
+                Url    = "https://ifconfig.co/json"
+                Check  = { param($j) $j.org -and $j.country }
+                GetISP = { param($j) $j.org }
+                GetLOC = { param($j) "$($j.city), $($j.country)" }
+            }
+            [PSCustomObject]@{
+                Name   = "ipapi.co"
+                Url    = "https://ipapi.co/json/"
+                Check  = { param($j) -not $j.error -and $j.org -and $j.country_code }
+                GetISP = { param($j) $j.org }
+                GetLOC = { param($j) "$($j.city), $($j.country_code)" }
+            }
+            [PSCustomObject]@{
+                Name   = "ipwhois.io"
+                Url    = "https://ipwhois.app/json/"
+                Check  = { param($j) $j.success -eq $true -and $j.isp }
+                GetISP = { param($j) $j.isp }
+                GetLOC = { param($j) "$($j.city), $($j.country_code)" }
+            }
+            # ipinfo.io – бесплатно до 50k запросов/мес, можно получить токен и вставить в URL ?token=...
+            # Пока используем без токена, но с ограничениями
+            [PSCustomObject]@{
+                Name   = "ipinfo.io"
+                Url    = "https://ipinfo.io/json"
+                Check  = { param($j) -not $j.error -and $j.org -and $j.country }
+                GetISP = { param($j) ($j.org -split '\s+')[0..1] -join ' ' }
+                GetLOC = { param($j) "$($j.city), $($j.country)" }
+            }
+        )
+
+        # WebClient с возможностью задания прокси (если скрипт его использует)
+        $web = New-Object System.Net.WebClient
+        $web.Headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        $web.Headers["Accept"] = "application/json, text/plain, */*"
+
+        # Если в скрипте есть $script:Proxy, подставляем его
+        if ($script:Proxy) {
+            $web.Proxy = $script:Proxy
+        }
+
+        $geoResult = $null
+        foreach ($provider in $providers) {
+            try {
+                Write-DebugLog "GEO: пробуем $($provider.Name)"
+                $raw = $web.DownloadString($provider.Url)  # синхронно, таймаут у WebClient по умолчанию ~100с, но можно задать через WebRequest ниже
+                # Чтобы был контроль таймаута 2с, используем WebRequest
+                $req = [System.Net.WebRequest]::Create($provider.Url)
+                $req.Timeout = 2000
+                $req.UserAgent = $web.Headers["User-Agent"]
+                $req.Accept = $web.Headers["Accept"]
+                if ($web.Proxy) { $req.Proxy = $web.Proxy }
+                $resp = $req.GetResponse()
+                $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+                $raw = $reader.ReadToEnd()
+                $resp.Close()
+
+                if ($raw -match '\{.*\}') {
+                    $json = $raw | ConvertFrom-Json
+                    if (& $provider.Check $json) {
+                        $ispRaw = & $provider.GetISP $json
+                        $locRaw = & $provider.GetLOC $json
+                        if ($ispRaw -and $locRaw) {
+                            $geoResult = [PSCustomObject]@{
+                                ISP = $ispRaw -replace '(?i)\s*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation|Ltd|Limited)', ''
+                                LOC = $locRaw
+                            }
+                            Write-DebugLog "GEO успех ($($provider.Name)): $($geoResult.ISP) / $($geoResult.LOC)"
+                            break
+                        }
+                    }
                 }
             }
-        } catch {
-            Write-DebugLog "GEO запрос не удался: $_"
+            catch {
+                Write-DebugLog "GEO $($provider.Name) ошибка: $_"
+            }
+        }
+
+        if ($geoResult) {
+            $isp = $geoResult.ISP
+            $loc = $geoResult.LOC
+            Save-GeoCache -isp $isp -loc $loc
+        }
+        else {
+            Write-DebugLog "Все GEO-провайдеры недоступны"
             $isp = "Geo unavailable"
             $loc = "Use --fast-mode"
         }
     }
-    
+
     if ($isp.Length -gt 30) { $isp = $isp.Substring(0, 27) + "..." }
 
     # 4. IPv6 тест
