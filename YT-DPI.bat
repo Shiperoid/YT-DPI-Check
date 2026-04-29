@@ -2686,7 +2686,7 @@ function Show-ProxyMenu {
         $global:ProxyConfig.Pass = ""
         Write-Host "`n  [OK] Прокси отключен." -ForegroundColor Green
         Save-Config $script:Config
-        Start-Sleep -Seconds 1.5
+        Start-Sleep -Seconds 1
         return
     }
     
@@ -2708,7 +2708,7 @@ function Show-ProxyMenu {
         $script:Config.ProxyHistory = @()
         Save-Config $script:Config
         Write-Host "`n  [OK] История прокси очищена." -ForegroundColor Green
-        Start-Sleep -Seconds 1.5
+        Start-Sleep -Seconds 1
         Show-ProxyMenu
         return
     }
@@ -2759,7 +2759,7 @@ function Show-ProxyMenu {
                 } else {
                     Write-Host "  [FAIL] Прокси НЕ РАБОТАЕТ: $($testResult.Error)" -ForegroundColor Red
                     Write-Host "  [i] Проверьте параметры." -ForegroundColor Gray
-                    Start-Sleep -Seconds 3
+                    Start-Sleep -Seconds 2
                     Show-ProxyMenu
                     return
                 }
@@ -3500,7 +3500,19 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     $completedTasks = 0
     $animationBuffer = @{}
     
-    $waveChars = @("─     ", "──    ", "───   ", "────  ", "───── ", "──────", "───── ", "────  ", "───   ", "──    ")
+    $waveChars = 0..49 | ForEach-Object {
+    $phase = $_ / 50 * 2 * [Math]::PI  # от 0 до 2π
+    # Длина "змеи" от 1 до 7 по синусу
+    $length = [Math]::Floor(3.5 + 3 * [Math]::Sin($phase)) + 1
+    # Позиция "головы" (откуда начинать) - для имитации движения
+    $offset = [Math]::Floor(3 + 3 * [Math]::Sin($phase + 1.5))
+    $line = "       ".ToCharArray()
+    for ($j = 0; $j -lt $length -and ($offset + $j) -lt 7; $j++) {
+        $line[$offset + $j] = '='
+    }
+    -join $line
+}
+# Генерирует 50 строк типа "  ==    ", "   ===  ", и т.д. с плавным изменением
     
     for ($i=0; $i -lt $Targets.Count; $i++) {
         $ps = [PowerShell]::Create().AddScript($Worker).
@@ -3550,7 +3562,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
             $j = $jobs[$i]
             # АНИМАЦИЯ с использованием ДИНАМИЧЕСКОЙ позиции LAT
             $rowChar = Get-ScanAnim $frameCounter $j.Row
-            $latWave = $waveChars[($frameCounter + $j.Row) % $waveChars.Length].PadRight(7)
+            $latWave = $waveChars[($frameCounter) % $waveChars.Length].PadRight(7)
 
             if ($j.DoneInBg) {
                 # Визуально не "замораживаем" строку: воркер уже готов, но раскрытие будет в этапе 2.
@@ -3570,7 +3582,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
         }
 
         if ($completedTasks -ge $Targets.Count) { break }
-        Start-Sleep -Milliseconds 20
+        Start-Sleep -Milliseconds 15
     }
     
     $pool.Close(); $pool.Dispose()
@@ -3604,9 +3616,8 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
             for ($k = $i + 1; $k -lt $totalCount; $k++) {
                 $j2 = $jobs[$k]
                 $rowChar = Get-ScanAnim $frameCounter $j2.Row
-                $latWave = $("─" * (($frameCounter + $j2.Row) % 7)).PadRight(7)
                 $statusText = " SCANNING $($rowChar)".PadRight(30)
-                $combinedFrame = "$($latWave)$($statusText)"
+                $combinedFrame = "$($statusText)"
                 Out-Str $script:DynamicColPos.Lat $j2.Row $combinedFrame "Cyan"
             }
             
@@ -3619,7 +3630,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
                 Out-Str (2 + $progressMsg.Length) $statusRow (" " * $remaining) "Black"
             }
             
-            Start-Sleep -Milliseconds 35
+            Start-Sleep -Milliseconds 15
         }
         
         Draw-StatusBar
@@ -3924,7 +3935,7 @@ while ($true) {
                         $traceKey = [Console]::ReadKey($true).Key
                         if ($traceKey -in @("Enter", "Escape", "Spacebar")) { break }
                     }
-                    Start-Sleep -Milliseconds 50
+                    Start-Sleep -Milliseconds 15
                 }
 
                 Out-Str 0 $row (" " * $width) "Black"
@@ -3947,7 +3958,7 @@ while ($true) {
                         $traceKey = [Console]::ReadKey($true).Key
                         if ($traceKey -in @("Enter", "Escape", "Spacebar")) { break }
                     }
-                    Start-Sleep -Milliseconds 50
+                    Start-Sleep -Milliseconds 15
                 }
 
                 Out-Str 0 $row (" " * $width) "Black"
@@ -4211,13 +4222,9 @@ while ($true) {
             # === МГНОВЕННАЯ ОТРИСОВКА UI ===
             Draw-UI $script:NetInfo $script:Targets $NeedClear
             
-            # Подготавливаем строки для сканирования
-            for($i=0; $i -lt $script:Targets.Count; $i++) { 
-                Out-Str $CONST.UI.Ver (12 + $i) ("SCANNING...".PadRight(30)) "Yellow"
-            }
-            
+
             # === МГНОВЕННЫЙ СТАРТ СКАНА ===
-            Draw-StatusBar -Message "[ SCAN ] Запуск сканирования (ULTRA-FAST MODE)..." -Fg "Black" -Bg "Green"
+            Draw-StatusBar -Message "[ SCAN ] Запуск сканирования..." -Fg "Black" -Bg "Green"
             Start-Sleep -Milliseconds 200  # Минимальная пауза для визуального отклика
             
             # Запускаем асинхронный скан
@@ -4246,7 +4253,7 @@ while ($true) {
                     }
                 }
                 
-                Draw-StatusBar -Message "[ SUCCESS ] Скан завершен! Нажмите ENTER для продолжения..." -Fg "Black" -Bg "Green"
+                Draw-StatusBar -Message "[ SUCCESS ] Скан завершен!" -Fg "Black" -Bg "Green"
             }
             
             Start-Sleep -Seconds 2
@@ -4257,5 +4264,5 @@ while ($true) {
     }
     
     # Небольшая задержка для снижения нагрузки на CPU
-    Start-Sleep -Milliseconds 50
+    Start-Sleep -Milliseconds 30
 }
