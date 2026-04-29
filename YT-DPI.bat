@@ -1,7 +1,7 @@
 <# :
 @echo off
 set "SCRIPT_PATH=%~f0"
-title YT-DPI v2.2.1
+title YT-DPI v2.2.0
 chcp 65001 >nul
 
 :: Проверяем наличие PowerShell 7 (pwsh.exe)
@@ -37,7 +37,7 @@ if ($script:AllowInsecureTls) {
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.2.1"   # текущая версия yt-dpi
+$scriptVersion = "2.2.0"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $DEBUG_ENABLED = $false
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
@@ -1058,9 +1058,8 @@ function Start-Updater {
     $logFile = Join-Path $env:TEMP "yt_updater_debug.log"
     $updaterPath = Join-Path $env:TEMP "yt_run_updater.ps1"
 
-    Write-DebugLog "Запуск финальной версии апдейтера. Лог: $logFile"
+    Write-DebugLog "Запуск апдейтера. Лог: $logFile"
 
-    # Одинарные кавычки защищают код от раскрытия переменных
     $updaterTemplate = @'
 $parentPid = "REPLACE_PID"
 $currentFile = "REPLACE_FILE"
@@ -1074,34 +1073,53 @@ function Write-Log($m) {
 }
 
 Write-Log "--- UPDATER SESSION START ---"
-Write-Log "Waiting for PID $parentPid to exit..."
 
-# 1. Ждем завершения процесса (до 15 секунд)
+# 1. Принудительно убиваем старый процесс
+Write-Log "Killing old process $parentPid..."
+try {
+    Stop-Process -Id $parentPid -Force -ErrorAction Stop
+    Write-Log "Process killed successfully"
+} catch {
+    Write-Log "Could not kill process: $_"
+}
+Start-Sleep -Seconds 1
+
+# 2. Дополнительная проверка, что процесс действительно завершён
 $count = 0
 while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {
-    if ($count -gt 150) { Write-Log "Force killing $parentPid"; Stop-Process -Id $parentPid -Force; break }
+    if ($count -gt 30) { 
+        Write-Log "Force killing again"
+        Stop-Process -Id $parentPid -Force -ErrorAction SilentlyContinue
+        break 
+    }
     Start-Sleep -Milliseconds 100
     $count++
 }
-Start-Sleep -Seconds 1 # Дополнительная пауза для снятия блокировки файла
+Start-Sleep -Seconds 1
 
+# 3. Скачивание и замена файла (с конвертацией CRLF)
 try {
     Write-Log "Downloading from $downloadUrl..."
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
     $web = New-Object System.Net.WebClient
     $web.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-    $web.DownloadFile($downloadUrl, $tempFile)
-
+    $bytes = $web.DownloadData($downloadUrl)
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    # Конвертируем LF -> CRLF
+    $text = $text -replace "`r`n", "`n" -replace "`n", "`r`n"
+    # Удаляем BOM
+    if ($text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+    
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($tempFile, $text, $utf8NoBom)
+    
+    Write-Log "Downloaded and fixed. Size: $($text.Length)"
+    
     if (Test-Path $tempFile) {
         $size = (Get-Item $tempFile).Length
         $content = Get-Content $tempFile -Raw -Encoding UTF8
-        Write-Log "Downloaded size: $size bytes."
-
-        # ПРОВЕРКА ЦЕЛОСТНОСТИ (более гибкая)
         if ($size -gt 10000 -and ($content -match "scriptVersion" -or $content -match "YT-DPI")) {
             Write-Log "Integrity check passed."
-            
-            # 2. Пытаемся заменить файл (с повторами, если файл занят)
             $replaced = $false
             for ($i=1; $i -le 5; $i++) {
                 try {
@@ -1114,16 +1132,15 @@ try {
                     Start-Sleep -Seconds 1
                 }
             }
-
             if ($replaced) {
                 Write-Log "Update successful! Restarting..."
                 Start-Process $currentFile
             } else {
-                Write-Log "CRITICAL: Could not overwrite file after 5 attempts."
+                Write-Log "CRITICAL: Could not overwrite file."
                 Start-Process $currentFile
             }
         } else {
-            Write-Log "Integrity FAIL: Content check failed (size $size)."
+            Write-Log "Integrity FAIL."
             Start-Process $currentFile
         }
     }
@@ -1133,12 +1150,10 @@ try {
     if (Test-Path $currentFile) { Start-Process $currentFile }
 }
 
-# Очистка
-if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
 Write-Log "--- UPDATER SESSION END ---"
 '@
 
-    # Заполнение путей
     $updaterContent = $updaterTemplate.
         Replace("REPLACE_PID", $parentPid).
         Replace("REPLACE_FILE", $currentFile).
@@ -1146,20 +1161,19 @@ Write-Log "--- UPDATER SESSION END ---"
         Replace("REPLACE_TEMP", $tempFile).
         Replace("REPLACE_LOG", $logFile)
 
-    try {
-        Set-Content -Path $updaterPath -Value $updaterContent -Encoding UTF8 -Force
-        
-        $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $pInfo.FileName = "powershell.exe"
-        $pInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$updaterPath`""
-        $pInfo.WindowStyle = "Hidden"
-        [System.Diagnostics.Process]::Start($pInfo) | Out-Null
-        
-        # Мгновенно убиваем текущий процесс
-        [System.Diagnostics.Process]::GetCurrentProcess().Kill()
-    } catch {
-        Write-DebugLog "Ошибка запуска апдейтера: $_"
-    }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($updaterPath, $updaterContent, $utf8NoBom)
+    
+    $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $pInfo.FileName = "powershell.exe"
+    $pInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$updaterPath`""
+    $pInfo.WindowStyle = "Hidden"
+    [System.Diagnostics.Process]::Start($pInfo) | Out-Null
+    
+    # Даём апдейтеру время на запуск и убийство процесса
+    Start-Sleep -Milliseconds 500
+    # Выходим без лишних действий
+    [System.Environment]::Exit(0)
 }
 
 # ====================================================================================
