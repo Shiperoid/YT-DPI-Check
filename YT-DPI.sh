@@ -58,7 +58,6 @@ PROXY_STR=""
 
 PROXY_HISTORY=()
 
-STATS_CLEAN=0; STATS_BLOCKED=0; STATS_RST=0; STATS_ERR=0
 CDN_LIST=()
 TARGETS=()
 
@@ -252,11 +251,19 @@ get_network_info() {
 
 draw_ui() {
     clear; FRAME_BUFFER=""
-    out_str 1 1 0 '██╗   ██╗████████╗    ██████╗ ██████╗ ██╗  _    _____    ____' "$C_GRN"
-    out_str 1 2 0 '╚██╗ ██╔╝╚══██╔══╝    ██╔══██╗██╔══██╗██║ | |  / /__ \  / __ \' "$C_GRN"
-    out_str 1 3 0 ' ╚████╔╝    ██║ █████╗██║  ██║██████╔╝██║ | | / /__/ / / / / /' "$C_GRN"
-    out_str 1 4 0 '  ╚██╔╝     ██║ ╚════╝██║  ██║██╔═══╝ ██║ | |/ // __/_/ /_/ /' "$C_GRN"
-    out_str 1 5 0 '   ██╝      ██╝       ██████╝ ██╝     ██╝ |___//____(_)____/' "$C_GRN"
+    out_str 1 1 0 ' ██╗   ██╗████████╗    ██████╗ ██████╗ ██╗' "$C_GRN"
+    out_str 1 2 0 ' ╚██╗ ██╔╝╚══██╔══╝    ██╔══██╗██╔══██╗██║' "$C_GRN"
+    out_str 1 3 0 '  ╚████╔╝    ██║ █████╗██║  ██║██████╔╝██║' "$C_GRN"
+    out_str 1 4 0 '   ╚██╔╝     ██║ ╚════╝██║  ██║██╔═══╝ ██║' "$C_GRN"
+    out_str 1 5 0 '    ██║      ██║       ██████║ ██║     ██║' "$C_GRN"
+    out_str 1 6 0 '    ╚═╝      ╚═╝       ╚═════╝ ╚═╝     ╚═╝' "$C_GRN"
+
+    out_str 45 1 0 '██████╗    ██████╗ ' "$C_GRY"
+    out_str 45 2 0 '╚════██╗   ╚════██╗' "$C_GRY"
+    out_str 45 3 0 ' █████╔╝    █████╔╝' "$C_GRY"
+    out_str 45 4 0 '██╔═══╝    ██╔═══╝' "$C_GRY"
+    out_str 45 5 0 '███████╗██╗███████╗' "$C_GRY"
+    out_str 45 6 0 '╚══════╝╚═╝╚══════╝' "$C_GRY"
 
     out_str 65 1 0 "> SYS STATUS: [ ONLINE ]" "$C_GRN"
     out_str 65 2 50 "> ENGINE: Barebuh Pro v2.3.4" "$C_RED"
@@ -647,6 +654,8 @@ config_load
 
 FIRST_RUN=true
 FRAMES=("[=   ]" "[ =  ]" "[  = ]" "[   =]" "[  = ]" "[ =  ]")
+# Волна для LAT как в .bat (детерминированная, без фейковых IP)
+LAT_WAVE=("=     " "==    " "===   " " ===  " "  === " "   ===" "  === " " ===  " "===   " "==    ")
 f=0
 
 while true; do
@@ -693,8 +702,6 @@ while true; do
         sleep 2; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
 
     elif [[ -z "$key" && $READ_STATUS -eq 0 ]]; then
-        STATS_CLEAN=0; STATS_BLOCKED=0; STATS_RST=0; STATS_ERR=0
-
         out_str 2 $UI_Y 121 "[ WAIT ] REFRESHING NETWORK STATE..." "$C_CYA"; flush_buffer
         get_network_info
         rebuild_targets
@@ -720,18 +727,6 @@ while true; do
         while [ $ACTIVE_JOBS -gt 0 ]; do
             ((f++))
 
-            if (( f % 5 == 0 )); then
-                if $OS_MAC; then ram=$(ps -o rss= -p $$ | awk '{print int($1/1024)"MB"}')
-                else ram=$(awk '/VmRSS/ {print int($2/1024)"MB"}' /proc/$$/status 2>/dev/null || echo "N/A"); fi
-
-                printf -v info_str "[ RAM: %-5s | JOBS: %-2d ]" "$ram" "$ACTIVE_JOBS"
-                out_str 95 1 28 "$info_str" "$C_GRY"
-                printf -v stat1 "[ BLOCKS: %-2d | RST: %-2d ]" "$STATS_BLOCKED" "$STATS_RST"
-                out_str 95 2 28 "$stat1" "$C_GRY"
-                printf -v stat2 "[ CLEAN:  %-2d | ERR: %-2d ]" "$STATS_CLEAN" "$STATS_ERR"
-                out_str 95 3 28 "$stat2" "$C_GRY"
-            fi
-
             read -t $READ_TIMEOUT -n 1 -s inkey
             if [[ "$inkey" == "q" || "$inkey" == "Q" || "$inkey" == $'\e' ]]; then aborted=true; break; fi
 
@@ -741,12 +736,6 @@ while true; do
 
                 if [ -f "$TMP_DIR/$row.res" ]; then
                     IFS='|' read -r ip http t12 t13 lat verdict color < "$TMP_DIR/$row.res"
-
-                    if [[ "$verdict" == *"AVAILABLE"* ]]; then ((STATS_CLEAN++))
-                    elif [[ "$verdict" == *"BLOCK"* ]]; then ((STATS_BLOCKED++))
-                    elif [[ "$verdict" == *"ERR"* || "$verdict" == *"CRASH"* ]]; then ((STATS_ERR++))
-                    fi
-                    if [[ "$t12" == "RST" || "$t13" == "RST" ]]; then ((STATS_RST++)); fi
 
                     out_str $X_IP   $row 16 "$ip" "$C_GRY"
                     [ "$http" == "OK" ] && hcol="$C_GRN" || hcol="$C_RED"
@@ -765,16 +754,9 @@ while true; do
                     ((ACTIVE_JOBS--))
                 else
                     anim_idx=$(( (f + row) % 6 ))
+                    wave_idx=$(( f % ${#LAT_WAVE[@]} ))
                     out_str $X_VER $row 30 "SCANNING ${FRAMES[$anim_idx]}" "$C_CYA"
-
-                    if (( f % 4 == 0 )); then
-                        if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then
-                            out_str $X_IP $row 16 "[ *PROXIED* ]" "$C_GRY"
-                        else
-                            out_str $X_IP $row 16 "$((RANDOM%245+10)).$((RANDOM%245+10)).$row.$((f%255))" "$C_GRY"
-                        fi
-                        out_str $X_LAT $row 6 "$((RANDOM%84+15))ms" "$C_GRY"
-                    fi
+                    out_str $X_LAT $row 6 "${LAT_WAVE[$wave_idx]}" "$C_CYA"
                 fi
             done
             flush_buffer

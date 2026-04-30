@@ -1,10 +1,9 @@
-<# :
+﻿<# :
 @echo off
 set "SCRIPT_PATH=%~f0"
 title YT-DPI v2.2.2
 chcp 65001 >nul
 
-:: Проверяем наличие PowerShell 7 (pwsh.exe)
 where /q pwsh.exe
 if not errorlevel 1 (
     set "PS_EXE=pwsh.exe"
@@ -12,7 +11,6 @@ if not errorlevel 1 (
     set "PS_EXE=powershell.exe"
 )
 
-rem Запускаем PowerShell-часть файла безопасно без iex и без -File для .bat
 "%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$s=[System.IO.File]::ReadAllText($env:SCRIPT_PATH,[System.Text.Encoding]::UTF8); & ([ScriptBlock]::Create($s))"
 exit /b
 #>
@@ -3572,16 +3570,14 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     $aborted = $false
     $frameCounter = 0
 
-    # --- ЭТАП 1: только сканирование и плейсхолдеры ---
+    # --- ЭТАП 1 ---
     while (-not $aborted) {
         $frameCounter++
-        
-        # 1. Проверка клавиш
+
         if ([Console]::KeyAvailable) {
             if ([Console]::ReadKey($true).Key -in @("Q", "Escape")) { $aborted = $true; break }
         }
-        
-        # 2. Проверка завершения потоков в фоне
+
         foreach ($j in $jobs) {
             if (-not $j.DoneInBg -and $j.Handle.IsCompleted) {
                 try {
@@ -3593,15 +3589,12 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
             }
         }
 
-        # 3. ОТРИСОВКА КАДРА: до завершения скана показываем только анимацию ожидания.
         for ($i = 0; $i -lt $Targets.Count; $i++) {
             $j = $jobs[$i]
-            # АНИМАЦИЯ с использованием ДИНАМИЧЕСКОЙ позиции LAT
             $rowChar = Get-ScanAnim $frameCounter $j.Row
             $latWave = $waveChars[($frameCounter) % $waveChars.Length].PadRight(7)
 
             if ($j.DoneInBg) {
-                # Визуально не "замораживаем" строку: воркер уже готов, но раскрытие будет в этапе 2.
                 $tag = if ($j.Result -and $j.Result.Verdict) { "SCANNING $($rowChar)" } else { " READY " }
                 $statusText = (" "+$tag+" ").PadRight(30)
             } else {
@@ -3624,7 +3617,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     $pool.Close(); $pool.Dispose()
     foreach ($j in $jobs) { try { $j.PowerShell.Dispose() } catch {} }
 
-    # --- ЭТАП 2: красивое последовательное раскрытие с живой анимацией ---
+    # --- ЭТАП 2 ---
     if (-not $aborted) {
         $totalCount = $Targets.Count
         $statusRow = Get-NavRow -count $totalCount
@@ -3644,11 +3637,9 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
                 }
                 $results[$i] = $res
             }
-            
-            # Выводим результат для текущей строки
+
             Write-ResultLine $j.Row $res
-            
-            # ОБНОВЛЯЕМ АНИМАЦИЮ ДЛЯ НЕРАСКРЫТЫХ СТРОК
+
             for ($k = $i + 1; $k -lt $totalCount; $k++) {
                 $j2 = $jobs[$k]
                 $rowChar = Get-ScanAnim $frameCounter $j2.Row
@@ -3656,8 +3647,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
                 $combinedFrame = "$($statusText)"
                 Out-Str $script:DynamicColPos.Lat $j2.Row $combinedFrame "Cyan"
             }
-            
-            # Обновляем статус-бар
+
             $progressMsg = "[ REVEAL ] Раскрыто $($i+1) из $totalCount результатов..."
             Out-Str 2 $statusRow $progressMsg -Fg "Yellow" -Bg "Black"
             
@@ -3671,16 +3661,14 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
         
         Draw-StatusBar
     }
-    
-    # --- В конце Start-ScanWithAnimation, ПОСЛЕ раскрытия результатов ---
-    # Обновляем NetInfo ТОЛЬКО если он устарел или изменился
+
+    # Обновляем NetInfo только при необходимости
 
     $currentISP = $script:NetInfo.ISP
     $currentLOC = $script:NetInfo.LOC
     $cacheAge = (Get-Date).Ticks - $script:NetInfo.TimestampTicks
     $ageMinutes = [TimeSpan]::FromTicks($cacheAge).TotalMinutes
 
-    # Проверяем, нужно ли обновление
     $needUpdate = $false
     if ($ageMinutes -gt 30) {
         Write-DebugLog "NetInfo устарел (${ageMinutes} мин), обновляем"
@@ -3695,7 +3683,6 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
         $needUpdate = $true
     }
 
-    # Обновляем только если нужно
     if ($needUpdate) {
         Write-DebugLog "Запуск синхронного обновления NetInfo..."
         Draw-StatusBar -Message "[ NET ] Обновление информации о сети..." -Fg "Black" -Bg "Cyan"
@@ -3722,22 +3709,22 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
         Write-DebugLog "NetInfo актуален, пропускаем обновление (ISP=$currentISP, возраст=${ageMinutes} мин)"
     }
 
-    return [PSCustomObject]@{ Results = $results; Aborted = $aborted }
-
-    # Проверка на ложный IPv6
-    $allIpBlock = ($results | Where-Object { $_.Verdict -ne "IP BLOCK" -and $_.Verdict -ne "UNKNOWN" }) -eq $null
-    if ($allIpBlock -and $NetInfo.HasIPv6 -eq $true) {
+    # Ложный IPv6: только если скан завершён полностью и каждая строка — IP BLOCK или UNKNOWN
+    $resolved = @($results | Where-Object { $_ })
+    $nonIpBlock = @($resolved | Where-Object { $_.Verdict -ne "IP BLOCK" -and $_.Verdict -ne "UNKNOWN" })
+    $allIpBlock = (-not $aborted) -and ($resolved.Count -gt 0) -and ($resolved.Count -eq $results.Count) -and ($nonIpBlock.Count -eq 0)
+    if ($allIpBlock -and $script:NetInfo.HasIPv6 -eq $true) {
         Write-DebugLog "Все тесты дали IP BLOCK, но HasIPv6=true. Переключаем HasIPv6 в false." "WARN"
         $script:NetInfo.HasIPv6 = $false
         $script:Config.NetCache.HasIPv6 = $false
         Save-Config $script:Config
-        if ($DnsCacheLock.WaitOne(1000)) {
+        if ($script:DnsCacheLock.WaitOne(1000)) {
             $toRemove = @()
-            foreach ($key in $DnsCache.Keys) {
-                if ($DnsCache[$key] -match ':') { $toRemove += $key }
+            foreach ($key in $script:DnsCache.Keys) {
+                if ($script:DnsCache[$key] -match ':') { $toRemove += $key }
             }
-            foreach ($key in $toRemove) { $DnsCache.Remove($key) }
-            [void]$DnsCacheLock.ReleaseMutex()
+            foreach ($key in $toRemove) { $script:DnsCache.Remove($key) }
+            [void]$script:DnsCacheLock.ReleaseMutex()
         }
     }
     
