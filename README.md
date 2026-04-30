@@ -1,54 +1,53 @@
 # YT-DPI v2.2.0
 ![GitHub Release](https://img.shields.io/badge/release-2.2.0-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
-[![Donat support](https://img.shields.io/badge/Donate-blue)](https://spasibomir.ru/pay/31732)
+[![Поддержать проект](https://img.shields.io/badge/%D0%9F%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C%20%D0%B0%D0%B2%D1%82%D0%BE%D1%80%D0%B0-blue)](https://spasibomir.ru/pay/31732)
 
-[[Русский](README_ru.md)] | [[Telegram](https://t.me/YT_DPI)]
+[[Telegram](https://t.me/YT_DPI)]
 
-**YT-DPI** is a professional forensic network diagnostic framework designed to dissect and identify Deep Packet Inspection (DPI) and TSPU interference. Unlike standard tools that rely on high-level OS libraries, YT-DPI uses a low-level C# engine to simulate raw TLS handshakes, pinpointing exactly where and how your traffic is being manipulated.
+**YT-DPI** — это профессиональный диагностический фреймворк, предназначенный для детального анализа вмешательства систем DPI и ТСПУ в ваш трафик. В отличие от стандартных инструментов, YT-DPI использует низкоуровневый C#-движок для ручной сборки TLS-пакетов, что позволяет точно определить, на каком этапе и каким методом блокируется доступ.
 
 ![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI/refs/heads/master/img/YT-DPI-v2.2.0.png)
 
-## 🚀 Key Features (v2.2.0)
+## 🚀 Основные возможности (v2.2.0)
 
-*   **Low-Level TLS Engine (C#):** Built-in "Barebuh Pro" engine that manually constructs `ClientHello` packets. This bypasses Windows Schannel limitations and identifies subtle DPI blocks that standard tools miss.
-*   **Dynamic Responsive UI:** Automatically calculates table widths based on IP address lengths (IPv4/IPv6). Features an ultra-smooth real-time "Waterfall" results display.
-*   **Multi-Protocol Depth:** Independent testing of Port 80 (HTTP), Port 443 (TLS 1.2), and Port 443 (TLS 1.3) with a new **THROTTLED** status detection.
-*   **Dual-Stack Control:** Toggle between `IPv6 Priority` and `IPv4 Only` via the new Settings menu to find "holes" in ISP filtering.
-*   **PowerShell 7 (Core) Optimized:** Auto-detects and runs on `pwsh.exe` for enhanced socket performance and faster execution.
-*   **Universal Proxy Tunneling:** Full SOCKS5/HTTP support with improved SSL-over-Proxy handling for ISP/GEO metadata retrieval.
-*   **Forensic Deep Trace:** Custom L4 TCP Traceroute to identify the specific network hop where the DPI middlebox injects RST packets.
+*   **⚙️ Низкоуровневое ядро "Barebuh Pro" (C#):** Скрипт самостоятельно собирает пакеты `ClientHello` на уровне байтов. Это позволяет обходить ограничения Windows и детектировать блокировки, которые не видят обычные браузерные тесты.
+*   **📊 Динамический адаптивный интерфейс:** Таблица автоматически подстраивается под длину IPv6-адресов. Реализован режим "водопада" — результаты отображаются мгновенно по мере готовности потока.
+*   **🛠 Новое меню настроек (клавиша S):** Выбор приоритета протоколов (`IPv6` или `IPv4`), принудительная очистка DNS-кэша и управление сетевым состоянием.
+*   **⚡ Оптимизация под PowerShell 7:** Скрипт автоматически находит и использует `pwsh.exe` (PowerShell Core), что значительно ускоряет работу сокетов и параллельных проверок.
+*   **🕵️ Глубокая трассировка (Deep Trace):** Кастомный TCP-Traceroute находит конкретный узел провайдера, внедряющий пакеты разрыва соединения (RST).
+*   **🌐 Продвинутый прокси-движок:** Исправлена работа HTTPS через SOCKS5. Теперь данные о провайдере и обновления корректно загружаются даже при использовании Zapret/GoodbyeDPI.
+*   **🚀 Параллелизм:** Поддержка до 50 одновременных потоков сканирования для мгновенной проверки всего списка доменов.
 
-## 🧠 The Knowledge Base: Why YouTube Lags?
+## 🧠 База знаний: Почему лагает YouTube?
 
-| Problem | Technical Explanation | Solution |
+| Проблема | Техническое описание | Статус в YT-DPI |
 | :--- | :--- | :--- |
-| **SNI Filtering** | ISP "reads" the hostname in cleartext. YT-DPI will show **DPI RESET**. | Use [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI) or [Zapret](https://github.com/bol-van/zapret). |
-| **QUIC Blocking** | ISPs block UDP Port 443. YT-DPI identifies this via L4 timeouts. | Disable QUIC in `chrome://flags/#enable-quic`. |
-| **Kyber Algorithm** | Post-Quantum packets break old DPI parsers. Causes **THROTTLED** status. | Disable Kyber in `chrome://flags/#enable-tls13-kyber`. |
-| **IP/CDN Blocking** | Direct block of Google/CDN nodes. YT-DPI will show **IP BLOCK**. | Use a Proxy/VPN or advanced IP fragmentation. |
+| **Фильтрация SNI** | Провайдер "читает" имя сайта в пакете. | **DPI RESET** / **DPI BLOCK** |
+| **Блокировка QUIC** | ТСПУ блокирует UDP-порт 443. | **TIMEOUT** на L4 |
+| **Шифрование Kyber** | Пакеты TLS 1.3 слишком велики для старых DPI. | **THROTTLED** (желтый) |
+| **Блок по IP/CDN** | Прямая блокировка серверов Google/CDN. | **IP BLOCK** (красный) |
 
-## 🛠 Usage & Hotkeys
+## 🛠 Управление и горячие клавиши
 
-1.  **Run `YT-DPI.bat`** (No installation required).
-2.  **[ENTER]** — Start global multi-threaded scan.
-3.  **[S]** — **Settings:** Change IP preference (v4/v6) or clear network cache.
-4.  **[P]** — **Proxy:** Configure SOCKS5/HTTP tunnel with history support.
-5.  **[D]** — **Deep Trace:** Pinpoint the censorship node by domain index.
-6.  **[R]** — **Report:** Export forensic results to `YT-DPI_Report.txt`.
-7.  **[U]** — **Update:** Check for the latest version on GitHub.
+1.  **Запустите `YT-DPI.bat`**. (PowerShell 7 рекомендуется, но не обязателен).
+2.  **[ENTER]** — Запуск полного многопоточного сканирования.
+3.  **[S]** — **Настройки:** переключение IPv4/IPv6 и очистка кэша.
+4.  **[P]** — **Прокси:** настройка SOCKS5/HTTP с историей подключений.
+5.  **[D]** — **Deep Trace:** запуск трассировки до конкретного домена.
+6.  **[R]** — **Отчет:** сохранение результатов в `YT-DPI_Report.txt`.
+7.  **[U]** — **Обновление:** проверка новой версии на GitHub.
 
-## 🔗 Community & Credits
-This project stands on the shoulders of giants in the DPI-circumvention scene:
-*   [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI) — The definitive Windows bypasser by ValdikSS.
-*   [Zapret](https://github.com/bol-van/zapret) — Powerful multi-platform bypass engine by bol-van.
-*   [B4](https://github.com/DanielLavrushin/b4) — Advanced network diagnostic tool by Daniel Lavrushin.
-*   [dpi-detector](https://github.com/Runnin4ik/dpi-detector) — Research on TSPU/DPI detection.
+## 🔗 Благодарности и ссылки
+Проект построен на исследованиях сообщества обхода DPI:
+*   [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI) — от ValdikSS.
+*   [Zapret](https://github.com/bol-van/zapret) — от bol-van.
+*   [B4](https://github.com/DanielLavrushin/b4) — от Даниила Лаврушина.
+*   [dpi-detector](https://github.com/Runnin4ik/dpi-detector) — методики детекции ТСПУ.
 
-## ⚖️ License & Disclaimer
-Licensed under **MIT**. This tool is for **diagnostic and educational purposes only**. It does not provide bypass capabilities but helps you verify and calibrate your circumvention tools.
+## ⚖️ Лицензия и отказ от ответственности
+Распространяется по лицензии **MIT**. Инструмент создан исключительно для **диагностических** целей. Он не является средством обхода блокировок, но помогает правильно их настроить.
 
 ---
-*Developed with ❤️ for the open internet.*
+*Создано с ❤️ для интернета без границ.*
