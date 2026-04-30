@@ -108,17 +108,20 @@ get_network_info() {
     # --- Динамический сбор CDN через DNS ---
     CDN_LIST=()
     local cdn_prefixes=( r1 r2 r3 rr1 rr2 rr3 rr4 rr5 )
-    local pfx host
+    local pfx host ip
     for pfx in "${cdn_prefixes[@]}"; do
         host="${pfx}.googlevideo.com"
+        ip=""
+        # Получаем IP, предпочтительно через getent
         if command -v getent &>/dev/null; then
-            if getent ahostsv4 "$host" &>/dev/null; then
-                CDN_LIST+=("$host")
-            fi
+            ip=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')
         elif command -v nslookup &>/dev/null; then
-            if nslookup "$host" &>/dev/null; then
-                CDN_LIST+=("$host")
-            fi
+            ip=$(nslookup "$host" 2>/dev/null | awk '/^Address: / {print $2; exit}')
+        fi
+        # Проверяем, что IP валидный и НЕ является частным/loopback
+        if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+           ! [[ "$ip" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.|127\.|0\.) ]]; then
+            CDN_LIST+=("$host")
         fi
     done
 
