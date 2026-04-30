@@ -50,6 +50,7 @@ export PROXY_PASS=""
 export PROXY_STR=""
 
 STATS_CLEAN=0; STATS_BLOCKED=0; STATS_RST=0; STATS_ERR=0
+CDN_LIST=()
 
 # --- ТВОЙ НОВЫЙ СПИСОК (BASH ARRAY FORMAT) ---
 BASE_TARGETS=(
@@ -104,11 +105,38 @@ get_network_info() {
     local px_args=""
     if $PROXY_ENABLED; then px_args="-x $PROXY_STR"; fi
 
-    local rnd=$RANDOM
-    CDN="manifest.googlevideo.com"
-    local cdn_raw=$(curl -s -m 2 $px_args "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd")
-    if [[ "$cdn_raw" =~ =\>\ ([a-zA-Z0-9-]+) ]]; then CDN="r1.${BASH_REMATCH[1]}.googlevideo.com"; fi
+    # --- Динамический сбор CDN через DNS ---
+    CDN_LIST=()
+    local cdn_prefixes=( r1 r2 r3 rr1 rr2 rr3 rr4 rr5 )
+    local pfx host
+    for pfx in "${cdn_prefixes[@]}"; do
+        host="${pfx}.googlevideo.com"
+        if command -v getent &>/dev/null; then
+            if getent ahostsv4 "$host" &>/dev/null; then
+                CDN_LIST+=("$host")
+            fi
+        elif command -v nslookup &>/dev/null; then
+            if nslookup "$host" &>/dev/null; then
+                CDN_LIST+=("$host")
+            fi
+        fi
+    done
 
+    # Fallback: если DNS ничего не дал – старый метод через report_mapping
+    if [ ${#CDN_LIST[@]} -eq 0 ]; then
+        local rnd=$RANDOM
+        local cdn_raw=$(curl -s -m 2 $px_args "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd")
+        if [[ "$cdn_raw" =~ =\>\ ([a-zA-Z0-9-]+) ]]; then
+            CDN_LIST+=("r1.${BASH_REMATCH[1]}.googlevideo.com")
+        else
+            CDN_LIST+=("manifest.googlevideo.com")
+        fi
+    fi
+
+    # Для отображения в UI берём первый CDN
+    CDN="${CDN_LIST[0]}"
+
+    # Гео-информация
     ISP="UNKNOWN"; LOC="UNKNOWN"
     local geo_raw=$(curl -s -A "curl/7.88.1" -m 2 $px_args "http://ip-api.com/line/?fields=status,countryCode,city,isp")
     if [ "$(echo "$geo_raw" | sed -n '1p' | tr -d '\r\n')" == "success" ]; then
@@ -365,7 +393,7 @@ NAV_STR="[ READY ] [ENTER] START | [H] HELP | [P] PROXY | [T] TEST | [S] SAVE | 
 while true; do
     if $FIRST_RUN; then
         get_network_info
-        TARGETS=("${BASE_TARGETS[@]}" "$CDN")
+        TARGETS=("${BASE_TARGETS[@]}" "${CDN_LIST[@]}")
         TARGETS=($(echo "${TARGETS[@]}" | tr ' ' '\n' | awk '!a[$0]++'))
         draw_ui
         UI_Y=$((12 + ${#TARGETS[@]} + 1))
