@@ -1,10 +1,9 @@
-# YT-DPI v2.2.0
-![GitHub Release](https://img.shields.io/badge/release-2.2.0-green)
+# YT-DPI
+![GitHub Release](https://img.shields.io/badge/release-2.2.2-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 [![Поддержать проект](https://img.shields.io/badge/%D0%9F%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C%20%D0%B0%D0%B2%D1%82%D0%BE%D1%80%D0%B0-blue)](https://spasibomir.ru/pay/31732)
 
-[[Telegram](https://t.me/YT_DPI)]
 
 **YT-DPI** — это профессиональный диагностический фреймворк, предназначенный для детального анализа вмешательства систем DPI и ТСПУ в ваш трафик. В отличие от стандартных инструментов, YT-DPI использует низкоуровневый C#-движок для ручной сборки TLS-пакетов, что позволяет точно определить, на каком этапе и каким методом блокируется доступ.
 
