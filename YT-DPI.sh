@@ -1,8 +1,22 @@
-﻿#!/usr/bin/env bash
-# YT-DPI bash frontend — синхронизирован с логикой/списком целей YT-DPI.bat v2.2.2 (без TCP traceroute / апдейтера инсталлятора Windows).
-# Опционально: jq для JSON-конфига ~/.config/yt-dpi/config.json (поля как в YT-DPI.bat).
+﻿#!/bin/sh
+# Bootstrap: запускаем скрипт в bash, включая окружения Entware.
+if [ -z "${BASH_VERSION:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    elif [ -x /opt/bin/bash ]; then
+        exec /opt/bin/bash "$0" "$@"
+    elif [ -x /opt/bin/env ] && /opt/bin/env bash -c 'exit 0' >/dev/null 2>&1; then
+        exec /opt/bin/env bash "$0" "$@"
+    fi
+    echo "Ошибка: bash не найден. Установите bash (для Entware обычно /opt/bin/bash)." >&2
+    exit 1
+fi
 
-# --- ФИКС 1: Отключаем эхо ввода и включаем Alternate Screen Buffer ---
+# YT-DPI.sh — интерактивный терминальный сканер доступности YouTube-доменов.
+# Скрипт проверяет HTTP, TLS 1.2 и TLS 1.3, поддерживает прокси и сохраняет отчёт.
+# Часть настроек хранится в ~/.config/yt-dpi/config.json (если установлен jq).
+
+# Инициализация TUI: скрываем ввод/курсор и переходим в альтернативный экран.
 stty -echo
 printf "\033[?1049h"
 printf "\033[?25l"
@@ -36,7 +50,7 @@ READ_TIMEOUT="0.05"
 if (( BASH_VERSINFO[0] < 4 )); then READ_TIMEOUT="1"; fi
 ANIM_EVERY=1
 
-# Git Bash на Windows заметно тормозит на слишком частых ANSI-обновлениях.
+# Профиль обновления экрана для Git Bash на Windows.
 if [[ -n "${MSYSTEM:-}" ]]; then
     READ_TIMEOUT="0.03"
     ANIM_EVERY=2
@@ -50,7 +64,7 @@ SCRIPT_VERSION="2.2.2"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/yt-dpi"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
-# Совместимо по полям с YT-DPI.bat (упрощённо): IpPreference, TlsMode, Proxy, ProxyHistory
+# Блок runtime-настроек (формат совместим с bat-версией по основным полям).
 export IP_PREFERENCE="IPv6"
 export TLS_MODE="Auto"
 HAS_IPV6=false
@@ -68,7 +82,7 @@ PROXY_HISTORY=()
 CDN_LIST=()
 TARGETS=()
 
-# Тот же набор доменов, что $BaseTargets в YT-DPI.bat (порядок не важен — ниже сортировка по длине как в Get-Targets).
+# Базовый список целей для сканирования.
 BASE_TARGETS=(
     "youtu.be"
     "youtube.com"
@@ -114,6 +128,7 @@ NAV_ABORT="[ ABORTED ] SCAN STOPPED. [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [
 NAV_DONE="[ SUCCESS ] SCAN FINISHED. [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [T] TEST | [R] REPORT | [H] HELP | [Q] QUIT"
 
 FRAME_BUFFER=""
+# Запись строки в буфер кадра (без немедленной отправки в терминал).
 out_str() {
     local x=$1 y=$2 w=$3 text=$4 color=$5
     local padded
@@ -122,8 +137,10 @@ out_str() {
 }
 flush_buffer() { printf "%b" "$FRAME_BUFFER"; FRAME_BUFFER=""; }
 
+# Проверка доступности jq (нужен только для работы с JSON-конфигом).
 have_jq() { command -v jq &>/dev/null; }
 
+# Сохранение настроек в JSON-конфиг.
 config_save() {
     have_jq || return 0
     mkdir -p "$CONFIG_DIR" || return 1
@@ -188,7 +205,7 @@ detect_ipv6() {
     HAS_IPV6=false
     local has_route=false
 
-    # 1) Сначала требуем наличие дефолтного IPv6-маршрута.
+    # Шаг 1: проверяем, что у системы есть default IPv6 route.
     if command -v ip &>/dev/null; then
         if ip -6 route show default 2>/dev/null | awk 'NF { found=1 } END { exit(found?0:1) }'; then
             has_route=true
@@ -207,7 +224,7 @@ detect_ipv6() {
         return
     fi
 
-    # 2) Затем проверяем реальную исходящую IPv6-связность.
+    # Шаг 2: проверяем исходящую IPv6-связность.
     if curl -6 -s -m 2 -I "https://ipv6.google.com" -o /dev/null 2>/dev/null; then
         HAS_IPV6=true
         return
@@ -220,7 +237,7 @@ detect_ipv6() {
     fi
 }
 
-# Как Get-Targets в .bat: базовый список + CDN_LIST + текущий CDN, уникально и сортировка по длине строки.
+# Формирование итогового списка целей: base + CDN, без дублей, сортировка по длине.
 rebuild_targets() {
     local -a raw=()
     local x
@@ -247,6 +264,7 @@ proxy_history_add() {
     config_save
 }
 
+# Получение сетевого контекста для верхней панели: DNS, CDN, ISP/LOC, наличие IPv6.
 get_network_info() {
     DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | head -n 1 | awk '{print $2}' | tr -d '\r\n')
     [ -z "$DNS" ] && DNS="UNKNOWN"
@@ -377,6 +395,7 @@ show_help() {
     read -r -n 1 -s
 }
 
+# Меню общих настроек сканера (IP preference и TLS mode).
 show_settings_menu() {
     stty echo
     clear
@@ -407,7 +426,8 @@ show_settings_menu() {
     sleep 1
 }
 
-# Выбор записи из истории прокси (формат TYPE://[user:*****@]host:port). Возвращает 0 если применено.
+# Применение записи из истории прокси.
+# Формат записи: TYPE://[user:*****@]host:port
 apply_proxy_history_entry() {
     local entry=$1
     [[ -z "$entry" ]] && return 1
@@ -441,6 +461,7 @@ apply_proxy_history_entry() {
     return 0
 }
 
+# Интерактивное меню настройки прокси.
 show_proxy_menu() {
     stty echo
     clear
@@ -565,6 +586,7 @@ show_proxy_menu() {
     fi
 }
 
+# Быстрая проверка текущих прокси-настроек.
 test_proxy() {
     clear
     echo -e "${C_CYA}=== ТЕСТ ПРОКСИ ===${C_RST}"
@@ -585,6 +607,7 @@ test_proxy() {
     echo -ne "\n${C_CYA}Нажмите любую клавишу...${C_RST}"; read -r -n 1 -s
 }
 
+# Резолв адреса цели с учётом IP preference и доступности IPv6.
 resolve_target_ip() {
     local target=$1
     local ip=""
@@ -616,6 +639,8 @@ resolve_target_ip() {
     return 0
 }
 
+# Рабочий поток проверки одной цели.
+# Формат результата: IP|HTTP|TLS12|TLS13|LAT|VERDICT|COLOR
 worker() {
     local target=$1 row=$2
     local ip="" http="FAIL" t12="FAIL" t13="FAIL" lat="0ms" verdict="IP BLOCK" color="$C_RED"
@@ -700,7 +725,7 @@ config_load
 
 FIRST_RUN=true
 FRAMES=("[=   ]" "[ =  ]" "[  = ]" "[   =]" "[  = ]" "[ =  ]")
-# Волна для LAT как в .bat (детерминированная, без фейковых IP)
+# Кадры анимации строки LAT во время ожидания результата.
 LAT_WAVE=("=     " "==    " "===   " " ===  " "  === " "   ===" "  === " " ===  " "===   " "==    ")
 f=0
 
