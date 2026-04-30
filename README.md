@@ -3,6 +3,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
+[![Donat support](https://img.shields.io/badge/Donate-blue)](https://spasibomir.ru/pay/31732)
 
 [[Русский](README_ru.md)] | [[Telegram](https://t.me/YT_DPI)]
 
