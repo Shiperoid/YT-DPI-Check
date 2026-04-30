@@ -174,6 +174,7 @@ show_help() {
     echo -e "\n${C_YEL}[ RESULT ]${C_RST}"
     echo -e "  ${C_GRN}AVAILABLE     - TLS passed. Domain is fully accessible.${C_RST}"
     echo -e "  ${C_YEL}DPI BLOCK     - HTTP works, but TLS is blocked/dropped.${C_RST}"
+    echo -e "  ${C_YEL}THROTTLED    - HTTP works, but one TLS version is blocked.${C_RST}"
     echo -e "  ${C_RED}IP  BLOCK     - Both HTTP and TLS are unreachable.${C_RST}"
     echo -e "  ${C_RED}ROUTING ERROR - Network issues, proxy failure, or bad routing.${C_RST}"
 
@@ -330,10 +331,27 @@ worker() {
     else t13="DRP"
     fi
 
-    if [ "$t12" == "OK" ] || [ "$t13" == "OK" ]; then verdict="AVAILABLE"; color="$C_GRN"
-    elif [ "$http" == "OK" ]; then verdict="DPI BLOCK"; color="$C_YEL"
-    elif [ "$http" == "ERR" ] && { [ "$t12" == "RST" ] || [ "$t13" == "RST" ]; }; then verdict="ROUTING ERROR"; color="$C_RED"
-    else verdict="IP BLOCK"; color="$C_RED"
+    if [ "$http" == "OK" ]; then
+        if [ "$t12" == "OK" ] && [ "$t13" == "OK" ]; then
+            verdict="AVAILABLE"; color="$C_GRN"
+        elif [ "$t12" == "OK" ] && [ "$t13" == "N/A" ]; then
+            verdict="AVAILABLE"; color="$C_GRN"
+        elif [ "$t12" == "N/A" ] && [ "$t13" == "OK" ]; then
+            verdict="AVAILABLE"; color="$C_GRN"
+        elif [ "$t12" == "OK" ] && { [ "$t13" == "RST" ] || [ "$t13" == "DRP" ]; }; then
+            verdict="THROTTLED"; color="$C_YEL"
+        elif [ "$t13" == "OK" ] && { [ "$t12" == "RST" ] || [ "$t12" == "DRP" ]; }; then
+            verdict="THROTTLED"; color="$C_YEL"
+        else
+            verdict="DPI BLOCK"; color="$C_YEL"
+        fi
+    else
+        # HTTP не OK -> смотрим RST ошибки
+        if { [ "$t12" == "RST" ] || [ "$t13" == "RST" ]; } && [ "$http" == "ERR" ]; then
+            verdict="ROUTING ERROR"; color="$C_RED"
+        else
+            verdict="IP BLOCK"; color="$C_RED"
+        fi
     fi
 
     echo "$ip|$http|$t12|$t13|$lat|$verdict|$color" > "$TMP_DIR/$row.res"
