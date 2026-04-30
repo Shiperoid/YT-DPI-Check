@@ -1,4 +1,4 @@
-﻿#!/bin/sh
+#!/bin/sh
 # Bootstrap: запускаем скрипт в bash, включая окружения Entware.
 if [ -z "${BASH_VERSION:-}" ]; then
     if command -v bash >/dev/null 2>&1; then

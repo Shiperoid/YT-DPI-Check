@@ -1,4 +1,4 @@
-﻿<# :
+<# :
 @echo off
 set "SCRIPT_PATH=%~f0"
 title YT-DPI v2.2.2
