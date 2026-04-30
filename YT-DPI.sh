@@ -90,7 +90,14 @@ BASE_TARGETS=(
     "youtubeembeddedplayer.googleapis.com"
 )
 
-X_DOM=2; X_IP=41; X_HTTP=59; X_T12=67; X_T13=77; X_LAT=87; X_VER=95
+W_DOM=38; W_IP=22; W_HTTP=6; W_T12=8; W_T13=8; W_LAT=6; W_VER=30
+X_DOM=2
+X_IP=$((X_DOM + W_DOM + 1))
+X_HTTP=$((X_IP + W_IP + 1))
+X_T12=$((X_HTTP + W_HTTP + 1))
+X_T13=$((X_T12 + W_T12 + 1))
+X_LAT=$((X_T13 + W_T13 + 1))
+X_VER=$((X_LAT + W_LAT + 1))
 C_BLK="${E}[40m"; C_RED="${E}[31m"; C_GRN="${E}[32m"; C_YEL="${E}[33m"
 C_MAG="${E}[35m"; C_CYA="${E}[36m"; C_WHT="${E}[97m"; C_GRY="${E}[90m"; C_RST="${E}[0m"
 
@@ -172,11 +179,37 @@ config_load() {
 
 detect_ipv6() {
     HAS_IPV6=false
-    if command -v getent &>/dev/null; then
-        if getent ahostsv6 ipv6.google.com &>/dev/null; then HAS_IPV6=true; return; fi
+    local has_route=false
+
+    # 1) Сначала требуем наличие дефолтного IPv6-маршрута.
+    if command -v ip &>/dev/null; then
+        if ip -6 route show default 2>/dev/null | awk 'NF { found=1 } END { exit(found?0:1) }'; then
+            has_route=true
+        fi
+    elif $OS_MAC; then
+        if netstat -rn -f inet6 2>/dev/null | awk '$1=="default" || $1=="::/0" { found=1 } END { exit(found?0:1) }'; then
+            has_route=true
+        fi
+    elif command -v route &>/dev/null; then
+        if route -n -A inet6 2>/dev/null | awk '$1=="::/0" || $1=="default" { found=1 } END { exit(found?0:1) }'; then
+            has_route=true
+        fi
+    fi
+
+    if ! $has_route; then
+        return
+    fi
+
+    # 2) Затем проверяем реальную исходящую IPv6-связность.
+    if curl -6 -s -m 2 -I "https://ipv6.google.com" -o /dev/null 2>/dev/null; then
+        HAS_IPV6=true
+        return
     fi
     if command -v ping6 &>/dev/null; then
-        if ping6 -c 1 -W 1 2001:4860:4860::8888 &>/dev/null; then HAS_IPV6=true; fi
+        if ping6 -c 1 -W 1 2001:4860:4860::8888 &>/dev/null; then
+            HAS_IPV6=true
+            return
+        fi
     fi
 }
 
@@ -304,13 +337,13 @@ draw_ui() {
 
     for i in "${!TARGETS[@]}"; do
         local row=$((12 + i))
-        out_str $X_DOM $row 38 "${TARGETS[$i]}" "$C_GRY"
-        out_str $X_IP   $row 16 "---.---.---.---" "$C_GRY"
-        out_str $X_HTTP $row 6 "--" "$C_GRY"
-        out_str $X_T12  $row 8 "--" "$C_GRY"
-        out_str $X_T13  $row 8 "--" "$C_GRY"
-        out_str $X_LAT  $row 6 "----" "$C_GRY"
-        out_str $X_VER  $row 30 "IDLE" "$C_GRY"
+        out_str $X_DOM $row $W_DOM "${TARGETS[$i]}" "$C_GRY"
+        out_str $X_IP   $row $W_IP "---.---.---.---" "$C_GRY"
+        out_str $X_HTTP $row $W_HTTP "--" "$C_GRY"
+        out_str $X_T12  $row $W_T12 "--" "$C_GRY"
+        out_str $X_T13  $row $W_T13 "--" "$C_GRY"
+        out_str $X_LAT  $row $W_LAT "----" "$C_GRY"
+        out_str $X_VER  $row $W_VER "IDLE" "$C_GRY"
     done
     out_str 0 $((12 + ${#TARGETS[@]})) 0 "$l" "$C_CYA"
     flush_buffer
@@ -717,7 +750,7 @@ while true; do
 
         for i in "${!TARGETS[@]}"; do
             row=$((12 + i))
-            out_str $X_VER $row 30 "PREPARING..." "$C_GRY"
+            out_str $X_VER $row $W_VER "PREPARING..." "$C_GRY"
             JOB_STATE[$i]=1
             worker "${TARGETS[$i]}" "$row" < /dev/null &
         done
@@ -737,26 +770,26 @@ while true; do
                 if [ -f "$TMP_DIR/$row.res" ]; then
                     IFS='|' read -r ip http t12 t13 lat verdict color < "$TMP_DIR/$row.res"
 
-                    out_str $X_IP   $row 16 "$ip" "$C_GRY"
+                    out_str $X_IP   $row $W_IP "$ip" "$C_GRY"
                     [ "$http" == "OK" ] && hcol="$C_GRN" || hcol="$C_RED"
-                    out_str $X_HTTP $row 6 "$http" "$hcol"
+                    out_str $X_HTTP $row $W_HTTP "$http" "$hcol"
                     [ "$t12" == "OK" ] && t12col="$C_GRN" || t12col="$C_RED"
                     [[ "$t12" == "---" ]] && t12col="$C_GRY"
-                    out_str $X_T12  $row 8 "$t12" "$t12col"
+                    out_str $X_T12  $row $W_T12 "$t12" "$t12col"
                     if [ "$t13" == "OK" ]; then t13col="$C_GRN"
                     elif [ "$t13" == "N/A" ] || [ "$t13" == "---" ]; then t13col="$C_GRY"
                     else t13col="$C_RED"; fi
-                    out_str $X_T13  $row 8 "$t13" "$t13col"
-                    out_str $X_LAT  $row 6 "$lat" "$C_CYA"
-                    out_str $X_VER  $row 30 "$verdict" "$color"
+                    out_str $X_T13  $row $W_T13 "$t13" "$t13col"
+                    out_str $X_LAT  $row $W_LAT "$lat" "$C_CYA"
+                    out_str $X_VER  $row $W_VER "$verdict" "$color"
 
                     JOB_STATE[$i]=0
                     ((ACTIVE_JOBS--))
                 else
                     anim_idx=$(( (f + row) % 6 ))
                     wave_idx=$(( f % ${#LAT_WAVE[@]} ))
-                    out_str $X_VER $row 30 "SCANNING ${FRAMES[$anim_idx]}" "$C_CYA"
-                    out_str $X_LAT $row 6 "${LAT_WAVE[$wave_idx]}" "$C_CYA"
+                    out_str $X_VER $row $W_VER "SCANNING ${FRAMES[$anim_idx]}" "$C_CYA"
+                    out_str $X_LAT $row $W_LAT "${LAT_WAVE[$wave_idx]}" "$C_CYA"
                 fi
             done
             flush_buffer
