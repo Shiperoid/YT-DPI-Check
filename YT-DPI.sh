@@ -34,6 +34,13 @@ if [[ "$OSTYPE" == "darwin"* ]]; then OS_MAC=true; fi
 
 READ_TIMEOUT="0.05"
 if (( BASH_VERSINFO[0] < 4 )); then READ_TIMEOUT="1"; fi
+ANIM_EVERY=1
+
+# Git Bash на Windows заметно тормозит на слишком частых ANSI-обновлениях.
+if [[ -n "${MSYSTEM:-}" ]]; then
+    READ_TIMEOUT="0.03"
+    ANIM_EVERY=2
+fi
 
 TMP_DIR=$(mktemp -d)
 E=$'\033'
@@ -623,10 +630,16 @@ worker() {
         if [ -z "$ip" ]; then echo "ERROR|FAIL|FAIL|FAIL|0ms|DNS ERROR|$C_RED" > "$TMP_DIR/$row.res"; return; fi
     fi
 
-    local http_out
-    http_out=$(curl -s -m 2 $px_args -I "http://$target" -A "curl/7.88.1" -w "\n%{time_total}" 2>&1)
+    local http_out lat_raw
+    http_out=$(curl -s -m 2 $px_args -I "http://$target" -A "curl/7.88.1" -w "\nTIME_TOTAL=%{time_total}" 2>&1)
     if [ $? -eq 0 ]; then
-        http="OK"; lat=$(echo "$http_out" | tail -n1 | tr ',' '.' | awk '{v=int($1*1000); if(v==0) v=1; print v"ms"}')
+        http="OK"
+        lat_raw=$(echo "$http_out" | tr ',' '.' | awk -F= '/^TIME_TOTAL=/{print $2}' | tail -n1 | tr -d '\r')
+        if [[ "$lat_raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            lat=$(awk -v t="$lat_raw" 'BEGIN{v=int(t*1000); if(v<1) v=1; print v"ms"}')
+        else
+            lat="---"
+        fi
     else
         if echo "$http_out" | grep -qi "timeout"; then http="DROP"; else http="ERR"; fi
     fi
@@ -759,6 +772,8 @@ while true; do
         aborted=false
         while [ $ACTIVE_JOBS -gt 0 ]; do
             ((f++))
+            should_draw_anim=false
+            if (( f % ANIM_EVERY == 0 )); then should_draw_anim=true; fi
 
             read -t $READ_TIMEOUT -n 1 -s inkey
             if [[ "$inkey" == "q" || "$inkey" == "Q" || "$inkey" == $'\e' ]]; then aborted=true; break; fi
@@ -786,13 +801,15 @@ while true; do
                     JOB_STATE[$i]=0
                     ((ACTIVE_JOBS--))
                 else
-                    anim_idx=$(( (f + row) % 6 ))
-                    wave_idx=$(( f % ${#LAT_WAVE[@]} ))
-                    out_str $X_VER $row $W_VER "SCANNING ${FRAMES[$anim_idx]}" "$C_CYA"
-                    out_str $X_LAT $row $W_LAT "${LAT_WAVE[$wave_idx]}" "$C_CYA"
+                    if $should_draw_anim; then
+                        anim_idx=$(( (f + row) % 6 ))
+                        wave_idx=$(( f % ${#LAT_WAVE[@]} ))
+                        out_str $X_VER $row $W_VER "SCANNING ${FRAMES[$anim_idx]}" "$C_CYA"
+                        out_str $X_LAT $row $W_LAT "${LAT_WAVE[$wave_idx]}" "$C_CYA"
+                    fi
                 fi
             done
-            flush_buffer
+            if [[ -n "$FRAME_BUFFER" ]]; then flush_buffer; fi
         done
 
         if $aborted; then
