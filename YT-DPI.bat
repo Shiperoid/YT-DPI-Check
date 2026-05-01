@@ -6,7 +6,7 @@ chcp 65001 >nul
 
 where /q pwsh.exe
 if not errorlevel 1 (
-    set "PS_EXE=powershell.exe"
+    set "PS_EXE=pwsh.exe"
 ) else (
     set "PS_EXE=powershell.exe"
 )
