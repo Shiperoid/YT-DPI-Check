@@ -1,21 +1,4 @@
-<# :
-@echo off
-set "SCRIPT_PATH=%~f0"
-title YT-DPI v2.2.3
-chcp 65001 >nul
-
-where /q pwsh.exe
-if not errorlevel 1 (
-    set "PS_EXE=pwsh.exe"
-) else (
-    set "PS_EXE=powershell.exe"
-)
-
-"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "$s=[System.IO.File]::ReadAllText($env:SCRIPT_PATH,[System.Text.Encoding]::UTF8); & ([ScriptBlock]::Create($s))"
-exit /b
-#>
-
-$script:OriginalFilePath = [System.Environment]::GetEnvironmentVariable("SCRIPT_PATH", "Process")
+﻿$script:OriginalFilePath = [System.Environment]::GetEnvironmentVariable("SCRIPT_PATH", "Process")
 if (-not $script:OriginalFilePath) { $script:OriginalFilePath = $MyInvocation.MyCommand.Path }
 if (-not $script:OriginalFilePath) { $script:OriginalFilePath = $MyInvocation.InvocationName }
 $ErrorActionPreference = "SilentlyContinue"
