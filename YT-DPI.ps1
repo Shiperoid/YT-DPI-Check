@@ -19,7 +19,7 @@ if ($script:AllowInsecureTls) {
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.2.2"   # текущая версия yt-dpi
+$scriptVersion = "2.2.3"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $DEBUG_ENABLED = $false
 $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
