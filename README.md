@@ -1,5 +1,5 @@
 # YT-DPI
-![GitHub Release](https://img.shields.io/badge/release-2.2.2-green)
+![GitHub Release](https://img.shields.io/badge/release-2.2.3-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 [![Поддержать проект](https://img.shields.io/badge/%D0%9F%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C%20%D0%B0%D0%B2%D1%82%D0%BE%D1%80%D0%B0-blue)](https://spasibomir.ru/pay/31732)
@@ -8,6 +8,14 @@
 **YT-DPI** — это профессиональный диагностический фреймворк, предназначенный для детального анализа вмешательства систем DPI и ТСПУ в ваш трафик. В отличие от стандартных инструментов, YT-DPI использует низкоуровневый C#-движок для ручной сборки TLS-пакетов, что позволяет точно определить, на каком этапе и каким методом блокируется доступ.
 
 ![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI/refs/heads/master/img/YT-DPI-v2.2.0.png)
+
+## Что нового в v2.2.3 (кратко)
+
+* **Bash-скрипт (`YT-DPI.sh`):** статус **THROTTLED**, выравнивание с Windows-версией (цели, UI, настройки), лучшая работа с **IPv6** и шириной таблицы, точнее **latency** и плавнее анимация в Git Bash, дружелюбный запуск в **Entware**.
+* **Windows:** версия **2.2.3**, правки стабильности и отображения (в т.ч. кириллица и Unicode в консоли при стандартных настройках).
+* **Проект:** обновления README и мелкие правки геоданных провайдера.
+
+Подробнее — в [CHANGELOG_ru.md](CHANGELOG_ru.md).
 
 ## 🚀 Основные возможности (v2.2.0)
 
