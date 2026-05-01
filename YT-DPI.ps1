@@ -1,13 +1,32 @@
+# Machine-readable NDJSON on stdout (UTF-8), for any host language:
+#   pwsh -NoProfile -File .\YT-DPI.ps1 -JsonStream
+#   pwsh -NoProfile -File .\YT-DPI.ps1 -Headless   # same stream protocol (alias)
+[CmdletBinding()]
+param(
+    [switch]$JsonStream,
+    [switch]$Headless
+)
+$script:JsonStreamMode = [bool]$JsonStream -or [bool]$Headless
+
 $script:OriginalFilePath = [System.Environment]::GetEnvironmentVariable("SCRIPT_PATH", "Process")
 if (-not $script:OriginalFilePath) { $script:OriginalFilePath = $MyInvocation.MyCommand.Path }
 if (-not $script:OriginalFilePath) { $script:OriginalFilePath = $MyInvocation.InvocationName }
 $ErrorActionPreference = "SilentlyContinue"
 $script:CurrentWindowWidth = 0
 $script:CurrentWindowHeight = 0
-[Console]::BufferHeight = [Console]::WindowHeight #потестить с этим параметром отрисовка быстрее но нет прокрутки
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-[Console]::InputEncoding = [System.Text.Encoding]::UTF8
-[Console]::CursorVisible = $false
+if (-not $script:JsonStreamMode) {
+    try {
+        [Console]::BufferHeight = [Console]::WindowHeight #потестить с этим параметром отрисовка быстрее но нет прокрутки
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+        [Console]::CursorVisible = $false
+    } catch {}
+} else {
+    try {
+        $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+    } catch {}
+}
 $ErrorActionPreference = "Continue"
 $DebugPreference = "SilentlyContinue"
 
@@ -61,6 +80,14 @@ function Write-DebugLog($msg, $level = "DEBUG") {
     }
 }
 
+# Одна строка stdout = один JSON-объект (NDJSON), контракт yt-dpi.ndjson/v1
+function Write-YtDpiJsonl {
+    param([Parameter(Mandatory = $true)][hashtable]$Event)
+    $line = ($Event | ConvertTo-Json -Compress -Depth 12)
+    # Write-Output → success stream → реальный stdout при pwsh -File … > file (для [Console]::Out буфер может задерживать строки)
+    Write-Output $line
+}
+
 # ТЕПЕРЬ ПИШЕМ ИНФО-БЛОК (Когда файл уже чистый)
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 try { $osInfo = Get-CimInstance Win32_OperatingSystem } catch { $osInfo = @{Caption="Windows (Legacy)"; Version="Unknown"} }
@@ -77,6 +104,7 @@ Write-DebugLog "============================================================" "I
 Write-DebugLog "Старый лог-файл очищен, начало новой сессии." "INFO"
 # --- ОТКЛЮЧЕНИЕ ВЫДЕЛЕНИЯ МЫШЬЮ ---
 Write-DebugLog "Отключаем QuickEdit..."
+if (-not $script:JsonStreamMode) {
 $code = @"
 using System;
 using System.Runtime.InteropServices;
@@ -104,6 +132,7 @@ if (-not ([System.Management.Automation.PSTypeName]'ConsoleHelper').Type) {
     [ConsoleHelper]::DisableQuickEdit()
     Write-DebugLog "QuickEdit отключён." "INFO"
 }
+} # end JsonStreamMode guard (QuickEdit)
 
 # --- ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
 $global:ProxyConfig = @{ Enabled = $false; Type = "HTTP"; Host = ""; Port = 0; User = ""; Pass = "" }
@@ -245,8 +274,10 @@ function Start-BackgroundNetInfoUpdate {
     } | Out-Null
 }
 
-# Запускаем фоновое обновление при старте
-Start-BackgroundNetInfoUpdate
+# Запускаем фоновое обновление при старте (интерактивный UI; в NDJSON-режиме не нужен)
+if (-not $script:JsonStreamMode) {
+    Start-BackgroundNetInfoUpdate
+}
 
 # Функция проверки готовности фонового обновления
 function Get-ReadyNetInfo {
@@ -3558,49 +3589,66 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     $frameSw = [System.Diagnostics.Stopwatch]::StartNew()
 
     # --- ЭТАП 1 ---
-    while (-not $aborted) {
-        $frameCounter++
-
-        if ([Console]::KeyAvailable) {
-            if ([Console]::ReadKey($true).Key -in @("Q", "Escape")) { $aborted = $true; break }
-        }
-
-        foreach ($j in $jobs) {
-            if (-not $j.DoneInBg -and $j.Handle.IsCompleted) {
-                try {
-                    $raw = $j.PowerShell.EndInvoke($j.Handle)
-                    $res = if ($raw.PSObject -and $raw.Count -gt 1) { $raw[0] } else { $raw }
-                    $res | Add-Member -MemberType NoteProperty -Name "Number" -Value $j.Number -Force
-                    $j.Result = $res; $results[$j.Index] = $res; $j.DoneInBg = $true; $completedTasks++
-                } catch { $j.DoneInBg = $true; $completedTasks++ }
+    if ($script:JsonStreamMode) {
+        while (-not $aborted) {
+            foreach ($j in $jobs) {
+                if (-not $j.DoneInBg -and $j.Handle.IsCompleted) {
+                    try {
+                        $raw = $j.PowerShell.EndInvoke($j.Handle)
+                        $res = if ($raw.PSObject -and $raw.Count -gt 1) { $raw[0] } else { $raw }
+                        $res | Add-Member -MemberType NoteProperty -Name "Number" -Value $j.Number -Force
+                        $j.Result = $res; $results[$j.Index] = $res; $j.DoneInBg = $true; $completedTasks++
+                    } catch { $j.DoneInBg = $true; $completedTasks++ }
+                }
             }
+            if ($completedTasks -ge $Targets.Count) { break }
+            [System.Threading.Thread]::Sleep(25)
         }
+    } else {
+        while (-not $aborted) {
+            $frameCounter++
 
-        for ($i = 0; $i -lt $Targets.Count; $i++) {
-            $j = $jobs[$i]
-            $rowChar = Get-ScanAnim $frameCounter $j.Row
-            $latWave = $waveChars[($frameCounter) % $waveChars.Length].PadRight(7)
+            if ([Console]::KeyAvailable) {
+                if ([Console]::ReadKey($true).Key -in @("Q", "Escape")) { $aborted = $true; break }
+            }
 
-            if ($j.DoneInBg) {
-                $tag = if ($j.Result -and $j.Result.Verdict) { "SCANNING $($rowChar)" } else { " READY " }
-                $statusText = (" "+$tag+" ").PadRight(30)
-            } else {
-                $statusText = " SCANNING $($rowChar)".PadRight(30)
+            foreach ($j in $jobs) {
+                if (-not $j.DoneInBg -and $j.Handle.IsCompleted) {
+                    try {
+                        $raw = $j.PowerShell.EndInvoke($j.Handle)
+                        $res = if ($raw.PSObject -and $raw.Count -gt 1) { $raw[0] } else { $raw }
+                        $res | Add-Member -MemberType NoteProperty -Name "Number" -Value $j.Number -Force
+                        $j.Result = $res; $results[$j.Index] = $res; $j.DoneInBg = $true; $completedTasks++
+                    } catch { $j.DoneInBg = $true; $completedTasks++ }
+                }
             }
-            
-            $combinedFrame = "$($latWave)$($statusText)"
-            
-            $cacheKey = "R$($j.Row)"
-            if ($animationBuffer[$cacheKey] -ne $combinedFrame) {
-                Out-Str $script:DynamicColPos.Lat $j.Row $combinedFrame "Cyan"
-                $animationBuffer[$cacheKey] = $combinedFrame
+
+            for ($i = 0; $i -lt $Targets.Count; $i++) {
+                $j = $jobs[$i]
+                $rowChar = Get-ScanAnim $frameCounter $j.Row
+                $latWave = $waveChars[($frameCounter) % $waveChars.Length].PadRight(7)
+
+                if ($j.DoneInBg) {
+                    $tag = if ($j.Result -and $j.Result.Verdict) { "SCANNING $($rowChar)" } else { " READY " }
+                    $statusText = (" "+$tag+" ").PadRight(30)
+                } else {
+                    $statusText = " SCANNING $($rowChar)".PadRight(30)
+                }
+                
+                $combinedFrame = "$($latWave)$($statusText)"
+                
+                $cacheKey = "R$($j.Row)"
+                if ($animationBuffer[$cacheKey] -ne $combinedFrame) {
+                    Out-Str $script:DynamicColPos.Lat $j.Row $combinedFrame "Cyan"
+                    $animationBuffer[$cacheKey] = $combinedFrame
+                }
             }
+
+            if ($completedTasks -ge $Targets.Count) { break }
+            $sleepMs = $animTargetMs - $frameSw.Elapsed.TotalMilliseconds
+            if ($sleepMs -gt 0.5) { [System.Threading.Thread]::Sleep([int][math]::Floor($sleepMs)) }
+            $frameSw.Restart()
         }
-
-        if ($completedTasks -ge $Targets.Count) { break }
-        $sleepMs = $animTargetMs - $frameSw.Elapsed.TotalMilliseconds
-        if ($sleepMs -gt 0.5) { [System.Threading.Thread]::Sleep([int][math]::Floor($sleepMs)) }
-        $frameSw.Restart()
     }
     
     $pool.Close(); $pool.Dispose()
@@ -3609,49 +3657,63 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
     # --- ЭТАП 2 ---
     if (-not $aborted) {
         $totalCount = $Targets.Count
-        $statusRow = Get-NavRow -count $totalCount
-        $width = [Console]::WindowWidth
-        $frameCounter = 0
-        $frameSw.Restart()
-        
-        for ($i = 0; $i -lt $totalCount; $i++) {
-            $frameCounter++
-            
-            $j = $jobs[$i]
-            $res = $results[$i]
-            
-            if ($null -eq $res) {
-                $res = [PSCustomObject]@{
-                    Target=$j.Target; Number=$j.Number; IP="ERR"; HTTP="---";
-                    T12="---"; T13="---"; Lat="---"; Verdict="TIMEOUT"; Color="Red"
+        if ($script:JsonStreamMode) {
+            for ($i = 0; $i -lt $totalCount; $i++) {
+                $j = $jobs[$i]
+                $res = $results[$i]
+                if ($null -eq $res) {
+                    $res = [PSCustomObject]@{
+                        Target=$j.Target; Number=$j.Number; IP="ERR"; HTTP="---";
+                        T12="---"; T13="---"; Lat="---"; Verdict="TIMEOUT"; Color="Red"
+                    }
+                    $results[$i] = $res
                 }
-                $results[$i] = $res
             }
-
-            Write-ResultLine $j.Row $res
-
-            for ($k = $i + 1; $k -lt $totalCount; $k++) {
-                $j2 = $jobs[$k]
-                $rowChar = Get-ScanAnim $frameCounter $j2.Row
-                $statusText = " SCANNING $($rowChar)".PadRight(30)
-                $combinedFrame = "$($statusText)"
-                Out-Str $script:DynamicColPos.Lat $j2.Row $combinedFrame "Cyan"
-            }
-
-            $progressMsg = "[ REVEAL ] Раскрыто $($i+1) из $totalCount результатов..."
-            Out-Str 2 $statusRow $progressMsg -Fg "Yellow" -Bg "Black"
-            
-            $remaining = $width - (2 + $progressMsg.Length)
-            if ($remaining -gt 0) {
-                Out-Str (2 + $progressMsg.Length) $statusRow (" " * $remaining) "Black"
-            }
-            
-            $sleepMs = $animTargetMs - $frameSw.Elapsed.TotalMilliseconds
-            if ($sleepMs -gt 0.5) { [System.Threading.Thread]::Sleep([int][math]::Floor($sleepMs)) }
+        } else {
+            $statusRow = Get-NavRow -count $totalCount
+            $width = [Console]::WindowWidth
+            $frameCounter = 0
             $frameSw.Restart()
+            
+            for ($i = 0; $i -lt $totalCount; $i++) {
+                $frameCounter++
+                
+                $j = $jobs[$i]
+                $res = $results[$i]
+                
+                if ($null -eq $res) {
+                    $res = [PSCustomObject]@{
+                        Target=$j.Target; Number=$j.Number; IP="ERR"; HTTP="---";
+                        T12="---"; T13="---"; Lat="---"; Verdict="TIMEOUT"; Color="Red"
+                    }
+                    $results[$i] = $res
+                }
+
+                Write-ResultLine $j.Row $res
+
+                for ($k = $i + 1; $k -lt $totalCount; $k++) {
+                    $j2 = $jobs[$k]
+                    $rowChar = Get-ScanAnim $frameCounter $j2.Row
+                    $statusText = " SCANNING $($rowChar)".PadRight(30)
+                    $combinedFrame = "$($statusText)"
+                    Out-Str $script:DynamicColPos.Lat $j2.Row $combinedFrame "Cyan"
+                }
+
+                $progressMsg = "[ REVEAL ] Раскрыто $($i+1) из $totalCount результатов..."
+                Out-Str 2 $statusRow $progressMsg -Fg "Yellow" -Bg "Black"
+                
+                $remaining = $width - (2 + $progressMsg.Length)
+                if ($remaining -gt 0) {
+                    Out-Str (2 + $progressMsg.Length) $statusRow (" " * $remaining) "Black"
+                }
+                
+                $sleepMs = $animTargetMs - $frameSw.Elapsed.TotalMilliseconds
+                if ($sleepMs -gt 0.5) { [System.Threading.Thread]::Sleep([int][math]::Floor($sleepMs)) }
+                $frameSw.Restart()
+            }
+            
+            Draw-StatusBar
         }
-        
-        Draw-StatusBar
     }
 
     # Обновляем NetInfo только при необходимости
@@ -3677,7 +3739,9 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
 
     if ($needUpdate) {
         Write-DebugLog "Запуск синхронного обновления NetInfo..."
-        Draw-StatusBar -Message "[ NET ] Обновление информации о сети..." -Fg "Black" -Bg "Cyan"
+        if (-not $script:JsonStreamMode) {
+            Draw-StatusBar -Message "[ NET ] Обновление информации о сети..." -Fg "Black" -Bg "Cyan"
+        }
         
         $newNetInfo = Get-NetworkInfo
         
@@ -3687,16 +3751,18 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
             $script:Config.NetCache = $newNetInfo
             Save-Config $script:Config
             
-            # Обновляем только строку с ISP в UI (без полной перерисовки)
-            $ispStr = "> ISP / LOC: $($newNetInfo.ISP) ($($newNetInfo.LOC))"
-            Out-Str 65 6 ($ispStr.PadRight(80).Substring(0, 80)) "Magenta"
+            if (-not $script:JsonStreamMode) {
+                # Обновляем только строку с ISP в UI (без полной перерисовки)
+                $ispStr = "> ISP / LOC: $($newNetInfo.ISP) ($($newNetInfo.LOC))"
+                Out-Str 65 6 ($ispStr.PadRight(80).Substring(0, 80)) "Magenta"
+            }
             
             Write-DebugLog "NetInfo обновлён: ISP=$($newNetInfo.ISP), LOC=$($newNetInfo.LOC)"
         } else {
             Write-DebugLog "Новые данные не лучше старых, оставляем текущий ISP: $currentISP"
         }
         
-        Draw-StatusBar
+        if (-not $script:JsonStreamMode) { Draw-StatusBar }
     } else {
         Write-DebugLog "NetInfo актуален, пропускаем обновление (ISP=$currentISP, возраст=${ageMinutes} мин)"
     }
@@ -3734,6 +3800,118 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
 # ====================================================================================
 # ГЛАВНЫЙ ЦИКЛ ПРОГРАММЫ (ENGINE START)
 # ====================================================================================
+
+# --- NDJSON на stdout (одна строка = один JSON); любой язык читает построчно UTF-8 ---
+if ($script:JsonStreamMode) {
+    $script:Config = Load-Config
+    $global:ProxyConfig = $script:Config.Proxy
+    $script:Config.RunCount++
+
+    $script:DnsCache = [hashtable]::Synchronized(@{})
+    if ($script:Config.DnsCache -and $script:Config.DnsCache.PSObject) {
+        foreach ($prop in $script:Config.DnsCache.PSObject.Properties) {
+            if ($prop.MemberType -eq "NoteProperty") { $script:DnsCache[$prop.Name] = $prop.Value }
+        }
+    }
+
+    Write-YtDpiJsonl @{
+        type    = "progress"
+        phase   = "network_lookup"
+        message = "Get-NetworkInfo (ISP/DNS/CDN); may take a short while."
+    }
+
+    $script:NetInfo = Get-NetworkInfo
+    $script:Config.NetCache = $script:NetInfo
+    Save-Config $script:Config
+
+    $script:Targets = Get-Targets -NetInfo $script:NetInfo
+
+    Write-YtDpiJsonl @{
+        type          = "session_start"
+        schema        = "yt-dpi.ndjson/v1"
+        version       = $scriptVersion
+        ps_edition    = $PSVersionTable.PSEdition
+        ps_version    = $PSVersionTable.PSVersion.ToString()
+        os_caption    = "$($osInfo.Caption)"
+        os_version    = "$($osInfo.Version)"
+        is_admin      = [bool]$isAdmin
+        culture       = [System.Globalization.CultureInfo]::CurrentCulture.Name
+        target_count  = $script:Targets.Count
+        proxy_enabled = [bool]$global:ProxyConfig.Enabled
+    }
+
+    $internetAvailable = $false
+    try {
+        $ping = New-Object System.Net.NetworkInformation.Ping
+        $reply = $ping.Send("8.8.8.8", 1000)
+        $internetAvailable = ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success)
+        $ping.Dispose()
+    } catch {
+        try {
+            $tcpTest = New-Object System.Net.Sockets.TcpClient
+            $async = $tcpTest.BeginConnect("8.8.8.8", 53, $null, $null)
+            if ($async.AsyncWaitHandle.WaitOne(1000)) {
+                $tcpTest.EndConnect($async)
+                $internetAvailable = $true
+            }
+            $tcpTest.Close()
+        } catch { $internetAvailable = $false }
+    }
+
+    if (-not $internetAvailable) {
+        Write-YtDpiJsonl @{ type = "error"; code = "no_internet"; message = "No connectivity to 8.8.8.8 (ping/tcp)." }
+        Write-YtDpiJsonl @{
+            type    = "session_end"
+            ok      = $false
+            summary = @{ reason = "no_internet"; target_count = 0; results_count = 0 }
+        }
+        exit 1
+    }
+
+    $scanResult = Start-ScanWithAnimation $script:Targets $global:ProxyConfig
+    $script:LastScanResults = $scanResult.Results
+
+    $idx = 0
+    foreach ($res in $scanResult.Results) {
+        if ($null -eq $res) { $idx++; continue }
+        Write-YtDpiJsonl @{
+            type       = "target_result"
+            index      = $idx
+            host       = "$($res.Target)"
+            ip         = "$($res.IP)"
+            http       = "$($res.HTTP)"
+            tls12      = "$($res.T12)"
+            tls13      = "$($res.T13)"
+            latency    = "$($res.Lat)"
+            verdict    = "$($res.Verdict)"
+            row_number = [int]$res.Number
+        }
+        $idx++
+    }
+
+    $resolved = @($scanResult.Results | Where-Object { $_ })
+    $verdictCounts = @{}
+    foreach ($r in $resolved) {
+        if (-not $r.Verdict) { continue }
+        $v = "$($r.Verdict)"
+        if ($verdictCounts.ContainsKey($v)) { $verdictCounts[$v]++ }
+        else { $verdictCounts[$v] = 1 }
+    }
+
+    Write-YtDpiJsonl @{
+        type    = "session_end"
+        ok      = [bool](-not $scanResult.Aborted)
+        aborted = [bool]$scanResult.Aborted
+        summary = @{
+            target_count = $script:Targets.Count
+            results      = $resolved.Count
+            by_verdict   = $verdictCounts
+        }
+    }
+
+    if ($scanResult.Aborted) { exit 2 }
+    exit 0
+}
 
 # 1. Загрузка конфигурации (Мгновенно)
 $script:Config = Load-Config
