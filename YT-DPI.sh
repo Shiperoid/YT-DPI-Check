@@ -60,7 +60,7 @@ TMP_DIR=$(mktemp -d)
 E=$'\033'
 trap 'cleanup' INT TERM EXIT
 
-SCRIPT_VERSION="2.2.2"
+SCRIPT_VERSION="2.2.3"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/yt-dpi"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 

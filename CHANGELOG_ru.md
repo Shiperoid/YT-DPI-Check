@@ -19,6 +19,13 @@
 
 * Обновления **README**, ссылка на поддержку автора, мелкие исправления геоданных провайдера (ISP).
 
+### Релиз на GitHub (v2.2.3)
+
+В [релизе](https://github.com/Shiperoid/YT-DPI/releases/tag/2.2.3) в **Assets** доступны два файла:
+
+* **`YT-DPI.bat`** — Windows (один файл: обёртка и сценарий PowerShell внутри, как в прошлых релизах).
+* **`YT-DPI.sh`** — Bash для Linux, macOS, Git Bash (Windows) и Entware на роутерах; зависимости и запуск описаны в **README.md** (раздел «Установка»).
+
 **Полный список коммитов:** [2.2.2…2.2.3](https://github.com/Shiperoid/YT-DPI/compare/2.2.2...2.2.3)
 
 ---
