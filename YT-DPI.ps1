@@ -1,4 +1,4 @@
-﻿$script:OriginalFilePath = [System.Environment]::GetEnvironmentVariable("SCRIPT_PATH", "Process")
+$script:OriginalFilePath = [System.Environment]::GetEnvironmentVariable("SCRIPT_PATH", "Process")
 if (-not $script:OriginalFilePath) { $script:OriginalFilePath = $MyInvocation.MyCommand.Path }
 if (-not $script:OriginalFilePath) { $script:OriginalFilePath = $MyInvocation.InvocationName }
 $ErrorActionPreference = "SilentlyContinue"
