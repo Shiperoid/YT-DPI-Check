@@ -10,6 +10,18 @@ pwsh -NoProfile -File .\YT-DPI.ps1 -JsonStream
 
 `-Headless` is an **alias** for the same behaviour (either switch enables the stream).
 
+### Piping from **cmd.exe** (`Select-Object` “not found”)
+
+In **Command Prompt**, everything after `|` is run by **cmd**, not PowerShell — so `Select-Object` is not found (it is a PowerShell cmdlet, not an `.exe`).
+
+Wrap the pipeline in one **`pwsh -Command`** (from the directory that contains `YT-DPI.ps1`):
+
+```bat
+pwsh -NoProfile -Command "& { & '.\YT-DPI.ps1' -JsonStream | Select-Object -First 5 }"
+```
+
+Or open **Windows PowerShell / pwsh** first, then `.\YT-DPI.ps1 -JsonStream | Select-Object -First 5` works as usual.
+
 Interactive UI is **not** used; no keyboard handling during the scan.
 
 ## Exit codes
