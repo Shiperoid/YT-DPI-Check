@@ -1,0 +1,7 @@
+# Нормализация переводов строк в Git (см. git help attributes).
+# Windows-скрипты — только CRLF; shell для Linux/Git Bash — только LF.
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh  text eol=lf

@@ -1,7 +1,12 @@
 <# :
 @echo off
+setlocal
 title Google CDN Debugger
-powershell -NoProfile -ExecutionPolicy Bypass -Command "iex ((Get-Content -LiteralPath '%~f0' -Encoding UTF8) -join [Environment]::NewLine)"
+cd /d "%~dp0"
+chcp 65001 >nul
+where /q pwsh.exe
+if not errorlevel 1 (set "PS_EXE=pwsh.exe") else (set "PS_EXE=powershell.exe")
+"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -Command "iex ((Get-Content -LiteralPath '%~f0' -Encoding UTF8) -join [Environment]::NewLine)"
 pause
 exit /b
 #>
