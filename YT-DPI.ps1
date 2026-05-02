@@ -8,7 +8,34 @@ $script:CurrentWindowHeight = 0
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 [Console]::CursorVisible = $false
+try { [Console]::CursorSize = 1 } catch { }  # минимальная «полоска» курсора, меньше мигания
 $ErrorActionPreference = "Continue"
+
+# Снять возможность тянуть границы окна консоли (стандартный conhost).
+$script:ConsoleResizeLocked = $false
+try {
+    Add-Type -Namespace YtDpi -Name ConsoleWin -MemberDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class ConsoleWin {
+    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)]
+    public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr", SetLastError = true)]
+    public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+    public const int GWL_STYLE = -16;
+    const long WS_THICKFRAME = 0x00040000L;
+    const long WS_MAXIMIZEBOX = 0x00010000L;
+    public static void DisableResizeBorder() {
+        IntPtr h = GetConsoleWindow();
+        if (h == IntPtr.Zero) return;
+        long style = GetWindowLongPtr(h, GWL_STYLE).ToInt64();
+        style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+        SetWindowLongPtr(h, GWL_STYLE, new IntPtr(style));
+    }
+}
+'@ -ErrorAction SilentlyContinue
+} catch { }
 $DebugPreference = "SilentlyContinue"
 
 # Безопасно по умолчанию: не отключаем проверку TLS-сертификатов
@@ -1206,6 +1233,7 @@ function Get-Targets {
 # ====================================================================================
 function Out-Str($x, $y, $str, $color="White", $bg="Black") {
     try {
+        [Console]::CursorVisible = $false
         # Затираем всю область до конца строки
         $clearStr = $str + (" " * [Math]::Max(0, [Console]::WindowWidth - $x - $str.Length))
         [Console]::SetCursorPosition($x, $y)
@@ -1224,6 +1252,8 @@ function Clear-KeyBuffer {
 
 function Update-ConsoleSize {
     try {
+        [Console]::CursorVisible = $false
+        try { [Console]::CursorSize = 1 } catch { }
         [Console]::SetCursorPosition(0, 0)
         $linesNeeded = $script:Targets.Count + 19
         $maxHeight = [Console]::LargestWindowHeight
@@ -1238,9 +1268,10 @@ function Update-ConsoleSize {
         $h = $linesNeeded
         $maxWidth = [Console]::LargestWindowWidth
         if ($w -gt $maxWidth) { $w = $maxWidth }
-        
+
         try {
             if ($h -ne $script:CurrentWindowHeight -or $w -ne $script:CurrentWindowWidth) {
+                [Console]::BufferWidth = $w
                 [Console]::WindowWidth = $w
                 [Console]::WindowHeight = $h
                 [Console]::BufferWidth = $w
@@ -1248,11 +1279,27 @@ function Update-ConsoleSize {
                 $script:CurrentWindowWidth = $w
                 $script:CurrentWindowHeight = $h
             }
+            elseif ([Console]::WindowWidth -ne $w -or [Console]::WindowHeight -ne $h) {
+                # Пользователь мог потянуть границу — вернуть фиксированный макет
+                [Console]::BufferWidth = $w
+                [Console]::WindowWidth = $w
+                [Console]::WindowHeight = $h
+                [Console]::BufferHeight = $h
+                $script:CurrentWindowWidth = $w
+                $script:CurrentWindowHeight = $h
+            }
+            if (-not $script:ConsoleResizeLocked) {
+                try {
+                    [YtDpi.ConsoleWin]::DisableResizeBorder()
+                    $script:ConsoleResizeLocked = $true
+                } catch { }
+            }
         } catch {
             Write-DebugLog "Не удалось изменить размер окна: $_"
         }
     } catch {}
 }
+
 function Get-NavRow {
     param([int]$count)
     # 9 (начало таблицы) + 3 (заголовок и линия) + $count (строки результатов) + 2 (линия и отступ)
@@ -1266,6 +1313,7 @@ function Draw-StatusBar {
         [string]$Bg = "White"
     )
     if (-not $script:Targets) { return }
+    [Console]::CursorVisible = $false
     $row = Get-NavRow -count $script:Targets.Count
     $width = [Console]::WindowWidth
     
@@ -1285,6 +1333,11 @@ function Draw-StatusBar {
 function Draw-UI ($NetInfo, $Targets, $Results, $ClearScreen = $true) {
     # $Results - массив объектов с результатами сканирования (свойство .IP)
     Write-DebugLog "Draw-UI: Targets count=$($Targets.Count), ClearScreen=$ClearScreen"
+
+    [Console]::CursorVisible = $false
+
+    # Исторически в третий параметр ошибочно передавали $true/$NeedClear (bool); у скаляра .Count=1 → ломалась только первая строка таблицы
+    if ($null -ne $Results -and $Results -is [bool]) { $Results = $null }
 
         # --- Динамический расчёт ширины колонки IP ---
     $ipColumnWidth = 16
@@ -1424,6 +1477,7 @@ function Draw-UI ($NetInfo, $Targets, $Results, $ClearScreen = $true) {
     }
 
     Out-Str 0 ($y + 3 + $Targets.Count) ("=" * $width) "DarkCyan"
+    [Console]::CursorVisible = $false
 }
 
 
@@ -1435,6 +1489,7 @@ function Get-ScanAnim($f, $row) {
 function Write-ResultLine($row, $result) {
     if ($row -lt 0 -or $row -ge [Console]::BufferHeight) { return }
 
+    [Console]::CursorVisible = $false
     $pos = if ($script:DynamicColPos) { $script:DynamicColPos } else { $CONST.UI }
     $ipWidth = if ($script:IpColumnWidth) { $script:IpColumnWidth } else { 16 }
 
@@ -2375,14 +2430,28 @@ function Invoke-WebRequestViaProxy($Url, $Method = "GET", $Timeout = $CONST.Time
 $script:GeoCacheFile = Join-Path $script:ConfigDir "geo_cache.json"
 $script:LastGeoUpdate = $null
 
+function Get-GeoProxyKey {
+    if (-not $global:ProxyConfig.Enabled) { return "direct" }
+    $t = $global:ProxyConfig.Type
+    $h = $global:ProxyConfig.Host
+    $p = $global:ProxyConfig.Port
+    return "${t}|${h}:${p}"
+}
+
 function Get-CachedGeoInfo {
     param([int]$MaxAgeHours = 24)
     
+    $wantProxyKey = Get-GeoProxyKey
     if (Test-Path $script:GeoCacheFile) {
         try {
             $cached = Get-Content $script:GeoCacheFile -Raw -Encoding UTF8 | ConvertFrom-Json
             $cacheAge = (Get-Date).Ticks - $cached.TimestampTicks
             $ageHours = [TimeSpan]::FromTicks($cacheAge).TotalHours
+            $cachedKey = if ($cached.ProxyKey) { [string]$cached.ProxyKey } else { "" }
+            if ($cachedKey -ne $wantProxyKey) {
+                Write-DebugLog "GEO кэш отброшен: другой прокси/VPN контекст (кэш='$cachedKey', сейчас='$wantProxyKey')" "INFO"
+                return $null
+            }
             
             if ($ageHours -lt $MaxAgeHours) {
                 Write-DebugLog "Используем GEO кэш (возраст: $([math]::Round($ageHours,1)) часов)" "INFO"
@@ -2408,6 +2477,7 @@ function Save-GeoCache {
     $cacheData = @{
         ISP = $isp
         LOC = $loc
+        ProxyKey = (Get-GeoProxyKey)
         TimestampTicks = (Get-Date).Ticks
         ScriptVersion = $scriptVersion
     }
@@ -2433,7 +2503,25 @@ function Get-NetworkInfo {
         }
     } catch { }
 
-    # 3. ГЕО-ИНФОРМАЦИЯ (синхронно, с таймаутом, несколько провайдеров + прокси)
+    # 2. CDN через redirector (через тот же путь, что и остальной HTTP: $global:ProxyConfig)
+    $cdn = "manifest.googlevideo.com"
+    try {
+        $rnd = [guid]::NewGuid().ToString().Substring(0, 8)
+        $redirectorUrl = "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd"
+        $rawCdn = Invoke-WebRequestViaProxy $redirectorUrl "GET" 3000
+        if ($rawCdn) {
+            $cdnShort = $null
+            if ($rawCdn -match '=>\s+([\w-]+)') { $cdnShort = $matches[1] }
+            if ($cdnShort -and $cdnShort -ne 'r1') {
+                $cdn = "r1.$cdnShort.googlevideo.com"
+            }
+            elseif ($rawCdn -match '=>\s*([a-zA-Z0-9.\-]+\.googlevideo\.com)') {
+                $cdn = $matches[1]
+            }
+        }
+    } catch { Write-DebugLog "CDN redirector: $_" "WARN" }
+
+    # 3. ГЕО-ИНФОРМАЦИЯ (синхронно; запросы идут через Invoke-WebRequestViaProxy = учёт HTTP/SOCKS5 прокси)
     $isp = "Detecting..."
     $loc = "Please wait"
 
@@ -2474,8 +2562,6 @@ function Get-NetworkInfo {
                 GetISP = { param($j) $j.isp }
                 GetLOC = { param($j) "$($j.city), $($j.country_code)" }
             }
-            # ipinfo.io – бесплатно до 50k запросов/мес, можно получить токен и вставить в URL ?token=...
-            # Пока используем без токена, но с ограничениями
             [PSCustomObject]@{
                 Name   = "ipinfo.io"
                 Url    = "https://ipinfo.io/json"
@@ -2485,32 +2571,11 @@ function Get-NetworkInfo {
             }
         )
 
-        # WebClient с возможностью задания прокси (если скрипт его использует)
-        $web = New-Object System.Net.WebClient
-        $web.Headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        $web.Headers["Accept"] = "application/json, text/plain, */*"
-
-        # Если в скрипте есть $script:Proxy, подставляем его
-        if ($script:Proxy) {
-            $web.Proxy = $script:Proxy
-        }
-
         $geoResult = $null
         foreach ($provider in $providers) {
             try {
                 Write-DebugLog "GEO: пробуем $($provider.Name)"
-                $raw = $web.DownloadString($provider.Url)  # синхронно, таймаут у WebClient по умолчанию ~100с, но можно задать через WebRequest ниже
-                # Чтобы был контроль таймаута 2с, используем WebRequest
-                $req = [System.Net.WebRequest]::Create($provider.Url)
-                $req.Timeout = 2000
-                $req.UserAgent = $web.Headers["User-Agent"]
-                $req.Accept = $web.Headers["Accept"]
-                if ($web.Proxy) { $req.Proxy = $web.Proxy }
-                $resp = $req.GetResponse()
-                $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-                $raw = $reader.ReadToEnd()
-                $resp.Close()
-
+                $raw = Invoke-WebRequestViaProxy $provider.Url "GET" 2500
                 if ($raw -match '\{.*\}') {
                     $json = $raw | ConvertFrom-Json
                     if (& $provider.Check $json) {
@@ -2624,6 +2689,9 @@ function Show-SettingsMenu {
                 
                 if ($script:Config.NetCache) {
                     $script:Config.NetCache.ISP = "Loading..."
+                }
+                if (Test-Path $script:GeoCacheFile) {
+                    try { Remove-Item $script:GeoCacheFile -Force -ErrorAction SilentlyContinue } catch {}
                 }
                 
                 Save-Config $script:Config
@@ -3562,7 +3630,11 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
         $frameCounter++
 
         if ([Console]::KeyAvailable) {
-            if ([Console]::ReadKey($true).Key -in @("Q", "Escape")) { $aborted = $true; break }
+            if ([Console]::ReadKey($true).Key -in @("Q", "Escape")) {
+                [Console]::CursorVisible = $false
+                try { [Console]::CursorSize = 1 } catch { }
+                $aborted = $true; break
+            }
         }
 
         foreach ($j in $jobs) {
@@ -3689,7 +3761,9 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig) {
             
             # Обновляем только строку с ISP в UI (без полной перерисовки)
             $ispStr = "> ISP / LOC: $($newNetInfo.ISP) ($($newNetInfo.LOC))"
-            Out-Str 65 6 ($ispStr.PadRight(80).Substring(0, 80)) "Magenta"
+            if ($ispStr.Length -gt 70) { $ispStr = $ispStr.Substring(0, 67) + "..." }
+            [Console]::CursorVisible = $false
+            Out-Str 65 6 ($ispStr.PadRight(70)) "Magenta"
             
             Write-DebugLog "NetInfo обновлён: ISP=$($newNetInfo.ISP), LOC=$($newNetInfo.LOC)"
         } else {
@@ -3765,7 +3839,7 @@ $script:Config.NetCache = $script:NetInfo
 $script:Targets = Get-Targets -NetInfo $script:NetInfo
 
 # Перерисовываем с реальными данными
-Draw-UI $script:NetInfo $script:Targets $true
+Draw-UI $script:NetInfo $script:Targets $null $true
 Draw-StatusBar
 
 
@@ -3805,6 +3879,8 @@ while ($true) {
 
     # Блокирующее чтение клавиши: без опроса KeyAvailable в цикле (CPU в простое ~0)
     $k = [Console]::ReadKey($true).Key
+    [Console]::CursorVisible = $false
+    try { [Console]::CursorSize = 1 } catch { }
         
         if ($k -eq "Q" -or $k -eq "Escape") { 
             Stop-Script 
@@ -3812,7 +3888,7 @@ while ($true) {
         elseif ($k -eq "H") { 
             Write-DebugLog "Показ справки"
             Show-HelpMenu
-            Draw-UI $script:NetInfo $script:Targets $true
+            Draw-UI $script:NetInfo $script:Targets $null $true
             Draw-StatusBar
             Clear-KeyBuffer  # Очищаем после меню
             continue 
@@ -3992,8 +4068,15 @@ while ($true) {
         }
         elseif ($k -eq "P") { 
             Write-DebugLog "Открыто меню прокси"
+            $proxyCtxBefore = Get-GeoProxyKey
             Show-ProxyMenu
-            Draw-UI $script:NetInfo $script:Targets $true
+            if ((Get-GeoProxyKey) -ne $proxyCtxBefore) {
+                $script:NetInfo = Get-NetworkInfo
+                $script:Config.NetCache = $script:NetInfo
+                Save-Config $script:Config
+                $script:Targets = Get-Targets -NetInfo $script:NetInfo
+            }
+            Draw-UI $script:NetInfo $script:Targets $null $true
             Draw-StatusBar
             Clear-KeyBuffer  # Очищаем после меню
             continue 
@@ -4001,7 +4084,7 @@ while ($true) {
         elseif ($k -eq "T") { 
             Write-DebugLog "Тест прокси"
             Test-ProxyConnection
-            Draw-UI $script:NetInfo $script:Targets $true
+            Draw-UI $script:NetInfo $script:Targets $null $true
             Draw-StatusBar
             Clear-KeyBuffer  # Очищаем после теста
             continue 
@@ -4010,7 +4093,7 @@ while ($true) {
         elseif ($k -eq "S") { 
             Write-DebugLog "Открыты настройки"
             Show-SettingsMenu
-            Draw-UI $script:NetInfo $script:Targets $true
+            Draw-UI $script:NetInfo $script:Targets $null $true
             Draw-StatusBar
             continue 
         }
@@ -4234,7 +4317,7 @@ while ($true) {
             $script:Targets = $NewTargets
             
             # === МГНОВЕННАЯ ОТРИСОВКА UI ===
-            Draw-UI $script:NetInfo $script:Targets $NeedClear
+            Draw-UI $script:NetInfo $script:Targets $null $NeedClear
             
 
             # === МГНОВЕННЫЙ СТАРТ СКАНА ===
@@ -4263,7 +4346,9 @@ while ($true) {
                         Save-Config $script:Config
                         # Обновляем только строку с ISP без полной перерисовки
                         $ispStr = "> ISP / LOC: $($newNetInfo.ISP) ($($newNetInfo.LOC))"
-                        Out-Str 65 6 ($ispStr.PadRight(80).Substring(0, 80)) "Magenta"
+                        if ($ispStr.Length -gt 70) { $ispStr = $ispStr.Substring(0, 67) + "..." }
+                        [Console]::CursorVisible = $false
+                        Out-Str 65 6 ($ispStr.PadRight(70)) "Magenta"
                     }
                 }
                 

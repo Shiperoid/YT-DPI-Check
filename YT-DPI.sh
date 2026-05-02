@@ -743,12 +743,13 @@ while true; do
     read -t $READ_TIMEOUT -n 1 -s key
     READ_STATUS=$?
 
-    if [[ "$key" == "q" || "$key" == "Q" || "$key" == $'\e' ]]; then break
-    elif [[ "$key" == "h" || "$key" == "H" ]]; then show_help; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
-    elif [[ "$key" == "s" || "$key" == "S" ]]; then show_settings_menu; get_network_info; rebuild_targets; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
-    elif [[ "$key" == "p" || "$key" == "P" ]]; then show_proxy_menu; get_network_info; rebuild_targets; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
-    elif [[ "$key" == "t" || "$key" == "T" ]]; then test_proxy; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
-    elif [[ "$key" == "r" || "$key" == "R" ]]; then
+    # Горячие клавиши: EN и те же физические клавиши под RU (ЙЦУКЕН).
+    if [[ "$key" == "q" || "$key" == "Q" || "$key" == "й" || "$key" == "Й" || "$key" == $'\e' ]]; then break
+    elif [[ "$key" == "h" || "$key" == "H" || "$key" == "р" || "$key" == "Р" ]]; then show_help; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
+    elif [[ "$key" == "s" || "$key" == "S" || "$key" == "ы" || "$key" == "Ы" ]]; then show_settings_menu; get_network_info; rebuild_targets; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
+    elif [[ "$key" == "p" || "$key" == "P" || "$key" == "з" || "$key" == "З" ]]; then show_proxy_menu; get_network_info; rebuild_targets; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
+    elif [[ "$key" == "t" || "$key" == "T" || "$key" == "е" || "$key" == "Е" ]]; then test_proxy; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
+    elif [[ "$key" == "r" || "$key" == "R" || "$key" == "к" || "$key" == "К" ]]; then
         out_str 2 $UI_Y 121 "[ WAIT ] SAVING REPORT..." "$C_CYA"; flush_buffer
         LOG="YT-DPI_Report.txt"
         {
@@ -802,7 +803,7 @@ while true; do
             if (( f % ANIM_EVERY == 0 )); then should_draw_anim=true; fi
 
             read -t $READ_TIMEOUT -n 1 -s inkey
-            if [[ "$inkey" == "q" || "$inkey" == "Q" || "$inkey" == $'\e' ]]; then aborted=true; break; fi
+            if [[ "$inkey" == "q" || "$inkey" == "Q" || "$inkey" == "й" || "$inkey" == "Й" || "$inkey" == $'\e' ]]; then aborted=true; break; fi
 
             for i in "${!TARGETS[@]}"; do
                 if [ "${JOB_STATE[$i]}" -eq 0 ]; then continue; fi
