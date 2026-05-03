@@ -1,3 +1,6 @@
+# CI runs this file from the PR merge commit (branch protection applies to that run).
+# If you cannot merge a workflow-only fix: push once to the default branch, or
+# temporarily relax required checks / use admin bypass (repo Settings → Branches).
 name: release-gate
 
 on:
@@ -10,15 +13,15 @@ on:
       - '.github/workflows/release-gate.yml'
       - 'CHANGELOG_ru.md'
       - 'README.md'
+  # No paths filter: branch protection requires gate on every PR; path-only triggers
+  # left checks stuck at "Waiting for status to be reported".
   pull_request:
-    paths:
-      - 'YT-DPI.ps1'
-      - 'tools/release-gate.ps1'
-      - 'tools/release-gate-addtype.ps1'
-      - 'tools/smoke-yt-dpi-engines.ps1'
-      - '.github/workflows/release-gate.yml'
-      - 'CHANGELOG_ru.md'
-      - 'README.md'
+    types: [opened, synchronize, reopened, ready_for_review]
+  # Required when merging via a merge queue; otherwise checks stay "Expected".
+  merge_group:
+    types: [checks_requested]
+  # Escape hatch if checks are stuck: Actions → release-gate → Run workflow.
+  workflow_dispatch:
 
 jobs:
   gate:
