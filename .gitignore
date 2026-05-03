@@ -4,3 +4,6 @@
 *.tmp
 *.txt
 TODO.md
+**/bin/
+**/obj/
+artifacts/

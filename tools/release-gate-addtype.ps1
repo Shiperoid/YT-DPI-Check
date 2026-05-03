@@ -1,4 +1,5 @@
-# Compiles TLS + traceroute C# snippets (same as YT-DPI.ps1 embedded types). Used by release-gate.ps1 in a fresh process.
+# Legacy: compiles TLS + traceroute C# from external text files via Add-Type (pre-DLL gate).
+# Current release gate uses release-gate-dll-smoke.ps1 + YT-DPI.Core.dll; keep this script for manual checks.
 param(
     [Parameter(Mandatory)][string]$TlsPath,
     [Parameter(Mandatory)][string]$TracePath,

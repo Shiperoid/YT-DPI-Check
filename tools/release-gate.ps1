@@ -1,4 +1,4 @@
-# Release gate: extract $tlsCode / $traceCode from YT-DPI.ps1; compile + smoke under multiple hosts (PS 5.1 x64/WOW64, pwsh).
+# Release gate: dotnet build YT-DPI.Core (net472 + net8.0), DLL smoke + AST under multiple hosts (PS 5.1 x64/WOW64, pwsh).
 param(
     [string]$RepoRoot = (Split-Path -LiteralPath $PSScriptRoot -Parent)
 )
@@ -27,26 +27,6 @@ function Write-GateHostContext {
     }
     Write-Host "RepoRoot: $RepoRoot"
     Write-Host "========================"
-}
-
-function Get-YtDpiHereStringContent {
-    param(
-        [string[]]$Lines,
-        [string]$StartLineExact
-    )
-    for ($i = 0; $i -lt $Lines.Count; $i++) {
-        if ($Lines[$i] -eq $StartLineExact) {
-            $sb = New-Object System.Text.StringBuilder
-            for ($j = $i + 1; $j -lt $Lines.Count; $j++) {
-                if ($Lines[$j] -eq '"@') {
-                    return $sb.ToString()
-                }
-                [void]$sb.AppendLine($Lines[$j])
-            }
-            throw "Here-string starting at line $($i+1) ($StartLineExact) not closed with ""@."
-        }
-    }
-    throw "Marker not found: $StartLineExact"
 }
 
 function Get-PwshCandidatePaths {
@@ -94,19 +74,18 @@ function Get-PwshCandidatePaths {
     return ,$list.ToArray()
 }
 
-function Invoke-GateHost {
+function Invoke-GateHostDll {
     param(
         [string]$Exe,
         [string]$Label,
-        [string]$TlsFile,
-        [string]$TraceFile,
+        [string]$DllPath,
         [string]$Helper,
         [string]$RepoRootArg
     )
     Write-Host "---- $Label ----"
     $args = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Helper,
-        '-TlsPath', $TlsFile, '-TracePath', $TraceFile
+        '-DllPath', $DllPath
     )
     if ($RepoRootArg) {
         $args += @('-RepoRoot', $RepoRootArg)
@@ -120,37 +99,39 @@ Write-GateHostContext 'release-gate (orchestrator)'
 $ytDpi = Join-Path $RepoRoot 'YT-DPI.ps1'
 if (-not (Test-Path -LiteralPath $ytDpi)) { throw "YT-DPI.ps1 not found: $ytDpi" }
 
-$lines = Get-Content -LiteralPath $ytDpi
-$tlsCode = Get-YtDpiHereStringContent -Lines $lines -StartLineExact '$tlsCode = @"'
-$traceCode = Get-YtDpiHereStringContent -Lines $lines -StartLineExact '$traceCode = @"'
+$coreProj = Join-Path $RepoRoot 'src\YT-DPI.Core\YT-DPI.Core.csproj'
+if (-not (Test-Path -LiteralPath $coreProj)) { throw "YT-DPI.Core.csproj not found: $coreProj" }
 
-$dir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'yt-dpi-release-gate')
-$null = New-Item -ItemType Directory -Path $dir -Force
-$tlsFile = Join-Path $dir 'tls_gate.cs.txt'
-$traceFile = Join-Path $dir 'trace_gate.cs.txt'
-$utf8 = New-Object System.Text.UTF8Encoding $false
-[System.IO.File]::WriteAllText($tlsFile, $tlsCode, $utf8)
-[System.IO.File]::WriteAllText($traceFile, $traceCode, $utf8)
+Write-Host '---- dotnet build YT-DPI.Core (Release) ----'
+dotnet build $coreProj -c Release
+if (-not $?) { throw 'dotnet build YT-DPI.Core failed' }
 
-$helper = Join-Path $PSScriptRoot 'release-gate-addtype.ps1'
-if (-not (Test-Path -LiteralPath $helper)) { throw "Missing $helper" }
-
-# AST + patterns on current host (before any Add-Type in this session)
-$smoke = Join-Path $PSScriptRoot 'smoke-yt-dpi-engines.ps1'
-if (Test-Path -LiteralPath $smoke) {
-    Write-Host "---- smoke-yt-dpi-engines (current host, before Add-Type) ----"
-    & $smoke -RepoRoot $RepoRoot
-    if (-not $?) { throw "smoke-yt-dpi-engines failed" }
+$dll472 = Join-Path $RepoRoot 'src\YT-DPI.Core\bin\Release\net472\YT-DPI.Core.dll'
+$dll8 = Join-Path $RepoRoot 'src\YT-DPI.Core\bin\Release\net8.0\YT-DPI.Core.dll'
+foreach ($p in @($dll472, $dll8)) {
+    if (-not (Test-Path -LiteralPath $p)) { throw "Missing build output: $p" }
 }
 
-# Same process: Add-Type + smoke (same parser/runtime as orchestrator)
-Write-Host "---- Add-Type + smoke (current session) ----"
-& $helper -TlsPath $tlsFile -TracePath $traceFile -RepoRoot $RepoRoot
+$helper = Join-Path $PSScriptRoot 'release-gate-dll-smoke.ps1'
+if (-not (Test-Path -LiteralPath $helper)) { throw "Missing $helper" }
+
+$smoke = Join-Path $PSScriptRoot 'smoke-yt-dpi-engines.ps1'
+if (Test-Path -LiteralPath $smoke) {
+    Write-Host '---- smoke-yt-dpi-engines (current host, before Add-Type) ----'
+    & $smoke -RepoRoot $RepoRoot
+    if (-not $?) { throw 'smoke-yt-dpi-engines failed' }
+}
+
+$gateDll = $dll472
+if ($PSVersionTable.PSEdition -eq 'Core') { $gateDll = $dll8 }
+
+Write-Host "---- DLL smoke (current session, $gateDll) ----"
+& $helper -DllPath $gateDll -RepoRoot $RepoRoot
 
 $winPs = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if (Test-Path -LiteralPath $winPs) {
-    Invoke-GateHost -Exe $winPs -Label 'Windows PowerShell 5.1 x64 (System32)' `
-        -TlsFile $tlsFile -TraceFile $traceFile -Helper $helper -RepoRootArg $RepoRoot
+    Invoke-GateHostDll -Exe $winPs -Label 'Windows PowerShell 5.1 x64 (System32)' `
+        -DllPath $dll472 -Helper $helper -RepoRootArg $RepoRoot
 } else {
     Write-Warning 'powershell.exe not found under System32; skipped.'
 }
@@ -158,13 +139,13 @@ if (Test-Path -LiteralPath $winPs) {
 $wowPs = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
 if (Test-Path -LiteralPath $wowPs) {
     try {
-        Invoke-GateHost -Exe $wowPs -Label 'Windows PowerShell 5.1 WOW64 (32-bit)' `
-            -TlsFile $tlsFile -TraceFile $traceFile -Helper $helper -RepoRootArg $RepoRoot
+        Invoke-GateHostDll -Exe $wowPs -Label 'Windows PowerShell 5.1 WOW64 (32-bit)' `
+            -DllPath $dll472 -Helper $helper -RepoRootArg $RepoRoot
     } catch {
         Write-Warning "WOW64 PowerShell gate skipped or failed: $_"
     }
 } else {
-    Write-Host "---- WOW64 powershell.exe not present (e.g. ARM64 host); skip ----"
+    Write-Host '---- WOW64 powershell.exe not present (e.g. ARM64 host); skip ----'
 }
 
 $pwshList = Get-PwshCandidatePaths
@@ -173,9 +154,13 @@ if ($pwshList.Count -eq 0) {
 } else {
     $n = 0
     foreach ($exe in $pwshList) {
+        if ($exe -match '\\PowerShell\\6\\') {
+            Write-Warning "Skipping PowerShell 6.x host (net8.0 managed DLL not loadable): $exe"
+            continue
+        }
         $n++
-        Invoke-GateHost -Exe $exe -Label "pwsh candidate $n / $($pwshList.Count): $exe" `
-            -TlsFile $tlsFile -TraceFile $traceFile -Helper $helper -RepoRootArg $RepoRoot
+        Invoke-GateHostDll -Exe $exe -Label "pwsh candidate $n / $($pwshList.Count): $exe" `
+            -DllPath $dll8 -Helper $helper -RepoRootArg $RepoRoot
     }
 }
 

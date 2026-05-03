@@ -4,8 +4,10 @@ on:
   push:
     paths:
       - 'YT-DPI.ps1'
+      - 'YT-DPI.sln'
+      - 'src/YT-DPI.Core/**'
       - 'tools/release-gate.ps1'
-      - 'tools/release-gate-addtype.ps1'
+      - 'tools/release-gate-dll-smoke.ps1'
       - 'tools/smoke-yt-dpi-engines.ps1'
       - '.github/workflows/release-gate.yml'
       - 'CHANGELOG_ru.md'
@@ -13,8 +15,10 @@ on:
   pull_request:
     paths:
       - 'YT-DPI.ps1'
+      - 'YT-DPI.sln'
+      - 'src/YT-DPI.Core/**'
       - 'tools/release-gate.ps1'
-      - 'tools/release-gate-addtype.ps1'
+      - 'tools/release-gate-dll-smoke.ps1'
       - 'tools/smoke-yt-dpi-engines.ps1'
       - '.github/workflows/release-gate.yml'
       - 'CHANGELOG_ru.md'
@@ -32,13 +36,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       # PowerShell/setup-powershell is not a resolvable public action; use PSModule/install-powershell.
       - name: Install PowerShell (pwsh on PATH for gate)
         uses: PSModule/install-powershell@v1
         with:
           Version: ${{ matrix.pwsh_version }}
 
-      - name: Run release gate (orchestrator = PS 5.1; children = 5.1 x64/WOW64 + all pwsh candidates)
+      - name: Run release gate (orchestrator = PS 5.1; children = 5.1 x64/WOW64 + pwsh 7+; PS6 skipped)
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'

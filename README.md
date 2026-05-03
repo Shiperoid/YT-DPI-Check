@@ -5,7 +5,7 @@
 [![Поддержать проект](https://img.shields.io/badge/%D0%9F%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C%20%D0%B0%D0%B2%D1%82%D0%BE%D1%80%D0%B0-blue)](https://spasibomir.ru/pay/31732)
 
 
-**YT-DPI** — диагностический инструмент для анализа вмешательства DPI и ТСПУ в доступ к YouTube и связанным доменам. На **Windows** основной код в **`YT-DPI.ps1`** (PowerShell и низкоуровневое ядро на **C#** для сборки TLS на уровне байтов); рядом лежит **тонкий** **`YT-DPI.bat`**, который только запускает `pwsh` / `powershell` и при отсутствии `.ps1` может однократно подтянуть его с GitHub. Редакция **`YT-DPI.sh`** (Bash: Linux, macOS, **Git Bash** на Windows, **Entware** на роутерах) выполняет проверки через `curl` и ту же логику вердиктов, что и Windows-версия.
+**YT-DPI** — диагностический инструмент для анализа вмешательства DPI и ТСПУ в доступ к YouTube и связанным доменам. На **Windows** основной код в **`YT-DPI.ps1`** (оркестрация и UI в PowerShell); сетевые примитивы основного скана и **TLS 1.3** живут в сборке **`YT-DPI.Core.dll`** (namespace **`YtDpi`**): **`TcpTimeouts`** (TCP с таймаутом), **`ProxyThrough`** / **`ProxyTunnelConnection`** (SOCKS5 и HTTP CONNECT с ретраями), **`HttpPortProbe`** (достижимость порта 80 через прокси или по IP), **`Tls12Scripting`** (рукопожатие TLS 1.2 с теми же таймаутами и флагом handshake-timeout для retry в PS), плюс **`TlsScanner`** и **`AdvancedTraceroute`**. Два таргета DLL: **`lib\net472`** (Windows PowerShell 5.1) и **`lib\net8.0`** (**PowerShell Core** / `pwsh`). **PowerShell 6.x** для загрузки этой DLL не поддерживается — нужны **5.1** или **7+**. Рядом лежит **тонкий** **`YT-DPI.bat`**, который только запускает `pwsh` / `powershell` и при отсутствии `.ps1` может однократно подтянуть его с GitHub. Редакция **`YT-DPI.sh`** (Bash: Linux, macOS, **Git Bash** на Windows, **Entware** на роутерах) выполняет проверки через `curl` и ту же логику вердиктов, что и Windows-версия.
 
 ![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI/refs/heads/master/img/YT-DPI-v2.2.3.png)
 
@@ -31,8 +31,9 @@
 
 **Что проверяется (Windows):**
 
-* Извлечение из **`YT-DPI.ps1`** встроенных блоков **`$tlsCode`** / **`$traceCode`** и **`Add-Type`** в отдельных процессах: **PowerShell 5.1 x64** (`System32`), при наличии — **WOW64 (32‑битный `powershell.exe`)**, все найденные **`pwsh.exe`** (стандартный путь `Program Files\PowerShell\…`, плюс тот, что в `PATH`).
-* После успешной компиляции в том же процессе — **[`tools/smoke-yt-dpi-engines.ps1`](tools/smoke-yt-dpi-engines.ps1)** (AST всего `YT-DPI.ps1` + короткие паттерны runspace).
+* **`dotnet build`** проекта **[`src/YT-DPI.Core/YT-DPI.Core.csproj`](src/YT-DPI.Core/YT-DPI.Core.csproj)** (Release, **net472** + **net8.0**).
+* Загрузка **`YT-DPI.Core.dll`** и короткий smoke вызовов TLS/трассировки в отдельных процессах: **PowerShell 5.1 x64** (`System32`, DLL **net472**), при наличии — **WOW64**, все найденные **`pwsh.exe`** (DLL **net8.0**); см. **[`tools/release-gate-dll-smoke.ps1`](tools/release-gate-dll-smoke.ps1)**.
+* После этого — **[`tools/smoke-yt-dpi-engines.ps1`](tools/smoke-yt-dpi-engines.ps1)** (AST всего `YT-DPI.ps1` + короткие паттерны runspace).
 * В лог печатаются **ОС**, **версия PS**, **runtime** — чтобы сопоставлять с жалобами пользователей.
 
 **CI:** матрица **`windows-2022`** и **`windows-latest`** × несколько версий **pwsh** (через [`PSModule/install-powershell`](https://github.com/PSModule/Install-PowerShell)); это **не** потребительские «чистые» Win10/Win11, а ближайший суррогат разных образов и рантаймов.
@@ -50,7 +51,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\release-gate.ps1
 Для **контрибьюторов и сисадминов**, которые смотрят на процесс, а не только на `.bat`:
 
 * В **[Actions](https://github.com/Shiperoid/YT-DPI/actions/workflows/release-gate.yml)** на **push** и **pull request** (по путям в workflow) гоняется тот же **`release-gate`**: матрица **два образа Windows × три версии `pwsh`**, плюс внутри скрипта — **5.1 x64**, **WOW64 5.1** (если есть) и все найденные **`pwsh`**.
-* На **основной ветке** в настройках GitHub включены **ruleset / обязательные status checks** по всем job’ам этой матрицы и запрет **force-push** — в типичный сценарий изменения **`YT-DPI.ps1`** и встроенного C# не попадут без **зелёного CI**.
+* На **основной ветке** в настройках GitHub включены **ruleset / обязательные status checks** по всем job’ам этой матрицы и запрет **force-push** — в типичный сценарий изменения **`YT-DPI.ps1`**, **`YT-DPI.Core`** и скриптов gate не попадут без **зелёного CI**.
 * **Конечному пользователю**, который только скачивает релиз или жмёт **[U]**, ничего из этого настраивать не нужно: это **внутренняя страховка репозитория**, а не новый шаг установки.
 
 ## Установка: какой файл скачать и как запустить
@@ -62,7 +63,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\release-gate.ps1
 
 ### Windows — `YT-DPI.bat` и `YT-DPI.ps1`
 
-1. Скачайте **`YT-DPI.bat`** и **`YT-DPI.ps1`** со [страницы релиза v2.3.1](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.1) (или последнего релиза) и положите **в одну папку**.
+1. Скачайте **`YT-DPI.bat`** и **`YT-DPI.ps1`** со [страницы релиза v2.3.1](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.1) (или последнего релиза) и положите **в одну папку**. Рядом с **`YT-DPI.ps1`** должны лежать **`lib\net472\YT-DPI.Core.dll`** и **`lib\net8.0\YT-DPI.Core.dll`** (типовая поставка из артефакта CI **`core-ps-bundle`** или после локального запуска **`tools/bundle-core-ps.ps1`**). Для разработки из клона репозитория скрипт также ищет DLL в **`src\YT-DPI.Core\bin\Debug|Release\…`**.
 2. Если у вас остался только старый монолитный **`YT-DPI.bat`**, замените его новым лаунчером из релиза и добавьте **`YT-DPI.ps1`** (или удалите старый `.bat` и распакуйте оба файла заново).
 3. По желанию используйте отдельную папку — рядом могут появиться служебные файлы (кэш в `%LOCALAPPDATA%`, отчёт `YT-DPI_Report.txt` при сохранении).
 4. **Права администратора** не обязательны для сканирования; для **Deep Trace** и части сетевых операций они могут понадобиться (скрипт подскажет в справке **[H]**).

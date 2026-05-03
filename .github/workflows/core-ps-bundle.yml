@@ -1,0 +1,37 @@
+name: core-ps-bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths:
+      - 'src/YT-DPI.Core/**'
+      - 'YT-DPI.ps1'
+      - 'YT-DPI.bat'
+      - 'YT-DPI.sln'
+      - 'tools/bundle-core-ps.ps1'
+      - 'docs/bundle-core-ps.md'
+      - '.github/workflows/core-ps-bundle.yml'
+
+jobs:
+  bundle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build bundle layout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'tools\bundle-core-ps.ps1') -RepoRoot $env:GITHUB_WORKSPACE -Configuration Release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yt-dpi-core-ps
+          path: artifacts/yt-dpi-core-ps/

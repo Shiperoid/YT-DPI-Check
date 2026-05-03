@@ -1,0 +1,12 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net472;net8.0</TargetFrameworks>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>YT_DPI.Core</RootNamespace>
+    <AssemblyName>YT-DPI.Core</AssemblyName>
+    <Deterministic>true</Deterministic>
+    <NoWarn>$(NoWarn);CA2022</NoWarn>
+  </PropertyGroup>
+</Project>

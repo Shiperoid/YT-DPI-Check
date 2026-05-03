@@ -46,6 +46,79 @@ $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
 $script:DebugLogMutexName = "Global\YT-DPI-Debug-Mutex"
 $DebugLogMutex = New-Object System.Threading.Mutex($false, $script:DebugLogMutexName)
 
+# --- КОНСТАНТЫ (до любого Write-DebugLog и Start-Job) ---
+$SCRIPT:CONST = @{
+    TimeoutMs    = 700       # Снижено с 1500
+    ProxyTimeout = 1200      # Снижено с 2500
+    HttpPort     = 80
+    HttpsPort    = 443
+    Tls13Proto   = 12288
+    AnimFps      = 30
+    ScanPoolMinWorkers    = 8
+    ScanPoolDirectMax     = 24
+    ScanPoolProxyMax      = 12
+    ScanPoolCpuMultiplier = 3
+    Mutex = @{ WaitMs = 7000 }   # Снижено с 15000
+    Scan = @{
+        HttpDirectCapMs       = 600    # Снижено с 1200
+        TlsFastMsDirect       = 800    # Снижено с 1600
+        TlsFastMsProxy        = 1200   # Снижено с 2200
+        TlsRetryMsDirect      = 1300   # Снижено с 2600
+        TlsRetryMsProxyFloor  = 1300   # Снижено с 2600
+    }
+    NetInfo = @{
+        WebFastDefaultMs      = 1000   # Снижено с 3000
+        RedirectorMs          = 700    # Снижено с 2000
+        GeoPerRequestMs       = 500    # Снижено с 1500
+        Ipv6ProbeWaitMs       = 350    # Снижено с 1000
+        RedirectorRequestMs   = 700    # Снижено с 3000
+    }
+    Traceroute = @{
+        DefaultTimeoutSec       = 2   # Снижено с 5
+        HopTcpTlsTimeoutSec     = 1   # Снижено с 2
+        HopTlsCapMs             = 1200   # Снижено с 3000
+        HopTcpCapMs             = 800    # Снижено с 2000
+        TracertHopWaitMs        = 120    # Снижено с 350
+        TraceProcessKillMsBase  = 5000    # Снижено с 12000
+        TraceProcessKillMsPerHop = 400    # Снижено с 1400
+        WaitForExitAfterKillMs  = 400     # Снижено с 1000
+        TcpPollSliceMs          = 40      # Снижено с 90
+        UdpRecvPollMs           = 300     # Снижено с 1000
+    }
+    ProxySelfTest = @{
+        DetectTcpConnectMs = 700     # Снижено с 2000
+        DetectStreamRwMs   = 800     # Снижено с 2000
+        QuickTunnelMs      = 2000    # Снижено с 5000
+        TcpToProxyMs       = 1500    # Снижено с 4000
+        Tunnel443Ms        = 2000    # Снижено с 7000
+        HttpGstaticMs      = 1300    # Снижено с 5000
+        HttpSlowWarnMs     = 1500    # Снижено с 4800
+        PauseAfterTcpMs    = 60      # Снижено с 120
+        PauseAfterTunnelMs = 60      # Снижено с 150
+        PauseAfterHttpMs   = 80      # Снижено с 200
+    }
+    UiScan = @{
+        StatusBarThrottleCollectMs = 90   # Снижено с 240
+        StatusBarThrottleRevealMs  = 110  # Снижено с 280
+        # FPS только для этапа «раскрытия» таблицы после сбора (не влияет на сетевые проверки)
+        RevealAnimFps            = 48
+    }
+    Internet = @{
+        PingTimeoutMs    = 400    # Снижено с 1000
+        TcpFallbackMs    = 400    # Снижено с 1000
+    }
+    HttpMisc = @{
+        GitHubReleaseApiMs      = 1500   # Снижено с 5000
+        RedirectorViaProxyMs    = 1200   # Снижено с 3000
+        GeoProviderViaProxyMs   = 500    # Снижено с 1500
+    }
+    UI = @{
+        Num = 1; Dom = 6; IP = 50; HTTP = 68; T12 = 76; T13 = 86; Lat = 96; Ver = 106
+    }
+    NavStr = "[READY] [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [D] TRACE | [U] UPDATE | [R] REPORT | [H] HELP | [Q] QUIT"
+}
+$CONST = $SCRIPT:CONST
+
 # ===== ЛОГИРОВАНИЕ И РОТАЦИЯ =====
 $maxLogSizeBytes = 5 * 1024 * 1024
 if (Test-Path $DebugLogFile) {
@@ -107,7 +180,7 @@ function Write-DebugLog($msg, $level = "DEBUG") {
     $line = "[$(Get-Date -Format 'HH:mm:ss.fff')] [$level] $msg`r`n"
     $got = $false
     try {
-        try { $got = $DebugLogMutex.WaitOne(15000) } catch { $got = $false }
+        try { $got = $DebugLogMutex.WaitOne([int]$SCRIPT:CONST.Mutex.WaitMs) } catch { $got = $false }
         if (-not $got) { return }
         [System.IO.File]::AppendAllText($DebugLogFile, $line, [System.Text.Encoding]::UTF8)
     } catch { }
@@ -201,41 +274,41 @@ Initialize-ConsoleHelper
 
 # --- ГЛОБАЛЬНЫЕ НАСТРОЙКИ ---
 $global:ProxyConfig = @{ Enabled = $false; Type = "HTTP"; Host = ""; Port = 0; User = ""; Pass = "" }
-$script:DnsCache = @{}
-$script:DnsCacheLock = New-Object System.Threading.Mutex($false, "Global\YT-DPI-DNS-Cache")
 $script:NetInfo = $null
 $script:Targets = $null
 $script:LastScanResults = @()
 $script:DynamicColPos = $null
 $script:IpColumnWidth = 16
 $script:UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
-# --- КОНСТАНТЫ ---
-$SCRIPT:CONST = @{
-    TimeoutMs    = 1500
-    ProxyTimeout = 2500
-    HttpPort     = 80
-    HttpsPort    = 443
-    Tls13Proto   = 12288
-    AnimFps      = 30
-    UI = @{
-        Num = 1      # Номер домена (новая колонка)
-        Dom = 6      # TARGET DOMAIN (было 2, теперь 6)
-        IP  = 50     # IP ADDRESS (было 45, сдвинуто на 5)
-        HTTP = 68    # HTTP (было 63)
-        T12 = 76     # TLS 1.2 (было 71)
-        T13 = 86     # TLS 1.3 (было 81)
-        Lat = 96     # LAT (было 91)
-        Ver = 106    # RESULT (было 99)
-    }
-        NavStr = "[READY] [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [D] TRACE | [U] UPDATE | [R] REPORT | [H] HELP | [Q] QUIT"
-}
 Write-DebugLog "Константы инициализированы."
+
+function Get-ScanRecommendedWorkerCap {
+    param([switch]$ProxyEnabled, [switch]$IgnoreConfigOverrides)
+    $c = $SCRIPT:CONST
+    $cpu = [Environment]::ProcessorCount
+    $directAuto = [Math]::Max([int]$c.ScanPoolMinWorkers, [Math]::Min([int]$c.ScanPoolDirectMax, $cpu * [int]$c.ScanPoolCpuMultiplier))
+    $proxyAuto = [Math]::Min($directAuto, [int]$c.ScanPoolProxyMax)
+    $cfgD = 0
+    $cfgP = 0
+    if ($script:Config) {
+        try { if ($null -ne $script:Config.ScanConcurrencyDirect) { $cfgD = [int]$script:Config.ScanConcurrencyDirect } } catch { }
+        try { if ($null -ne $script:Config.ScanConcurrencyProxy) { $cfgP = [int]$script:Config.ScanConcurrencyProxy } } catch { }
+    }
+    if ($IgnoreConfigOverrides) {
+        $cap = if ($ProxyEnabled) { $proxyAuto } else { $directAuto }
+    } elseif ($ProxyEnabled) {
+        $cap = if ($cfgP -gt 0) { $cfgP } else { $proxyAuto }
+    } else {
+        $cap = if ($cfgD -gt 0) { $cfgD } else { $directAuto }
+    }
+    if ($cap -lt 1) { return 1 }
+    return [int]$cap
+}
 
 # --- ИНИЦИАЛИЗАЦИЯ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 $script:Config = $null
 $script:NetInfo = $null
-$script:DnsCache = [hashtable]::Synchronized(@{}) # Сразу делаем его потокобезопасным
+$script:DnsCache = [System.Collections.Concurrent.ConcurrentDictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $script:LastScanResults = @()
 # Уже был хотя бы один завершённый скан (для частичного «водопада» и отключения idle-арта)
 $script:HasCompletedScan = $false
@@ -256,8 +329,13 @@ function Start-BackgroundNetInfoUpdate {
         try { Remove-Job $existing -Force -ErrorAction SilentlyContinue } catch {}
     }
 
-    Start-Job -Name "NetInfoUpdater" -ScriptBlock {
-        function Invoke-WebRequestFast($url, $timeout = 3000) {
+    $netSnap = @{}
+    foreach ($k in $SCRIPT:CONST.NetInfo.Keys) { $netSnap[$k] = $SCRIPT:CONST.NetInfo[$k] }
+
+    Start-Job -Name "NetInfoUpdater" -ArgumentList $netSnap -ScriptBlock {
+        param([hashtable]$NetConst)
+
+        function Invoke-WebRequestFast($url, $timeout = $NetConst.WebFastDefaultMs) {
             try {
                 $req = [System.Net.WebRequest]::Create($url)
                 $req.Timeout = $timeout
@@ -288,7 +366,7 @@ function Start-BackgroundNetInfoUpdate {
         # CDN через redirector
         try {
             $rnd = [guid]::NewGuid().ToString().Substring(0,8)
-            $raw = Invoke-WebRequestFast "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd" 2000
+            $raw = Invoke-WebRequestFast "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd" $NetConst.RedirectorMs
             $cdnShort = $null
             if ($raw -match '=>\s+([\w-]+)') {
                 $cdnShort = $matches[1]
@@ -308,7 +386,7 @@ function Start-BackgroundNetInfoUpdate {
             "https://ipapi.co/json/"
         )
         foreach ($url in $geoUrls) {
-            $raw = Invoke-WebRequestFast $url 1500
+            $raw = Invoke-WebRequestFast $url $NetConst.GeoPerRequestMs
             if ($raw -match '\{.*\}') {
                 try {
                     $data = $raw | ConvertFrom-Json
@@ -331,7 +409,7 @@ function Start-BackgroundNetInfoUpdate {
         try {
             $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
             $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
-            if ($a.AsyncWaitHandle.WaitOne(1000)) {
+            if ($a.AsyncWaitHandle.WaitOne($NetConst.Ipv6ProbeWaitMs)) {
                 $t.EndConnect($a)
                 $result.HasIPv6 = $true
             }
@@ -371,152 +449,67 @@ function Get-ReadyNetInfo {
 }
 
 
-# --- НИЗКОУРОВНЕВЫЙ TLS ДВИЖОК (C#) ---
-$tlsCode = @"
-using System;
-using System.Collections.Generic;
-using System.Net.Sockets;
-using System.Text;
-using System.Linq;
-using System.Security.Cryptography;
+# --- YT-DPI.Core.dll (net472 + Windows PowerShell 5.1, net8.0 + PowerShell Core) ---
+$script:YtDpiCoreLoaded = $false
+$script:YtDpiCoreLoadFailed = $false
 
-public class TlsScanner {
-    private static void FillRandomBytes(byte[] buffer) {
-        using (var rng = RandomNumberGenerator.Create()) {
-            rng.GetBytes(buffer);
+function Get-YtDpiScriptRoot {
+    if ($PSScriptRoot) { return $PSScriptRoot }
+    try {
+        if ($script:OriginalFilePath) {
+            return (Split-Path -Parent -LiteralPath $script:OriginalFilePath)
         }
+    } catch { }
+    return (Get-Location).Path
+}
+
+function Get-YtDpiCoreDllPath {
+    $override = [System.Environment]::GetEnvironmentVariable('YT_DPI_CORE_DLL', 'Process')
+    if ($override -and (Test-Path -LiteralPath $override)) { return $override }
+
+    $root = Get-YtDpiScriptRoot
+    $tf = if ($PSVersionTable.PSEdition -eq 'Core') { 'net8.0' } else { 'net472' }
+    $rel = [System.IO.Path]::Combine('lib', $tf, 'YT-DPI.Core.dll')
+    $p = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($root, $rel))
+    if (Test-Path -LiteralPath $p) { return $p }
+
+    $debugPath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($root, [System.IO.Path]::Combine('src', 'YT-DPI.Core', 'bin', 'Debug', $tf, 'YT-DPI.Core.dll')))
+    if (Test-Path -LiteralPath $debugPath) { return $debugPath }
+
+    $releasePath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($root, [System.IO.Path]::Combine('src', 'YT-DPI.Core', 'bin', 'Release', $tf, 'YT-DPI.Core.dll')))
+    if (Test-Path -LiteralPath $releasePath) { return $releasePath }
+
+    return $p
+}
+
+function Ensure-YtDpiCoreLoaded {
+    if ($script:YtDpiCoreLoaded) { return $true }
+    if ($script:YtDpiCoreLoadFailed) { return $false }
+
+    $path = Get-YtDpiCoreDllPath
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-DebugLog "YT-DPI.Core.dll не найден: $path (см. README: lib\net472 и lib\net8.0 рядом с YT-DPI.ps1)" "ERROR"
+        $script:YtDpiCoreLoadFailed = $true
+        return $false
     }
-    public static string TestT13(string targetIp, string host, string proxyHost, int proxyPort, string user, string pass, int timeout) {
-        try {
-            using (TcpClient tcp = new TcpClient()) {
-                string connectHost = string.IsNullOrEmpty(proxyHost) ? targetIp : proxyHost;
-                int connectPort = string.IsNullOrEmpty(proxyHost) ? 443 : proxyPort;
-
-                var ar = tcp.BeginConnect(connectHost, connectPort, null, null);
-                if (!ar.AsyncWaitHandle.WaitOne(timeout)) return "DRP";
-                tcp.EndConnect(ar);
-
-                NetworkStream stream = tcp.GetStream();
-                stream.ReadTimeout = timeout;
-                stream.WriteTimeout = timeout;
-
-                if (!string.IsNullOrEmpty(proxyHost)) {
-                    byte[] greeting = new byte[] { 0x05, 0x01, 0x00 };
-                    stream.Write(greeting, 0, greeting.Length);
-                    byte[] authResp = new byte[2];
-                    stream.Read(authResp, 0, 2);
-
-                    byte[] connectReq = BuildSocksConnect(host, 443);
-                    stream.Write(connectReq, 0, connectReq.Length);
-                    byte[] connResp = new byte[10];
-                    stream.Read(connResp, 0, 10);
-                    if (connResp[1] != 0x00) return "PRX_ERR";
-                }
-
-                // Шлем исправленный пакет
-                byte[] hello = BuildModernHello(host);
-                stream.Write(hello, 0, hello.Length);
-
-                byte[] header = new byte[5];
-                int read = 0;
-                try {
-                    read = stream.Read(header, 0, 5);
-                } catch (System.IO.IOException ex) {
-                    string m = ex.Message.ToLower();
-                    if (m.Contains("reset") || m.Contains("сброс")) return "RST";
-                    return "DRP";
-                }
-
-                if (read < 5) return "DRP";
-
-                // 0x16 = Handshake (Server Hello) - Успех
-                if (header[0] == 0x16) return "OK";
-
-                // 0x15 = TLS Alert. Если сервер прислал это, значит пакет валиден,
-                // но серверу что-то не нравится. Для теста доступности это "OK" (сервер ответил).
-                if (header[0] == 0x15) return "OK";
-
-                return "DRP";
-            }
-        } catch (Exception ex) {
-            string m = ex.Message.ToLower();
-            if (m.Contains("reset") || m.Contains("closed")) return "RST";
-            return "DRP";
-        }
-    }
-
-    private static byte[] BuildSocksConnect(string host, int port) {
-        List<byte> req = new List<byte> { 0x05, 0x01, 0x00, 0x03 };
-        byte[] h = Encoding.ASCII.GetBytes(host);
-        req.Add((byte)h.Length);
-        req.AddRange(h);
-        req.Add((byte)(port >> 8));
-        req.Add((byte)(port & 0xFF));
-        return req.ToArray();
-    }
-
-    private static byte[] BuildModernHello(string host) {
-        List<byte> body = new List<byte>();
-        body.AddRange(new byte[] { 0x03, 0x03 }); // TLS 1.2 (for compatibility header)
-
-        byte[] random = new byte[32];
-        FillRandomBytes(random);
-        body.AddRange(random);
-
-        body.Add(0x00); // Session ID len
-        body.AddRange(new byte[] { 0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03 }); // Ciphers: TLS_AES_128_GCM_SHA256 и др.
-        body.Add(0x20); // Length 32
-        byte[] sessId = new byte[32]; FillRandomBytes(sessId);
-        body.AddRange(sessId);
-
-        List<byte> exts = new List<byte>();
-
-        // 1. SNI
-        byte[] h = Encoding.ASCII.GetBytes(host);
-        exts.AddRange(new byte[] { 0x00, 0x00 }); // Type SNI
-        int sniLen = h.Length + 5;
-        exts.Add((byte)(sniLen >> 8)); exts.Add((byte)(sniLen & 0xFF));
-        exts.Add((byte)((h.Length + 3) >> 8)); exts.Add((byte)((h.Length + 3) & 0xFF));
-        exts.Add(0x00); // Name type: host_name
-        exts.Add((byte)(h.Length >> 8)); exts.Add((byte)(h.Length & 0xFF));
-        exts.AddRange(h);
-
-        // 2. Extended Master Secret (0x0017)
-        exts.AddRange(new byte[] { 0x00, 0x17, 0x00, 0x00 });
-
-        // 3. Supported Groups (0x000a) - x25519
-        exts.AddRange(new byte[] { 0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x00, 0x1d });
-
-        // 4. Signature Algorithms (0x000d) - КРИТИЧНО ДЛЯ GOOGLE
-        // ecdsa_secp256r1_sha256, rsa_pss_rsae_sha256, rsa_pkcs1_sha256
-        exts.AddRange(new byte[] { 0x00, 0x0d, 0x00, 0x08, 0x00, 0x06, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01 });
-
-        // 5. Supported Versions (0x002b) - TLS 1.3
-        exts.AddRange(new byte[] { 0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04 });
-
-        // 6. PSK Key Exchange Modes (0x002d) - КРИТИЧНО ДЛЯ TLS 1.3
-        exts.AddRange(new byte[] { 0x00, 0x2d, 0x00, 0x02, 0x01, 0x01 });
-
-        // 7. Key Share (0x0033)
-        exts.AddRange(new byte[] { 0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20 });
-        byte[] key = new byte[32]; FillRandomBytes(key);
-        exts.AddRange(key);
-
-        body.Add((byte)(exts.Count >> 8)); body.Add((byte)(exts.Count & 0xFF));
-        body.AddRange(exts);
-
-        List<byte> pkt = new List<byte> { 0x16, 0x03, 0x01 }; // Record Header
-        pkt.Add((byte)(body.Count >> 8)); pkt.Add((byte)(body.Count & 0xFF));
-        pkt.AddRange(body);
-        return pkt.ToArray();
+    try {
+        Add-Type -Path $path -ErrorAction Stop
+        $script:YtDpiCoreLoaded = $true
+        Write-DebugLog "YT-DPI.Core.dll загружен: $path" "INFO"
+        return $true
+    } catch {
+        $script:YtDpiCoreLoadFailed = $true
+        Write-DebugLog "Ошибка загрузки YT-DPI.Core.dll: $_" "ERROR"
+        return $false
     }
 }
-"@
+
 $script:TlsScannerLoaded = $false
 $script:TlsScannerLoadFailed = $false
 
 function Test-TlsScannerReady {
-    if ($script:TlsScannerLoaded -or ([System.Management.Automation.PSTypeName]'TlsScanner').Type) {
+    $t = 'YtDpi.TlsScanner' -as [type]
+    if ($t) {
         $script:TlsScannerLoaded = $true
         return $true
     }
@@ -527,557 +520,25 @@ function Ensure-TlsScannerLoaded {
     if (Test-TlsScannerReady) { return $true }
     if ($script:TlsScannerLoadFailed) { return $false }
 
-    try {
-        Add-Type -TypeDefinition $tlsCode -ErrorAction Stop
-        $script:TlsScannerLoaded = $true
-        Write-DebugLog "TLS C# компонент загружен" "INFO"
-        return $true
-    } catch {
+    if (-not (Ensure-YtDpiCoreLoaded)) {
         $script:TlsScannerLoadFailed = $true
-        Write-DebugLog "Ошибка загрузки TLS C#: $_" "ERROR"
         return $false
     }
+    if (Test-TlsScannerReady) {
+        Write-DebugLog "TLS (YT-DPI.Core) готов" "INFO"
+        return $true
+    }
+    $script:TlsScannerLoadFailed = $true
+    Write-DebugLog "Тип YtDpi.TlsScanner не найден после загрузки DLL" "ERROR"
+    return $false
 }
-
-# Компилируем C# код traceroute
-$traceCode = @"
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
-using System.Net.NetworkInformation;
-using System.Net.Sockets;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
-
-/// <summary>
-/// Не использовать System.Progress: в pw7 без SynchronizationContext колбэки идут в ThreadPool,
-/// а обновление консоли из фонового потока приводит к аварийному завершению процесса.
-/// </summary>
-public sealed class SynchronousProgress : IProgress<string>
-{
-    private readonly Action<string> _handler;
-    public SynchronousProgress(Action<string> handler) { _handler = handler; }
-    public void Report(string value) { if (_handler != null) { _handler.Invoke(value); } }
-}
-
-public class AdvancedTraceroute
-{
-    private static readonly object s_synRngLock = new object();
-    private static readonly Random s_synRng = new Random();
-
-    private static int NextBoundedInt(int minInclusive, int maxExclusive)
-    {
-        lock (s_synRngLock) { return s_synRng.Next(minInclusive, maxExclusive); }
-    }
-
-    // ========== ПУБЛИЧНЫЕ МЕТОДЫ ==========
-
-    /// <summary>
-    /// Выполняет трассировку с автоопределением лучшего метода
-    /// </summary>
-    public static List<TraceHop> Trace(string target, int maxHops = 30, int timeoutMs = 3000,
-                                       TraceMethod method = TraceMethod.Auto, IProgress<string> progress = null)
-    {
-        // Разрешаем DNS
-        if (progress != null) { progress.Report(string.Format("[*] Разрешение DNS: {0}", target)); }
-        var targetIp = ResolveTarget(target);
-        if (targetIp == null)
-        {
-            if (progress != null) { progress.Report(string.Format("[!] Не удалось разрешить DNS: {0}", target)); }
-            return new List<TraceHop>();
-        }
-        if (progress != null) { progress.Report(string.Format("[+] Целевой IP: {0}", targetIp)); }
-
-        // Автоопределение метода
-        if (method == TraceMethod.Auto)
-        {
-            method = DetectBestMethod(targetIp);
-            if (progress != null) { progress.Report(string.Format("[*] Выбран метод: {0}", method)); }
-        }
-
-        // Выполняем трассировку
-        switch (method)
-        {
-            case TraceMethod.Icmp:
-                return TraceWithIcmp(targetIp, maxHops, timeoutMs, progress);
-            case TraceMethod.TcpSyn:
-                return TraceWithTcpSyn(targetIp, 443, maxHops, timeoutMs, progress);
-            case TraceMethod.Udp:
-                return TraceWithUdp(targetIp, 33434, maxHops, timeoutMs, progress);
-            default:
-                return TraceWithIcmp(targetIp, maxHops, timeoutMs, progress);
-        }
-    }
-
-    /// <summary>
-    /// Быстрая трассировка TCP SYN (обходит ICMP блокировки)
-    /// </summary>
-    public static List<TraceHop> QuickTcpTrace(string target, int port = 443, int maxHops = 15)
-    {
-        return TraceWithTcpSyn(ResolveTarget(target), port, maxHops, 2000, null);
-    }
-
-    // ========== ВНУТРЕННИЕ МЕТОДЫ ==========
-
-    private static IPAddress ResolveTarget(string target)
-    {
-        try
-        {
-            var addresses = Dns.GetHostAddresses(target);
-            return addresses.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
-                   ?? addresses.FirstOrDefault();
-        }
-        catch { return null; }
-    }
-
-    public class NetworkInfoFast {
-    public static dynamic GetCachedInfo() {
-        var result = new Dictionary<string, object>();
-
-        // DNS (быстро)
-        try {
-            var hostName = Dns.GetHostName();
-            var ips = Dns.GetHostAddresses(hostName);
-            var dns = ips.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork);
-            result["DNS"] = (dns != null ? dns.ToString() : null) ?? "UNKNOWN";
-        } catch { result["DNS"] = "UNKNOWN"; }
-
-        // CDN через DNS (быстро, без HTTP)
-        try {
-            var cdnIps = Dns.GetHostAddresses("redirector.googlevideo.com");
-            result["CDN"] = "redirector.googlevideo.com (DNS resolved)";
-        } catch { result["CDN"] = "manifest.googlevideo.com"; }
-
-        result["ISP"] = "Detected via C#";
-        result["LOC"] = "Fast mode";
-        result["HasIPv6"] = Socket.OSSupportsIPv6;
-        result["TimestampTicks"] = DateTime.Now.Ticks;
-
-        return result;
-    }
-}
-
-    private static TraceMethod DetectBestMethod(IPAddress targetIp)
-    {
-        // Пробуем ICMP (быстрый тест)
-        using (var ping = new Ping())
-        {
-            try
-            {
-                var reply = ping.Send(targetIp, 1000);
-                if (reply != null && reply.Status == IPStatus.Success)
-                    return TraceMethod.Icmp;
-            }
-            catch { }
-        }
-
-        // Если ICMP заблокирован, пробуем TCP
-        using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.Tcp))
-        {
-            try
-            {
-                socket.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, 1);
-                return TraceMethod.TcpSyn;
-            }
-            catch (SocketException)
-            {
-                // Raw sockets требуют админских прав
-                return TraceMethod.Udp; // UDP работает без админа
-            }
-        }
-    }
-
-    // SocketError.TtlExpired отсутствует в public enum .NET 5+ (см. System.Net.Sockets.SocketError) — только эвристика по тексту.
-    private static bool LooksLikeTracerouteTtlExpired(SocketException ex)
-    {
-        if (ex == null) return false;
-        string m = ex.Message ?? string.Empty;
-        return m.IndexOf("TTL", StringComparison.OrdinalIgnoreCase) >= 0
-            || m.IndexOf("time to live", StringComparison.OrdinalIgnoreCase) >= 0;
-    }
-
-    // ========== ICMP TRACEROUTE (ТРЕБУЕТ АДМИНА) ==========
-
-    private static List<TraceHop> TraceWithIcmp(IPAddress targetIp, int maxHops, int timeoutMs,
-                                                 IProgress<string> progress)
-    {
-        var results = new List<TraceHop>();
-        using (var ping = new Ping())
-        {
-            var options = new PingOptions(1, true);
-            var buffer = new byte[32];
-
-            for (int ttl = 1; ttl <= maxHops; ttl++)
-            {
-                if (progress != null) { progress.Report(string.Format("[TRACE] Hop {0}/{1} (ICMP)...", ttl, maxHops)); }
-                options.Ttl = ttl;
-
-                try
-                {
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    var reply = ping.Send(targetIp, timeoutMs, buffer, options);
-                    sw.Stop();
-
-                    var hop = new TraceHop
-                    {
-                        HopNumber = ttl,
-                        IP = (reply.Address != null ? reply.Address.ToString() : null) ?? "*",
-                        RttMs = (int)sw.ElapsedMilliseconds,
-                        Status = MapIcmpStatus(reply.Status)
-                    };
-
-                    results.Add(hop);
-                    if (progress != null) { progress.Report(string.Format("[OK] Hop {0}: {1} - {2} ({3}ms)", ttl, hop.IP, hop.Status, hop.RttMs)); }
-
-                    if (reply.Status == IPStatus.Success ||
-                        (reply.Address != null && reply.Address.Equals(targetIp)))
-                        break;
-                }
-                catch (PingException)
-                {
-                    results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "TIMEOUT" });
-                    if (progress != null) { progress.Report(string.Format("[!] Hop {0}: TIMEOUT", ttl)); }
-                }
-                catch (Exception ex)
-                {
-                    if (progress != null) { progress.Report(string.Format("[ERROR] Hop {0}: {1}", ttl, ex.Message)); }
-                }
-
-                Thread.Sleep(20); // Небольшая задержка между хопами
-            }
-        }
-        return results;
-    }
-
-    // ========== TCP SYN TRACEROUTE (ОБХОДИТ ICMP, ТРЕБУЕТ АДМИНА) ==========
-
-    private static List<TraceHop> TraceWithTcpSyn(IPAddress targetIp, int port, int maxHops,
-                                                   int timeoutMs, IProgress<string> progress)
-    {
-        var results = new List<TraceHop>();
-        var localIp = GetLocalIpAddress();
-
-        for (int ttl = 1; ttl <= maxHops; ttl++)
-        {
-            if (progress != null) { progress.Report(string.Format("[TRACE] Hop {0}/{1} (TCP SYN:{2})...", ttl, maxHops, port)); }
-
-            using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.IP))
-            using (var receiver = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.IP))
-            {
-                try
-                {
-                    // Настройка сокетов
-                    sender.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.HeaderIncluded, true);
-                    sender.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
-
-                    receiver.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.HeaderIncluded, true);
-                    receiver.ReceiveTimeout = timeoutMs;
-                    receiver.Bind(new IPEndPoint(IPAddress.Any, 0));
-
-                    // Собираем TCP SYN пакет
-                    var srcPort = NextBoundedInt(1024, 65535);
-                    var seq = (uint)NextBoundedInt(1, int.MaxValue);
-
-                    var tcpPacket = BuildTcpSynPacket(srcPort, port, seq);
-                    var ipPacket = BuildIpPacket(localIp, targetIp, 6, tcpPacket);
-
-                    // Отправляем
-                    var endpoint = new IPEndPoint(targetIp, 0);
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    sender.SendTo(ipPacket, endpoint);
-
-                    // Ждем ответ
-                    var buffer = new byte[4096];
-                    var remoteEp = (EndPoint)new IPEndPoint(IPAddress.Any, 0);
-
-                    string responderIp = null;
-                    string status = "TIMEOUT";
-                    int rttMs = -1;
-
-                    if (receiver.Poll(timeoutMs * 1000, SelectMode.SelectRead))
-                    {
-                        var bytes = receiver.ReceiveFrom(buffer, ref remoteEp);
-                        sw.Stop();
-                        rttMs = (int)sw.ElapsedMilliseconds;
-
-                        responderIp = ((IPEndPoint)remoteEp).Address.ToString();
-                        status = ParseIpResponse(buffer, bytes, targetIp, port);
-                    }
-
-                    var hop = new TraceHop
-                    {
-                        HopNumber = ttl,
-                        IP = responderIp ?? "*",
-                        TcpStatus = status,
-                        RttMs = rttMs,
-                        Status = status == "SYNACK" ? "RESPONDED" :
-                                (status == "RST" ? "BLOCKED" : "TIMEOUT")
-                    };
-
-                    results.Add(hop);
-                    if (progress != null) { progress.Report(string.Format("[OK] Hop {0}: {1} - {2} ({3}ms)", ttl, hop.IP, hop.Status, hop.RttMs)); }
-
-                    if (status == "SYNACK" || (responderIp == targetIp.ToString()))
-                        break;
-                }
-                catch (SocketException ex)
-                {
-                    if (progress != null) { progress.Report(string.Format("[!] Hop {0}: SOCKET ERROR - {1}", ttl, ex.Message)); }
-                    results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "ERROR" });
-                }
-                catch (Exception ex)
-                {
-                    if (progress != null) { progress.Report(string.Format("[ERROR] Hop {0}: {1}", ttl, ex.Message)); }
-                }
-            }
-            Thread.Sleep(20);
-        }
-        return results;
-    }
-
-    // ========== UDP TRACEROUTE (НЕ ТРЕБУЕТ АДМИНА, РАБОТАЕТ ВЕЗДЕ) ==========
-
-    private static List<TraceHop> TraceWithUdp(IPAddress targetIp, int startPort, int maxHops,
-                                                int timeoutMs, IProgress<string> progress)
-    {
-        var results = new List<TraceHop>();
-
-        for (int ttl = 1; ttl <= maxHops; ttl++)
-        {
-            if (progress != null) { progress.Report(string.Format("[TRACE] Hop {0}/{1} (UDP)...", ttl, maxHops)); }
-
-            using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
-            using (var receiver = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.Icmp))
-            {
-                try
-                {
-                    sender.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.IpTimeToLive, ttl);
-                    receiver.ReceiveTimeout = timeoutMs;
-                    receiver.Bind(new IPEndPoint(IPAddress.Any, 0));
-
-                    var sendPort = startPort + ttl;
-                    var endpoint = new IPEndPoint(targetIp, sendPort);
-                    var buffer = new byte[] { 0x00 };
-
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    sender.SendTo(buffer, endpoint);
-
-                    var responseBuffer = new byte[256];
-                    var remoteEp = (EndPoint)new IPEndPoint(IPAddress.Any, 0);
-
-                    string responderIp = null;
-                    string status = "TIMEOUT";
-                    int rttMs = -1;
-
-                    if (receiver.Poll(timeoutMs * 1000, SelectMode.SelectRead))
-                    {
-                        var bytes = receiver.ReceiveFrom(responseBuffer, ref remoteEp);
-                        sw.Stop();
-                        rttMs = (int)sw.ElapsedMilliseconds;
-                        responderIp = ((IPEndPoint)remoteEp).Address.ToString();
-                        status = "RESPONDED";
-                    }
-
-                    var hop = new TraceHop
-                    {
-                        HopNumber = ttl,
-                        IP = responderIp ?? "*",
-                        RttMs = rttMs,
-                        Status = status
-                    };
-
-                    results.Add(hop);
-                    if (progress != null) { progress.Report(string.Format("[OK] Hop {0}: {1} - {2} ({3}ms)", ttl, hop.IP, hop.Status, hop.RttMs)); }
-
-                    if (responderIp == targetIp.ToString())
-                        break;
-                }
-                catch (SocketException ex)
-                {
-                    if (LooksLikeTracerouteTtlExpired(ex))
-                    {
-                        // TTL истек - это нормально для промежуточных хопов
-                        if (progress != null) { progress.Report(string.Format("[*] Hop {0}: TTL expired", ttl)); }
-                        results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "TTL_EXPIRED" });
-                    }
-                    else
-                    {
-                        if (progress != null) { progress.Report(string.Format("[!] Hop {0}: {1}", ttl, ex.Message)); }
-                        results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "ERROR" });
-                    }
-                }
-            }
-            Thread.Sleep(20);
-        }
-        return results;
-    }
-
-    // ========== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ==========
-
-    private static IPAddress GetLocalIpAddress()
-    {
-        using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
-        {
-            socket.Connect("8.8.8.8", 53);
-            var endPoint = socket.LocalEndPoint as IPEndPoint;
-            return (endPoint == null) ? null : endPoint.Address;
-        }
-    }
-
-    private static byte[] BuildTcpSynPacket(int srcPort, int dstPort, uint seq)
-    {
-        var tcp = new byte[20];
-
-        // Source port
-        tcp[0] = (byte)(srcPort >> 8);
-        tcp[1] = (byte)(srcPort & 0xFF);
-        // Destination port
-        tcp[2] = (byte)(dstPort >> 8);
-        tcp[3] = (byte)(dstPort & 0xFF);
-        // Sequence number
-        tcp[4] = (byte)(seq >> 24);
-        tcp[5] = (byte)(seq >> 16);
-        tcp[6] = (byte)(seq >> 8);
-        tcp[7] = (byte)(seq & 0xFF);
-        // Data offset (5 = 20 bytes header) + flags (SYN)
-        tcp[12] = 0x50; // Data offset = 5 (20 bytes)
-        tcp[13] = 0x02; // SYN flag
-        // Window size
-        tcp[14] = 0x20;
-        tcp[15] = 0x00;
-
-        return tcp;
-    }
-
-    private static byte[] BuildIpPacket(IPAddress source, IPAddress destination,
-                                        byte protocol, byte[] payload)
-    {
-        var totalLen = 20 + payload.Length;
-        var packet = new byte[totalLen];
-
-        // IP version (4) + header length (5)
-        packet[0] = 0x45;
-        // Total length
-        packet[2] = (byte)(totalLen >> 8);
-        packet[3] = (byte)(totalLen & 0xFF);
-        // TTL (64)
-        packet[8] = 64;
-        // Protocol
-        packet[9] = protocol;
-        // Source IP
-        source.GetAddressBytes().CopyTo(packet, 12);
-        // Destination IP
-        destination.GetAddressBytes().CopyTo(packet, 16);
-
-        // Calculate checksum
-        // Контрольная сумма только по IPv4-заголовку (20 байт), не по TCP payload (RFC 791).
-        var checksum = ComputeIpChecksum(packet, 20);
-        packet[10] = (byte)(checksum >> 8);
-        packet[11] = (byte)(checksum & 0xFF);
-
-        // Payload
-        payload.CopyTo(packet, 20);
-
-        return packet;
-    }
-
-    private static ushort ComputeIpChecksum(byte[] packet, int ipHeaderLength)
-    {
-        uint sum = 0;
-        for (int i = 0; i < ipHeaderLength; i += 2)
-        {
-            if (i + 1 < ipHeaderLength)
-                sum += (uint)((packet[i] << 8) | packet[i + 1]);
-            else
-                sum += (uint)(packet[i] << 8);
-
-            if ((sum & 0xFFFF0000) != 0)
-            {
-                sum = (sum & 0xFFFF) + (sum >> 16);
-            }
-        }
-
-        return (ushort)~sum;
-    }
-
-    private static string ParseIpResponse(byte[] buffer, int bytes, IPAddress targetIp, int targetPort)
-    {
-        if (bytes < 20) return "UNKNOWN";
-
-        var protocol = buffer[9];
-
-        if (protocol == 1) // ICMP
-        {
-            var type = buffer[20];
-            if (type == 11) return "TTL_EXPIRED";
-            if (type == 3) return "PORT_UNREACHABLE";
-            return string.Format("ICMP_{0}", type);
-        }
-        else if (protocol == 6) // TCP
-        {
-            var ipHeaderLen = (buffer[0] & 0x0F) * 4;
-            if (bytes < ipHeaderLen + 20) return "UNKNOWN";
-
-            var tcpOffset = ipHeaderLen;
-            var flags = buffer[tcpOffset + 13];
-
-            if ((flags & 0x12) == 0x12) return "SYNACK";
-            if ((flags & 0x04) == 0x04) return "RST";
-            return "TCP_OTHER";
-        }
-
-        return "UNKNOWN";
-    }
-
-    private static string MapIcmpStatus(IPStatus status)
-    {
-        switch (status)
-        {
-            case IPStatus.Success: return "RESPONDED";
-            case IPStatus.TtlExpired: return "TTL_EXPIRED";
-            case IPStatus.TimedOut: return "TIMEOUT";
-            case IPStatus.DestinationUnreachable: return "UNREACHABLE";
-            default: return status.ToString();
-        }
-    }
-}
-
-// ========== ВСПОМОГАТЕЛЬНЫЕ КЛАССЫ ==========
-
-public enum TraceMethod
-{
-    Auto,
-    Icmp,
-    TcpSyn,
-    Udp
-}
-
-public class TraceHop
-{
-    public int HopNumber { get; set; }
-    public string IP { get; set; }
-    public int RttMs { get; set; }
-    public string Status { get; set; }
-    public string TcpStatus { get; set; } // Для TCP метода (SYNACK/RST)
-
-    public bool IsBlocking { get { return Status == "BLOCKED" || TcpStatus == "RST"; } }
-    public bool IsTimeout { get { return Status == "TIMEOUT" || Status == "TTL_EXPIRED"; } }
-
-    public override string ToString()
-    {
-        string rttPart = (RttMs > 0) ? string.Format("({0}ms)", RttMs) : "";
-        return string.Format("Hop {0,2}: {1,-15} {2} {3}", HopNumber, IP == null ? "" : IP, Status == null ? "" : Status, rttPart);
-    }
-}
-"@
 
 $script:TracerouteLoaded = $false
 $script:TracerouteLoadFailed = $false
 
 function Test-TracerouteReady {
-    if ($script:TracerouteLoaded -or ([System.Management.Automation.PSTypeName]'AdvancedTraceroute').Type) {
+    $t = 'YtDpi.AdvancedTraceroute' -as [type]
+    if ($t) {
         $script:TracerouteLoaded = $true
         return $true
     }
@@ -1088,16 +549,17 @@ function Ensure-TracerouteLoaded {
     if (Test-TracerouteReady) { return $true }
     if ($script:TracerouteLoadFailed) { return $false }
 
-    try {
-        Add-Type -TypeDefinition $traceCode -ErrorAction Stop
-        $script:TracerouteLoaded = $true
-        Write-DebugLog "Traceroute C# компонент загружен" "INFO"
-        return $true
-    } catch {
+    if (-not (Ensure-YtDpiCoreLoaded)) {
         $script:TracerouteLoadFailed = $true
-        Write-DebugLog "Ошибка загрузки traceroute: $_" "ERROR"
         return $false
     }
+    if (Test-TracerouteReady) {
+        Write-DebugLog "Traceroute (YT-DPI.Core) готов" "INFO"
+        return $true
+    }
+    $script:TracerouteLoadFailed = $true
+    Write-DebugLog "Тип YtDpi.AdvancedTraceroute не найден после загрузки DLL" "ERROR"
+    return $false
 }
 
 
@@ -1145,6 +607,11 @@ function New-ConfigObject {
         DebugLogEnabled = $false
         # true = в заголовке лога полные имя ПК, учётная запись и пути (осторожно при публикации лога)
         DebugLogFullIdentifiers = $false
+        # Скан: 0 = авто (формула из $CONST ScanPool*); иначе верхняя граница RunspacePool
+        ScanConcurrencyDirect = 0
+        ScanConcurrencyProxy = 0
+        # Первый проход T13+T12 «параллельно» (Tasks) — по умолчанию выкл: в Runspace-воркере часто даёт пустой результат
+        ScanParallelTlsFirstPass = $false
     }
 }
 
@@ -1239,11 +706,34 @@ function Load-Config {
     return $default
 }
 
+# Одноразовая миграция: параллельный TLS через ThreadPool Tasks внутри воркера давал $null → ложный IP BLOCK.
+function Initialize-DisableBrokenParallelTlsTasks {
+    if (-not $script:Config) { return }
+    $propNames = @($script:Config.PSObject.Properties | ForEach-Object { $_.Name })
+    if ($propNames -contains 'ParallelTlsTasksDisabled032026') { return }
+    $script:Config | Add-Member -MemberType NoteProperty -Name 'ParallelTlsTasksDisabled032026' -Value $true -Force
+    $script:Config.ScanParallelTlsFirstPass = $false
+    Write-DebugLog "Миграция: отключён параллельный TLS (Tasks) в скане — используйте последовательный режим." "INFO"
+    Save-Config $script:Config
+}
+
 function Save-Config($config) {
     if ($null -eq $config) { return }
     try {
-        # Обновляем DNS кэш перед сохранением
-        $config.DnsCache = $script:DnsCache
+        # Обновляем DNS кэш перед сохранением (ConcurrentDictionary → Hashtable для JSON).
+        # Не использовать foreach по самому словарю в PS 7: элемент может приходить без .Key → индекс null.
+        if ($script:DnsCache -is [System.Collections.Concurrent.ConcurrentDictionary[string,string]]) {
+            $dnsHt = @{}
+            foreach ($key in [string[]]@($script:DnsCache.Keys)) {
+                if ([string]::IsNullOrEmpty($key)) { continue }
+                $val = $null
+                [void]$script:DnsCache.TryGetValue($key, [ref]$val)
+                $dnsHt[$key] = if ($null -ne $val) { [string]$val } else { '' }
+            }
+            $config.DnsCache = $dnsHt
+        } else {
+            $config.DnsCache = $script:DnsCache
+        }
         $config.Proxy = $global:ProxyConfig
 
         # Удаляем временное поле
@@ -2242,7 +1732,7 @@ function Check-UpdateVersion {
         Write-DebugLog "Проверка обновлений (API)..."
         $request = [System.Net.WebRequest]::Create($apiUrl)
         $request.UserAgent = $script:UserAgent
-        $request.Timeout = 5000
+        $request.Timeout = $SCRIPT:CONST.HttpMisc.GitHubReleaseApiMs
         $response = $request.GetResponse()
         $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
         $json = $reader.ReadToEnd()
@@ -2293,7 +1783,7 @@ function Trace-TcpRoute {
         [string]$Target,
         [int]$Port = 443,
         [int]$MaxHops = 15,
-        [int]$TimeoutSec = 5,
+        [int]$TimeoutSec = $SCRIPT:CONST.Traceroute.DefaultTimeoutSec,
         [scriptblock]$onProgress = $null
     )
 
@@ -2317,7 +1807,7 @@ function Trace-TcpRoute {
     if ($onProgress) {
         try {
             $del = { param([string]$msg) if ($onProgress) { & $onProgress $msg } }
-            $progressLogger = [SynchronousProgress]::new([Action[string]]$del)
+            $progressLogger = [YtDpi.SynchronousProgress]::new([Action[string]]$del)
         } catch {
             Write-DebugLog "SynchronousProgress: не удалось создать ($_) — трассировка без строк прогресса" "WARN"
         }
@@ -2325,10 +1815,10 @@ function Trace-TcpRoute {
 
     try {
         # Auto: ICMP → raw TCP (только с админом) → UDP. Принудительный TcpSyn без прав даёт «доступ к сокету запрещён».
-        $method = [TraceMethod]::Auto
+        $method = [YtDpi.TraceMethod]::Auto
 
         # Выполняем трассировку
-        $hops = [AdvancedTraceroute]::Trace($Target, $MaxHops, $TimeoutSec * 1000, $method, $progressLogger)
+        $hops = [YtDpi.AdvancedTraceroute]::Trace($Target, $MaxHops, $TimeoutSec * 1000, $method, $progressLogger)
 
         # Конвертируем в формат, понятный старому коду
         $result = @()
@@ -2413,7 +1903,7 @@ function Invoke-TcpTracerouteRaw {
             while (((Get-Date) - $start).TotalSeconds -lt $TimeoutSec) {
                 $buffer = New-Object byte[] 4096
                 $remoteEp = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
-                if ($recvSocket.Poll(1000, [System.Net.Sockets.SelectMode]::SelectRead)) {
+                if ($recvSocket.Poll($SCRIPT:CONST.Traceroute.UdpRecvPollMs, [System.Net.Sockets.SelectMode]::SelectRead)) {
                     $bytes = $recvSocket.ReceiveFrom($buffer, [ref]$remoteEp)
                     if ($bytes -gt 0) {
                         $rttMs = ((Get-Date) - $start).TotalMilliseconds
@@ -2462,6 +1952,7 @@ function Invoke-TcpTracerouteCombined {
         [scriptblock]$onProgress = $null
     )
 
+    $TR = $SCRIPT:CONST.Traceroute
     $icmpHops = @()
 
     # Пробуем Test-NetConnection
@@ -2490,7 +1981,7 @@ function Invoke-TcpTracerouteCombined {
         try {
             $pinfo = New-Object System.Diagnostics.ProcessStartInfo
             $pinfo.FileName = "tracert"
-            $pinfo.Arguments = "-d -h $MaxHops -w 350 -4 $Target"
+            $pinfo.Arguments = "-d -h $MaxHops -w $($TR.TracertHopWaitMs) -4 $Target"
             $pinfo.UseShellExecute = $false
             $pinfo.RedirectStandardOutput = $true
             $pinfo.RedirectStandardError = $true
@@ -2501,13 +1992,13 @@ function Invoke-TcpTracerouteCombined {
             $p.Start() | Out-Null
 
             # Реальный лимит времени для tracert: 3 пробы на хоп + запас.
-            $traceTimeoutMs = [Math]::Max(12000, $MaxHops * 1400)
+            $traceTimeoutMs = [Math]::Max($TR.TraceProcessKillMsBase, $MaxHops * $TR.TraceProcessKillMsPerHop)
             $completed = $p.WaitForExit($traceTimeoutMs)
 
             if (-not $completed) {
                 Write-DebugLog "tracert превысил лимит (${traceTimeoutMs}ms), убиваем процесс"
                 try { $p.Kill() } catch { }
-                try { $p.WaitForExit(1000) | Out-Null } catch {}
+                try { $p.WaitForExit($TR.WaitForExitAfterKillMs) | Out-Null } catch {}
             }
 
             $output = ""
@@ -2588,7 +2079,7 @@ function Invoke-TcpTracerouteCombined {
         Write-DebugLog "Проверка хопа $($hop.Hop): $($hop.IP)"
 
         # 1. TCP проверка
-        $tcpResult = Test-TcpPort -TargetIp $hop.IP -Port $Port -TimeoutSec 2
+        $tcpResult = Test-TcpPort -TargetIp $hop.IP -Port $Port -TimeoutSec $TR.HopTcpTlsTimeoutSec
 
         # 2. TLS проверка (если TCP успешен)
         $tlsStatus = "N/A"
@@ -2598,7 +2089,7 @@ function Invoke-TcpTracerouteCombined {
                 & $onProgress $msg
             }
             Write-DebugLog "  TCP OK, проверяем TLS на хопе $($hop.Hop)"
-            $tlsResult = Test-TlsHandshake -TargetIp $hop.IP -Port $Port -TimeoutSec 2
+            $tlsResult = Test-TlsHandshake -TargetIp $hop.IP -Port $Port -TimeoutSec $TR.HopTcpTlsTimeoutSec
             $tlsStatus = $tlsResult.Status
             Write-DebugLog "  TLS результат: $tlsStatus"
         }
@@ -2659,7 +2150,7 @@ function Test-TlsHandshake {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         $async = $tcp.BeginConnect($TargetIp, $Port, $null, $null)
 
-        $hopTimeout = [Math]::Min($TimeoutSec * 1000, 3000)
+        $hopTimeout = [Math]::Min($TimeoutSec * 1000, $SCRIPT:CONST.Traceroute.HopTlsCapMs)
 
         if (-not $async.AsyncWaitHandle.WaitOne($hopTimeout)) {
             Write-DebugLog "TLS: TCP connect timeout to $TargetIp`:$Port"
@@ -2874,7 +2365,7 @@ function Test-TcpPort {
         $async = $tcp.BeginConnect($TargetIp, $Port, $null, $null)
 
         # Уменьшаем таймаут для отдельных хопов
-        $hopTimeout = [Math]::Min($TimeoutSec * 1000, 2000)
+        $hopTimeout = [Math]::Min($TimeoutSec * 1000, $SCRIPT:CONST.Traceroute.HopTcpCapMs)
 
         if ($async.AsyncWaitHandle.WaitOne($hopTimeout)) {
             $tcp.EndConnect($async)
@@ -2899,207 +2390,32 @@ function Test-TcpPort {
 }
 
 # ====================================================================================
-# ФУНКЦИЯ ПОДКЛЮЧЕНИЯ ЧЕРЕЗ ПРОКСИ
+# ФУНКЦИЯ ПОДКЛЮЧЕНИЯ ЧЕРЕЗ ПРОКСИ (YtDpi.ProxyThrough)
 # ====================================================================================
 function Connect-ThroughProxy {
-        param(
-            $TargetHost,
-            $TargetPort,
-            $ProxyConfig,
-            [int]$Timeout = $CONST.ProxyTimeout
-        )
-        Write-DebugLog "Connect-ThroughProxy: $($ProxyConfig.Type) $($ProxyConfig.Host):$($ProxyConfig.Port) -> $($TargetHost):$($TargetPort)"
-
-        $maxAttempts = 3
-        $delayMs = 500
-        $lastError = $null
-
-        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-            $tcp = $null
-            $stream = $null
-            try {
-                Write-DebugLog "Попытка $attempt подключения к $($ProxyConfig.Host):$($ProxyConfig.Port)"
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $asyn = $tcp.BeginConnect($ProxyConfig.Host, $ProxyConfig.Port, $null, $null)
-                if (-not $asyn.AsyncWaitHandle.WaitOne($Timeout)) {
-                    throw "Proxy connection timeout"
-                }
-                $tcp.EndConnect($asyn)
-                $stream = $tcp.GetStream()
-                $stream.ReadTimeout = $Timeout
-                $stream.WriteTimeout = $Timeout
-
-                if ($ProxyConfig.Type -eq "SOCKS5") {
-                    Write-DebugLog "SOCKS5: начало рукопожатия"
-
-                    # === Определяем, какие методы аутентификации предложить ===
-                    $methods = @()
-                    if ($ProxyConfig.User -and $ProxyConfig.Pass) {
-                        # Если есть логин/пароль, предлагаем сначала аутентификацию по паролю (0x02), затем без аутентификации (0x00)
-                        $methods = @(0x02, 0x00)
-                    } else {
-                        # Без аутентификации предлагаем только 0x00
-                        $methods = @(0x00)
-                    }
-                    $greeting = [byte[]](@(0x05, $methods.Count) + $methods)
-                    $stream.Write($greeting, 0, $greeting.Length)
-
-                    # Читаем ответ сервера (2 байта: VER, METHOD)
-                    $resp = New-Object byte[] 2
-                    if ($stream.Read($resp, 0, 2) -ne 2) {
-                        throw "SOCKS5: нет ответа на выбор метода"
-                    }
-                    if ($resp[0] -ne 0x05) {
-                        throw "SOCKS5: неверная версия ответа (ожидалась 0x05, получена 0x$('{0:X2}' -f $resp[0]))"
-                    }
-
-                    $method = $resp[1]
-                    Write-DebugLog "SOCKS5: сервер выбрал метод аутентификации 0x$('{0:X2}' -f $method)"
-
-                    # === Обработка выбранного метода ===
-                    if ($method -eq 0x00) {
-                        # Без аутентификации — ничего не делаем
-                        Write-DebugLog "SOCKS5: аутентификация не требуется"
-                    }
-                    elseif ($method -eq 0x02) {
-                        # Аутентификация по логину/паролю
-                        if (-not $ProxyConfig.User -or -not $ProxyConfig.Pass) {
-                            throw "SOCKS5: сервер требует логин/пароль, но они не указаны в настройках"
-                        }
-                        $u = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.User)
-                        $p = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.Pass)
-                        $authMsg = [byte[]](@(0x01, $u.Length) + $u + @($p.Length) + $p)
-                        $stream.Write($authMsg, 0, $authMsg.Length)
-
-                        $authResp = New-Object byte[] 2
-                        if ($stream.Read($authResp, 0, 2) -ne 2) {
-                            throw "SOCKS5: нет ответа на аутентификацию"
-                        }
-                        if ($authResp[0] -ne 0x01 -or $authResp[1] -ne 0x00) {
-                            throw "SOCKS5: неверный логин/пароль (код $($authResp[1]))"
-                        }
-                        Write-DebugLog "SOCKS5: аутентификация успешна"
-                    }
-                    elseif ($method -eq 0xFF) {
-                        throw "SOCKS5: сервер отверг все предложенные методы аутентификации (0xFF). Проверьте, требуется ли аутентификация."
-                    }
-                    else {
-                        throw "SOCKS5: сервер выбрал неподдерживаемый метод аутентификации 0x$('{0:X2}' -f $method)"
-                    }
-
-                    # === Запрос на подключение к целевому хосту ===
-                    $addrType = 0x03   # domain name
-                    $hostBytes = [Text.Encoding]::UTF8.GetBytes($TargetHost)
-                    $req = [byte[]](@(0x05, 0x01, 0x00, $addrType, $hostBytes.Length) + $hostBytes + @([math]::Floor($TargetPort/256), ($TargetPort%256)))
-                    $stream.Write($req, 0, $req.Length)
-
-                    # Читаем ответ (минимум 10 байт)
-                    $resp = New-Object byte[] 10
-                    $read = 0
-                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                    while ($read -lt 10 -and $sw.ElapsedMilliseconds -lt $Timeout) {
-                        if ($stream.DataAvailable) {
-                            $r = $stream.Read($resp, $read, 10 - $read)
-                            if ($r -eq 0) { break }
-                            $read += $r
-                        } else { Start-Sleep -Milliseconds 20 }
-                    }
-                    if ($read -lt 10) { throw "SOCKS5: неполный ответ на запрос подключения" }
-                    if ($resp[0] -ne 0x05) { throw "SOCKS5: неверная версия в ответе на подключение" }
-                    if ($resp[1] -ne 0x00) {
-                        $repCode = $resp[1]
-                        $errorMap = @{
-                            0x01 = "general failure"
-                            0x02 = "connection not allowed"
-                            0x03 = "network unreachable"
-                            0x04 = "host unreachable"
-                            0x05 = "connection refused"
-                            0x06 = "TTL expired"
-                            0x07 = "command not supported"
-                            0x08 = "address type not supported"
-                        }
-                        $errText = if ($errorMap.ContainsKey($repCode)) { $errorMap[$repCode] } else { "unknown error 0x$('{0:X2}' -f $repCode)" }
-                        throw "SOCKS5: сервер вернул ошибку - $errText"
-                    }
-                    Write-DebugLog "SOCKS5: маршрут установлен успешно"
-                    return @{ Tcp = $tcp; Stream = $stream }
-                }
-                elseif ($ProxyConfig.Type -eq "HTTP") {
-                    $hdr = "CONNECT ${TargetHost}:$TargetPort HTTP/1.1`r`nHost: ${TargetHost}:$TargetPort`r`n"
-                    if ($ProxyConfig.User -and $ProxyConfig.Pass) {
-                        $authBytes = [Text.Encoding]::ASCII.GetBytes("$($ProxyConfig.User):$($ProxyConfig.Pass)")
-                        $hdr += "Proxy-Authorization: Basic $([Convert]::ToBase64String($authBytes))`r`n"
-                    }
-                    $hdr += "`r`n"
-                    $reqBytes = [Text.Encoding]::ASCII.GetBytes($hdr)
-                    $stream.Write($reqBytes, 0, $reqBytes.Length)
-                    $swRead = [System.Diagnostics.Stopwatch]::StartNew()
-                    $response = ""
-                    $buf = New-Object byte[] 1024
-                    while ($swRead.ElapsedMilliseconds -lt $Timeout) {
-                        if ($stream.DataAvailable) {
-                            $r = $stream.Read($buf, 0, 1024)
-                            if ($r -le 0) { break }
-                            $response += [Text.Encoding]::ASCII.GetString($buf, 0, $r)
-                            if ($response -match "`r`n`r`n") { break }
-                        } else { Start-Sleep -Milliseconds 20 }
-                    }
-                    if ($response -match '(?m)HTTP/1\.\d\s+200') {
-                        Write-DebugLog "HTTP CONNECT tunnel OK -> ${TargetHost}:$TargetPort"
-                        return @{ Tcp = $tcp; Stream = $stream }
-                    }
-                    $snip = if ($response.Length -gt 160) { $response.Substring(0, 160) + "..." } else { $response }
-                    throw "HTTP CONNECT не 200: $snip"
-                }
-                else {
-                    throw "Неподдерживаемый тип прокси для туннеля: $($ProxyConfig.Type)"
-                }
-            } catch {
-                $lastError = $_
-                Write-DebugLog "Ошибка подключения к прокси (попытка $attempt): $lastError"
-                if ($tcp) { try { $tcp.Close() } catch {} }
-                if ($attempt -eq $maxAttempts) { throw $lastError }
-                $sleep = $delayMs * [math]::Pow(2, $attempt - 1)
-                Start-Sleep -Milliseconds $sleep
-            }
-        }
+    param(
+        $TargetHost,
+        $TargetPort,
+        $ProxyConfig,
+        [int]$Timeout = $CONST.ProxyTimeout
+    )
+    Write-DebugLog "Connect-ThroughProxy: $($ProxyConfig.Type) $($ProxyConfig.Host):$($ProxyConfig.Port) -> $($TargetHost):$($TargetPort)"
+    try {
+        $wrap = [YtDpi.ProxyThrough]::Establish(
+            [string]$ProxyConfig.Host,
+            [int]$ProxyConfig.Port,
+            [string]$ProxyConfig.Type,
+            [string]$TargetHost,
+            [int]$TargetPort,
+            ([string]$ProxyConfig.User),
+            ([string]$ProxyConfig.Pass),
+            $Timeout)
+        return @{ Tcp = $wrap.Tcp; Stream = $wrap.Stream }
+    } catch {
+        Write-DebugLog "Ошибка подключения к прокси: $_" "WARN"
+        throw
     }
-
-    # Вспомогательная функция для чтения фиксированного количества байт с таймаутом
-    function Read-StreamWithTimeout($stream, $buffer, $count, $timeout) {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $totalRead = 0
-        while ($totalRead -lt $count) {
-            if ($sw.ElapsedMilliseconds -ge $timeout) { return $totalRead }
-            if ($stream.DataAvailable) {
-                $read = $stream.Read($buffer, $totalRead, $count - $totalRead)
-                if ($read -eq 0) { return $totalRead }
-                $totalRead += $read
-            } else {
-                Start-Sleep -Milliseconds 50
-            }
-        }
-        return $totalRead
-    }
-
-    # Вспомогательная функция для чтения HTTP-ответа до \r\n\r\n
-    function Read-HttpResponse($stream, $timeout) {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $response = ""
-        $buffer = New-Object byte[] 1024
-        while ($sw.ElapsedMilliseconds -lt $timeout) {
-            if ($stream.DataAvailable) {
-                $read = $stream.Read($buffer, 0, 1024)
-                if ($read -gt 0) {
-                    $response += [Text.Encoding]::ASCII.GetString($buffer, 0, $read)
-                    if ($response -match "\r\n\r\n") { break }
-                } else { break }
-            } else {
-                Start-Sleep -Milliseconds 50
-            }
-        }
-        return $response
-    }
+}
 
 # ====================================================================================
 # СЕТЕВЫЕ ФУНКЦИИ
@@ -3260,7 +2576,7 @@ function Get-NetworkInfo {
     try {
         $rnd = [guid]::NewGuid().ToString().Substring(0, 8)
         $redirectorUrl = "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd"
-        $rawCdn = Invoke-WebRequestViaProxy $redirectorUrl "GET" 3000
+        $rawCdn = Invoke-WebRequestViaProxy $redirectorUrl "GET" $SCRIPT:CONST.HttpMisc.RedirectorViaProxyMs
         if ($rawCdn) {
             $cdnShort = $null
             if ($rawCdn -match '=>\s+([\w-]+)') { $cdnShort = $matches[1] }
@@ -3327,7 +2643,7 @@ function Get-NetworkInfo {
         foreach ($provider in $providers) {
             try {
                 Write-DebugLog "GEO: пробуем $($provider.Name)"
-                $raw = Invoke-WebRequestViaProxy $provider.Url "GET" 1500
+                $raw = Invoke-WebRequestViaProxy $provider.Url "GET" $SCRIPT:CONST.HttpMisc.GeoProviderViaProxyMs
                 if ($raw -match '\{.*\}') {
                     $json = $raw | ConvertFrom-Json
                     if (& $provider.Check $json) {
@@ -3369,7 +2685,7 @@ function Get-NetworkInfo {
         try {
             $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
             $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
-            if ($a.AsyncWaitHandle.WaitOne(1000)) {
+            if ($a.AsyncWaitHandle.WaitOne($SCRIPT:CONST.NetInfo.Ipv6ProbeWaitMs)) {
                 $t.EndConnect($a)
                 $hasV6 = $true
             }
@@ -3427,8 +2743,8 @@ function Show-SettingsMenu {
         Write-Host "`n  3. Режим TLS при сканировании " -NoNewline -ForegroundColor White
         Write-Host "[ $curTls ]" -ForegroundColor Cyan
         Write-Host "     Auto  — колонки T12 и T13 (как по умолчанию)" -ForegroundColor Gray
-        Write-Host "     TLS12 — только TLS 1.2 (T13 = N/A)" -ForegroundColor Gray
-        Write-Host "     TLS13 — только проверка столбца T13 (T12 = N/A)" -ForegroundColor Gray
+        Write-Host "     TLS12 — в таблице осмысленен столбец T12 (T13 остаётся N/A); при DRP/RST тихо проверяется T13 только для вердикта" -ForegroundColor Gray
+        Write-Host "     TLS13 — наоборот: столбец T13 основной (T12 N/A); при DRP/RST тихо проверяется T12 для вердикта" -ForegroundColor Gray
         Write-Host "     Нажмите 3, чтобы переключить: Auto → TLS12 → TLS13 → Auto" -ForegroundColor DarkGray
 
         $curDbgLog = $false
@@ -3452,9 +2768,39 @@ function Show-SettingsMenu {
         }
         Write-Host "     Для разового полного заголовка: YT_DPI_DEBUG_IDENTIFIERS=1 (перекрывает ВЫКЛ в конфиге)." -ForegroundColor Gray
 
+        $curScanDir = 0
+        $curScanPx = 0
+        if ($script:Config) {
+            try { if ($null -ne $script:Config.ScanConcurrencyDirect) { $curScanDir = [int]$script:Config.ScanConcurrencyDirect } } catch { }
+            try { if ($null -ne $script:Config.ScanConcurrencyProxy) { $curScanPx = [int]$script:Config.ScanConcurrencyProxy } } catch { }
+        }
+        $autoCapDir = Get-ScanRecommendedWorkerCap -ProxyEnabled:$false -IgnoreConfigOverrides
+        $autoCapPx = Get-ScanRecommendedWorkerCap -ProxyEnabled:$true -IgnoreConfigOverrides
+        $lblDir = if ($curScanDir -le 0) { "авто ($autoCapDir)" } else { "$curScanDir" }
+        $lblPx = if ($curScanPx -le 0) { "авто ($autoCapPx)" } else { "$curScanPx" }
+
+        $curParTls = $false
+        if ($script:Config -and ($script:Config.ScanParallelTlsFirstPass -eq $true)) { $curParTls = $true }
+        Write-Host "`n  6. Параллельный первый проход TLS (Auto, T13+T12) " -NoNewline -ForegroundColor White
+        if ($curParTls) {
+            Write-Host "[ ВКЛ ]" -ForegroundColor Yellow
+            Write-Host "     Эксперимент: параллельные Tasks; при сбое выполняется последовательный TLS (без ложного IP BLOCK)." -ForegroundColor Gray
+        } else {
+            Write-Host "[ ВЫКЛ ]" -ForegroundColor DarkGray
+            Write-Host "     Последовательно T13 → T12 (медленнее строка скана)." -ForegroundColor Gray
+        }
+
+        Write-Host "`n  7. Воркеры скана без прокси (RunspacePool) " -NoNewline -ForegroundColor White
+        Write-Host "[ $lblDir ]" -ForegroundColor Cyan
+        Write-Host "     Клавиша 7: цикл 0=авто → 12 → 16 → 20 → 24 → 32 → 0" -ForegroundColor DarkGray
+
+        Write-Host "`n  8. Воркеры скана через прокси " -NoNewline -ForegroundColor White
+        Write-Host "[ $lblPx ]" -ForegroundColor Cyan
+        Write-Host "     Клавиша 8: цикл 0=авто → 6 → 8 → 10 → 12 → 0" -ForegroundColor DarkGray
+
         Write-Host "`n  0. Назад в главное меню" -ForegroundColor DarkGray
         Write-Host "`n $line" -ForegroundColor Cyan
-        Write-Host " ВЫБЕРИТЕ ПУНКТ (1–5, 0): " -NoNewline -ForegroundColor Yellow
+        Write-Host " ВЫБЕРИТЕ ПУНКТ (1–8, 0): " -NoNewline -ForegroundColor Yellow
 
         Update-UiConsoleSnapshot
         $menuKey = Read-MenuKeyOrResize
@@ -3469,12 +2815,12 @@ function Show-SettingsMenu {
                 # Это сработает, даже если поля не было
                 $script:Config | Add-Member -MemberType NoteProperty -Name "IpPreference" -Value $newVal -Force
 
-                $script:DnsCache = [hashtable]::Synchronized(@{})
+                $script:DnsCache = [System.Collections.Concurrent.ConcurrentDictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                 Save-Config $script:Config
             }
             elseif ($key -eq "2") {
                 # Безопасная очистка
-                $script:DnsCache = [hashtable]::Synchronized(@{})
+                $script:DnsCache = [System.Collections.Concurrent.ConcurrentDictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
                 if ($script:Config.NetCache) {
                     $script:Config.NetCache.ISP = "Loading..."
@@ -3527,6 +2873,40 @@ function Show-SettingsMenu {
                 }
                 $st5 = if ($nextFull) { "ВКЛ (осторожно при отправке лога в чат)" } else { "ВЫКЛ (обезличивание)" }
                 Write-Host "`n  [OK] Полные идентификаторы в логе: $st5" -ForegroundColor Green
+                Start-Sleep -Seconds 1
+            }
+            elseif ($key -eq "6") {
+                $nextPar = -not $curParTls
+                $script:Config | Add-Member -MemberType NoteProperty -Name "ScanParallelTlsFirstPass" -Value $nextPar -Force
+                Save-Config $script:Config
+                $st6 = if ($nextPar) { "ВКЛ" } else { "ВЫКЛ" }
+                Write-Host "`n  [OK] Параллельный первый проход TLS: $st6" -ForegroundColor Green
+                Start-Sleep -Seconds 1
+            }
+            elseif ($key -eq "7") {
+                $seq = @(0, 12, 16, 20, 24, 32)
+                $idx = 0
+                for ($si = 0; $si -lt $seq.Count; $si++) {
+                    if ($seq[$si] -eq $curScanDir) { $idx = $si; break }
+                }
+                $idx = ($idx + 1) % $seq.Count
+                $nv = [int]$seq[$idx]
+                $script:Config | Add-Member -MemberType NoteProperty -Name "ScanConcurrencyDirect" -Value $nv -Force
+                Save-Config $script:Config
+                Write-Host "`n  [OK] Воркеры без прокси: $(if ($nv -le 0) { 'авто' } else { $nv })" -ForegroundColor Green
+                Start-Sleep -Seconds 1
+            }
+            elseif ($key -eq "8") {
+                $seqP = @(0, 6, 8, 10, 12)
+                $idxp = 0
+                for ($si = 0; $si -lt $seqP.Count; $si++) {
+                    if ($seqP[$si] -eq $curScanPx) { $idxp = $si; break }
+                }
+                $idxp = ($idxp + 1) % $seqP.Count
+                $nvP = [int]$seqP[$idxp]
+                $script:Config | Add-Member -MemberType NoteProperty -Name "ScanConcurrencyProxy" -Value $nvP -Force
+                Save-Config $script:Config
+                Write-Host "`n  [OK] Воркеры через прокси: $(if ($nvP -le 0) { 'авто' } else { $nvP })" -ForegroundColor Green
                 Start-Sleep -Seconds 1
             }
             elseif ($key -eq "0" -or $key -eq "`r") {
@@ -3949,13 +3329,13 @@ function Detect-ProxyType {
     try {
         $tcp = New-Object System.Net.Sockets.TcpClient
         $async = $tcp.BeginConnect($targetHost, $targetPort, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne(2000)) {
+        if (-not $async.AsyncWaitHandle.WaitOne($SCRIPT:CONST.ProxySelfTest.DetectTcpConnectMs)) {
             return $result
         }
         $tcp.EndConnect($async)
         $stream = $tcp.GetStream()
-        $stream.ReadTimeout = 2000
-        $stream.WriteTimeout = 2000
+        $stream.ReadTimeout = $SCRIPT:CONST.ProxySelfTest.DetectStreamRwMs
+        $stream.WriteTimeout = $SCRIPT:CONST.ProxySelfTest.DetectStreamRwMs
 
         # Пробуем SOCKS5
         try {
@@ -4010,7 +3390,7 @@ function Test-ProxyQuick {
 
     try {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $conn = Connect-ThroughProxy "google.com" 80 $ProxyConfig 5000
+        $conn = Connect-ThroughProxy "google.com" 80 $ProxyConfig $SCRIPT:CONST.ProxySelfTest.QuickTunnelMs
         if ($conn) {
             $result.Latency = $sw.ElapsedMilliseconds
             $result.Success = $true
@@ -4041,7 +3421,7 @@ function Wait-TcpBeginConnectWithStatus([System.Net.Sockets.TcpClient]$Tcp, [Sys
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while (-not $Ar.IsCompleted) {
         if ($sw.ElapsedMilliseconds -ge $TimeoutMs) { return $false }
-        $null = $Ar.AsyncWaitHandle.WaitOne(90)
+        $null = $Ar.AsyncWaitHandle.WaitOne($SCRIPT:CONST.Traceroute.TcpPollSliceMs)
     }
     return $true
 }
@@ -4064,6 +3444,7 @@ function Test-ProxyConnection {
     Write-Host " $line" -ForegroundColor Cyan
     Write-Host "`n  $($pc.Type) $($pc.Host):$($pc.Port)" -ForegroundColor Green
 
+    $PST = $SCRIPT:CONST.ProxySelfTest
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add("══ ПРОВЕРКА ПРОКСИ ══")
     $lines.Add("Тип: $($pc.Type)  Адрес: $($pc.Host):$($pc.Port)  Логин: $(if ($pc.User) { $pc.User } else { '(нет)' })")
@@ -4075,7 +3456,7 @@ function Test-ProxyConnection {
         Write-Host "`n  [1/4] TCP до прокси..." -ForegroundColor Cyan
         $tcpP = New-Object System.Net.Sockets.TcpClient
         $arP = $tcpP.BeginConnect($pc.Host, $pc.Port, $null, $null)
-        if (-not (Wait-TcpBeginConnectWithStatus $tcpP $arP 4000 "1/4 TCP до прокси")) {
+        if (-not (Wait-TcpBeginConnectWithStatus $tcpP $arP $PST.TcpToProxyMs "1/4 TCP до прокси")) {
             try { $tcpP.Close() } catch { }
             throw "Таймаут TCP до прокси (4 c)"
         }
@@ -4084,7 +3465,7 @@ function Test-ProxyConnection {
         $lines.Add("[OK] TCP до прокси: $($swTcp.ElapsedMilliseconds) мс")
         $tcpP.Close()
         Write-Host "       OK $($swTcp.ElapsedMilliseconds) ms" -ForegroundColor Green
-        Start-Sleep -Milliseconds 120
+        Start-Sleep -Milliseconds $PST.PauseAfterTcpMs
     } catch {
         $lines.Add("[FAIL] TCP до прокси: $($_.Exception.Message)")
         Show-ProxyTestResultPanel $lines $false
@@ -4101,14 +3482,14 @@ function Test-ProxyConnection {
         $lines.Add("[FAIL] Туннель google.com:80 — $($q80.Error)")
         Write-Host "       FAIL $($q80.Error)" -ForegroundColor Red
     }
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds $PST.PauseAfterTunnelMs
 
     # 3) Туннель :443
     $ok443 = $false
     Write-Host "  [3/4] Туннель google.com:443..." -ForegroundColor Cyan
     $sw443 = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $c443 = Connect-ThroughProxy "google.com" 443 $pc 7000
+        $c443 = Connect-ThroughProxy "google.com" 443 $pc $PST.Tunnel443Ms
         if ($c443 -and $c443.Tcp) {
             $sw443.Stop()
             $ok443 = $true
@@ -4123,15 +3504,15 @@ function Test-ProxyConnection {
         $lines.Add("[FAIL] Туннель google.com:443 — $($_.Exception.Message)")
         Write-Host "       FAIL $($_.Exception.Message)" -ForegroundColor Red
     }
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds $PST.PauseAfterTunnelMs
 
     # 4) HTTP как у GEO
     Write-Host "  [4/4] HTTP через прокси..." -ForegroundColor Cyan
     try {
         $swHttp = [System.Diagnostics.Stopwatch]::StartNew()
-        $null = Invoke-WebRequestViaProxy "http://www.gstatic.com/generate_204" "GET" 5000
+        $null = Invoke-WebRequestViaProxy "http://www.gstatic.com/generate_204" "GET" $PST.HttpGstaticMs
         $swHttp.Stop()
-        if ($swHttp.ElapsedMilliseconds -ge 4800) {
+        if ($swHttp.ElapsedMilliseconds -ge $PST.HttpSlowWarnMs) {
             $lines.Add("[WARN] HTTP через прокси: очень долго ($($swHttp.ElapsedMilliseconds) мс)")
             Write-Host "       WARN долго $($swHttp.ElapsedMilliseconds) ms" -ForegroundColor Yellow
         } else {
@@ -4142,7 +3523,7 @@ function Test-ProxyConnection {
         $lines.Add("[FAIL] HTTP через прокси: $($_.Exception.Message)")
         Write-Host "       FAIL $($_.Exception.Message)" -ForegroundColor Red
     }
-    Start-Sleep -Milliseconds 200
+    Start-Sleep -Milliseconds $PST.PauseAfterHttpMs
 
     $allCriticalOk = $q80.Success -and $ok443
     Show-ProxyTestResultPanel $lines $allCriticalOk
@@ -4213,7 +3594,7 @@ function Show-HelpMenu {
 
                 Write-Host "`n [ ГОРЯЧИЕ КЛАВИШИ (главный экран) ]" -ForegroundColor White
                 Write-Host "   ENTER     " -ForegroundColor Yellow -NoNewline; Write-Host " — полное сканирование таблицы (после проверки сети)." -ForegroundColor Gray
-                Write-Host "   S         " -ForegroundColor Yellow -NoNewline; Write-Host " — настройки: IP (1), кэш (2), TLS (3), лог (4), полные идентификаторы в логе (5)." -ForegroundColor Gray
+                Write-Host "   S         " -ForegroundColor Yellow -NoNewline; Write-Host " — настройки: пункты 1–8 (IP, кэш, TLS, лог, идентификаторы, параллель TLS, воркеры direct/proxy)." -ForegroundColor Gray
                 Write-Host "   P         " -ForegroundColor Yellow -NoNewline; Write-Host " — меню прокси (цифры 1–4 и история с 5, 0/Esc — выход)." -ForegroundColor Gray
                 Write-Host "   D         " -ForegroundColor Yellow -NoNewline; Write-Host " — Deep Trace: трассировка и TCP-проверка по пути к выбранному домену." -ForegroundColor Gray
                 Write-Host "   U         " -ForegroundColor Yellow -NoNewline; Write-Host " — проверка и загрузка обновления с GitHub." -ForegroundColor Gray
@@ -4288,6 +3669,8 @@ function Show-HelpMenu {
                 Write-Host "   1 — IPv6 приоритет / только IPv4; 2 — сброс DNS и GEO-кэша; 3 — режим скана TLS (Auto / только 1.2 / только 1.3)." -ForegroundColor Gray
                 Write-Host "   4 — запись отладки в YT-DPI_Debug.log (рядом со скриптом); плюс можно включить через YT_DPI_DEBUG=1." -ForegroundColor Gray
                 Write-Host "   5 — полные ПК/пользователь/пути в заголовке лога (по умолчанию ВЫКЛ = обезличено); или YT_DPI_DEBUG_IDENTIFIERS=1." -ForegroundColor Gray
+                Write-Host "   6 — параллельный первый проход T13+T12 в режиме Auto (выше нагрузка на цели и прокси)." -ForegroundColor Gray
+                Write-Host "   7 — число воркеров без прокси (RunspacePool); 8 — с прокси; 0 = авто из конфиг-профиля `$CONST ScanPool*`." -ForegroundColor Gray
                 Write-Host "   Режим TLS и флаги отладки сохраняются в конфиг; лог активен, если ВКЛ в меню или задана переменная окружения." -ForegroundColor DarkGray
 
                 Write-Host "`n [ ОБНОВЛЕНИЕ (U) ]" -ForegroundColor White
@@ -4369,7 +3752,7 @@ function Add-ToProxyHistory {
 # РАБОЧИЙ ПОТОК
 # ====================================================================================
 $Worker = {
-    param($Target, $ProxyConfig, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock, $NetInfo, $IpPreference, $TlsMode, $DebugLogMutexName)
+    param($Target, $ProxyConfig, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $NetInfo, $IpPreference, $TlsMode, $DebugLogMutexName, $ParallelTlsFirstPass)
 
     function Write-DebugLog($msg, $level = "DEBUG") {
         if (-not $DEBUG_ENABLED) { return }
@@ -4379,7 +3762,7 @@ $Worker = {
         try {
             try { $mtx = if ($DebugLogMutexName) { [System.Threading.Mutex]::OpenExisting($DebugLogMutexName) } else { $null } } catch { $mtx = $null }
             if ($mtx) {
-                try { $got = $mtx.WaitOne(15000) } catch { $got = $false }
+                try { $got = $mtx.WaitOne([int]$CONST.Mutex.WaitMs) } catch { $got = $false }
             }
             if ($got) {
                 [System.IO.File]::AppendAllText($DebugLogFile, $line, [System.Text.Encoding]::UTF8)
@@ -4400,191 +3783,68 @@ $Worker = {
             throw "Некорректная конфигурация прокси: хост='$($ProxyConfig.Host)', порт=$($ProxyConfig.Port)"
         }
         Write-DebugLog "Подключение через прокси $($ProxyConfig.Type) к $($TargetHost):$($TargetPort)"
-        $tcp = New-Object System.Net.Sockets.TcpClient
         try {
-            $asyn = $tcp.BeginConnect($ProxyConfig.Host, $ProxyConfig.Port, $null, $null)
-            if (-not $asyn.AsyncWaitHandle.WaitOne($Timeout)) { throw "Таймаут подключения к прокси" }
-            $tcp.EndConnect($asyn); $stream = $tcp.GetStream()
-            $stream.ReadTimeout = $Timeout; $stream.WriteTimeout = $Timeout
-
-            if ($ProxyConfig.Type -eq "SOCKS5") {
-                Write-DebugLog "SOCKS5: начало рукопожатия"
-
-                # === Определяем, какие методы аутентификации предложить ===
-                $methods = @()
-                if ($ProxyConfig.User -and $ProxyConfig.Pass) {
-                    # Если есть логин/пароль, предлагаем сначала аутентификацию по паролю (0x02), затем без аутентификации (0x00)
-                    $methods = @(0x02, 0x00)
-                } else {
-                    # Без аутентификации предлагаем только 0x00
-                    $methods = @(0x00)
-                }
-                $greeting = [byte[]](@(0x05, $methods.Count) + $methods)
-                $stream.Write($greeting, 0, $greeting.Length)
-
-                # Читаем ответ сервера (2 байта: VER, METHOD)
-                $resp = New-Object byte[] 2
-                if ($stream.Read($resp, 0, 2) -ne 2) {
-                    throw "SOCKS5: нет ответа на выбор метода"
-                }
-                if ($resp[0] -ne 0x05) {
-                    throw "SOCKS5: неверная версия ответа (ожидалась 0x05, получена 0x$('{0:X2}' -f $resp[0]))"
-                }
-
-                $method = $resp[1]
-                Write-DebugLog "SOCKS5: сервер выбрал метод аутентификации 0x$('{0:X2}' -f $method)"
-
-                # === Обработка выбранного метода ===
-                if ($method -eq 0x00) {
-                    # Без аутентификации — ничего не делаем
-                    Write-DebugLog "SOCKS5: аутентификация не требуется"
-                }
-                elseif ($method -eq 0x02) {
-                    # Аутентификация по логину/паролю
-                    if (-not $ProxyConfig.User -or -not $ProxyConfig.Pass) {
-                        throw "SOCKS5: сервер требует логин/пароль, но они не указаны в настройках"
-                    }
-                    $u = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.User)
-                    $p = [Text.Encoding]::UTF8.GetBytes($ProxyConfig.Pass)
-                    $authMsg = [byte[]](@(0x01, $u.Length) + $u + @($p.Length) + $p)
-                    $stream.Write($authMsg, 0, $authMsg.Length)
-
-                    $authResp = New-Object byte[] 2
-                    if ($stream.Read($authResp, 0, 2) -ne 2) {
-                        throw "SOCKS5: нет ответа на аутентификацию"
-                    }
-                    if ($authResp[0] -ne 0x01 -or $authResp[1] -ne 0x00) {
-                        throw "SOCKS5: неверный логин/пароль (код $($authResp[1]))"
-                    }
-                    Write-DebugLog "SOCKS5: аутентификация успешна"
-                }
-                elseif ($method -eq 0xFF) {
-                    throw "SOCKS5: сервер отверг все предложенные методы аутентификации (0xFF). Проверьте, требуется ли аутентификация."
-                }
-                else {
-                    throw "SOCKS5: сервер выбрал неподдерживаемый метод аутентификации 0x$('{0:X2}' -f $method)"
-                }
-
-                # === Запрос на подключение к целевому хосту ===
-                $addrType = 0x03   # domain name
-                $hostBytes = [Text.Encoding]::UTF8.GetBytes($TargetHost)
-                $req = [byte[]](@(0x05, 0x01, 0x00, $addrType, $hostBytes.Length) + $hostBytes + @([math]::Floor($TargetPort/256), ($TargetPort%256)))
-                $stream.Write($req, 0, $req.Length)
-
-                # Читаем ответ (минимум 10 байт)
-                $resp = New-Object byte[] 10
-                $read = 0
-                $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                while ($read -lt 10 -and $sw.ElapsedMilliseconds -lt $Timeout) {
-                    if ($stream.DataAvailable) {
-                        $r = $stream.Read($resp, $read, 10 - $read)
-                        if ($r -eq 0) { break }
-                        $read += $r
-                    } else { Start-Sleep -Milliseconds 20 }
-                }
-                if ($read -lt 10) { throw "SOCKS5: неполный ответ на запрос подключения" }
-                if ($resp[0] -ne 0x05) { throw "SOCKS5: неверная версия в ответе на подключение" }
-                if ($resp[1] -ne 0x00) {
-                    $repCode = $resp[1]
-                    $errorMap = @{
-                        0x01 = "general failure"
-                        0x02 = "connection not allowed"
-                        0x03 = "network unreachable"
-                        0x04 = "host unreachable"
-                        0x05 = "connection refused"
-                        0x06 = "TTL expired"
-                        0x07 = "command not supported"
-                        0x08 = "address type not supported"
-                    }
-                    $errText = if ($errorMap.ContainsKey($repCode)) { $errorMap[$repCode] } else { "unknown error 0x$('{0:X2}' -f $repCode)" }
-                    throw "SOCKS5: сервер вернул ошибку - $errText"
-                }
-                Write-DebugLog "SOCKS5: маршрут установлен успешно"
-                return @{ Tcp = $tcp; Stream = $stream }
-            }
-            elseif ($ProxyConfig.Type -eq "HTTP") {
-                $hdr = "CONNECT ${TargetHost}:$TargetPort HTTP/1.1`r`nHost: ${TargetHost}:$TargetPort`r`n"
-                if ($ProxyConfig.User -and $ProxyConfig.Pass) {
-                    $authBytes = [Text.Encoding]::ASCII.GetBytes("$($ProxyConfig.User):$($ProxyConfig.Pass)")
-                    $hdr += "Proxy-Authorization: Basic $([Convert]::ToBase64String($authBytes))`r`n"
-                }
-                $hdr += "`r`n"
-                $reqBytes = [Text.Encoding]::ASCII.GetBytes($hdr)
-                $stream.Write($reqBytes, 0, $reqBytes.Length)
-
-                $swRead = [System.Diagnostics.Stopwatch]::StartNew()
-                $response = ""
-                $buf = New-Object byte[] 1024
-                while ($swRead.ElapsedMilliseconds -lt $Timeout) {
-                    if ($stream.DataAvailable) {
-                        $r = $stream.Read($buf, 0, 1024)
-                        if ($r -le 0) { break }
-                        $response += [Text.Encoding]::ASCII.GetString($buf, 0, $r)
-                        if ($response -match "`r`n`r`n") { break }
-                    } else { Start-Sleep -Milliseconds 20 }
-                }
-
-                if ($response -match '(?m)HTTP/1\.\d\s+200') {
-                    Write-DebugLog "HTTP CONNECT tunnel OK -> ${TargetHost}:$TargetPort"
-                    return @{ Tcp = $tcp; Stream = $stream }
-                }
-
-                $snip = if ($response.Length -gt 160) { $response.Substring(0, 160) + "..." } else { $response }
-                throw "HTTP CONNECT не 200: $snip"
-            }
-            else {
-                throw "Неподдерживаемый тип прокси для туннеля: $($ProxyConfig.Type)"
-            }
+            $wrap = [YtDpi.ProxyThrough]::Establish(
+                [string]$ProxyConfig.Host,
+                [int]$ProxyConfig.Port,
+                [string]$ProxyConfig.Type,
+                [string]$TargetHost,
+                [int]$TargetPort,
+                ([string]$ProxyConfig.User),
+                ([string]$ProxyConfig.Pass),
+                $Timeout)
+            return @{ Tcp = $wrap.Tcp; Stream = $wrap.Stream }
         } catch {
-            if($tcp){$tcp.Close()}
             Write-DebugLog "Ошибка прокси: $($_.Exception.Message)" "WARN"
-            throw $_
+            throw
         }
+    }
+
+    function Set-Verdict-DualTlsCells {
+        param([string]$Cell12, [string]$Cell13)
+        $t12Ok = ($Cell12 -eq "OK")
+        $t13Ok = ($Cell13 -eq "OK")
+        $t12Blocked = ($Cell12 -eq "RST" -or $Cell12 -eq "DRP")
+        $t13Blocked = ($Cell13 -eq "RST" -or $Cell13 -eq "DRP")
+        if ($t12Ok -and $t13Ok) { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"; return }
+        if ($t12Ok -or $t13Ok) {
+            if ($t12Blocked -or $t13Blocked) {
+                $Result.Verdict = "THROTTLED"; $Result.Color = "Yellow"
+            } else {
+                $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
+            }
+            return
+        }
+        if ($Cell12 -eq "RST" -or $Cell13 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red"; return }
+        if ($Cell12 -eq "DRP" -or $Cell13 -eq "DRP") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red"; return }
+        $Result.Verdict = "IP BLOCK"; $Result.Color = "Red"
     }
 
     $Result = [PSCustomObject]@{ IP="FAILED"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="UNKNOWN"; Color="White"; Target=$Target; Number=0 }
     $TO = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { $CONST.TimeoutMs }
-    $HttpTimeoutFast = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { [Math]::Min($TO, 1200) }
-    $TlsTimeoutFast  = if ($ProxyConfig.Enabled) { 2200 } else { 1600 }
-    $TlsTimeoutRetry = if ($ProxyConfig.Enabled) { [Math]::Max(2600, $CONST.ProxyTimeout) } else { 2600 }
+    $HttpTimeoutFast = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { [Math]::Min($TO, $CONST.Scan.HttpDirectCapMs) }
+    $TlsTimeoutFast  = if ($ProxyConfig.Enabled) { $CONST.Scan.TlsFastMsProxy } else { $CONST.Scan.TlsFastMsDirect }
+    $TlsTimeoutRetry = if ($ProxyConfig.Enabled) { [Math]::Max($CONST.Scan.TlsRetryMsProxyFloor, $CONST.ProxyTimeout) } else { $CONST.Scan.TlsRetryMsDirect }
 
     Write-DebugLog "--- НАЧАЛО ПРОВЕРКИ ---"
 
     function Invoke-TcpConnectWithFallback {
         param($TargetIp, $TargetPort, $TimeoutMs)
-        $tcp = $null
         try {
-            $ipAddress = [System.Net.IPAddress]::Parse($TargetIp)
-            $tcp = New-Object System.Net.Sockets.TcpClient($ipAddress.AddressFamily)
-            $async = $tcp.BeginConnect($ipAddress, $TargetPort, $null, $null)
-            if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "Timeout" }
-            $tcp.EndConnect($async)
-            return $tcp
+            return [YtDpi.TcpTimeouts]::ConnectToIpPort([string]$TargetIp, [int]$TargetPort, [int]$TimeoutMs)
         } catch {
             if ($_.Exception.Message -match "address family|None of the discovered") {
-                # Если это IPv6, пытаемся получить IPv4
                 if ($TargetIp -match ':') {
                     Write-DebugLog "Ошибка семейства адресов при использовании IPv6 ($TargetIp), пробуем получить IPv4 для $Target"
-                    $v4Address = $null
                     try {
                         $ips = [System.Net.Dns]::GetHostAddresses($Target)
                         $v4 = $ips | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1
                         if ($v4) {
                             $v4Address = $v4.IPAddressToString
                             Write-DebugLog "Найден IPv4: $v4Address"
-                            # Обновляем кэш
-                            if ($DnsCacheLock.WaitOne(1000)) {
-                                $DnsCache[$Target] = $v4Address
-                                [void]$DnsCacheLock.ReleaseMutex()
-                            }
-                            # Повторяем попытку с IPv4
-                            $ipAddressV4 = [System.Net.IPAddress]::Parse($v4Address)
-                            $tcp = New-Object System.Net.Sockets.TcpClient($ipAddressV4.AddressFamily)
-                            $async = $tcp.BeginConnect($ipAddressV4, $TargetPort, $null, $null)
-                            if (-not $async.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "Timeout after fallback" }
-                            $tcp.EndConnect($async)
+                            $DnsCache[$Target] = $v4Address
                             $Result.IP = $v4Address
-                            return $tcp
+                            return [YtDpi.TcpTimeouts]::ConnectToIpPort([string]$v4Address, [int]$TargetPort, [int]$TimeoutMs)
                         } else {
                             Write-DebugLog "Не удалось найти IPv4 для $Target"
                         }
@@ -4597,13 +3857,13 @@ $Worker = {
         }
     }
 
-    # 1. DNS
+    # 1. DNS (ConcurrentDictionary $DnsCache — без глобального mutex)
     $ipStr = $null
     if (-not $ProxyConfig.Enabled) {
         try {
-            if ($DnsCacheLock.WaitOne(1000)) {
-                if ($DnsCache.ContainsKey($Target)) { $ipStr = $DnsCache[$Target] }
-                [void]$DnsCacheLock.ReleaseMutex()
+            $cachedIp = $null
+            if ($DnsCache.TryGetValue($Target, [ref]$cachedIp)) {
+                $ipStr = $cachedIp
             }
             if (-not $ipStr) {
                 $ips = [System.Net.Dns]::GetHostAddresses($Target)
@@ -4617,34 +3877,43 @@ $Worker = {
                     $ipStr = if ($v4) { $v4.IPAddressToString } else { $v6.IPAddressToString }
                 }
 
-                if ($DnsCacheLock.WaitOne(1000)) {
-                    $DnsCache[$Target] = $ipStr
-                    [void]$DnsCacheLock.ReleaseMutex()
-                }
+                $DnsCache[$Target] = $ipStr
             }
         } catch { $ipStr = "DNS_ERR" }
         $Result.IP = $ipStr
     } else { $Result.IP = "[ PROXIED ]" }
 
-    # 2. HTTP Проверка
+    # 2. HTTP Проверка (прокси: YtDpi.HttpPortProbe; прямой: Tcp через Invoke-TcpConnectWithFallback → IPv4 fallback)
     Write-DebugLog "HTTP: Тест порта 80..."
-    $conn = $null
     try {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
         if ($ProxyConfig.Enabled) {
-            $conn = Connect-ThroughProxy $Target 80 $ProxyConfig $TO
+            $hp = [YtDpi.HttpPortProbe]::QuickViaProxy(
+                [string]$Target, 80,
+                [string]$ProxyConfig.Host, [int]$ProxyConfig.Port,
+                [string]$ProxyConfig.Type,
+                ([string]$ProxyConfig.User), ([string]$ProxyConfig.Pass),
+                [int]$HttpTimeoutFast)
+            $Result.Lat = "$($hp.LatencyMs)"
+            if ($hp.Ok) {
+                $Result.HTTP = "OK"
+                Write-DebugLog "HTTP: OK (Ping: $($Result.Lat))"
+            } else {
+                $Result.HTTP = "ERR"
+                Write-DebugLog "HTTP: недоступно (probe)" "WARN"
+            }
         } else {
-            # Используем новую функцию с fallback на IPv4
-            $tcp = Invoke-TcpConnectWithFallback -TargetIp $Result.IP -TargetPort 80 -TimeoutMs $HttpTimeoutFast
-            $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $tcpHttp = Invoke-TcpConnectWithFallback -TargetIp $Result.IP -TargetPort 80 -TimeoutMs $HttpTimeoutFast
+            $sw.Stop()
+            try { $tcpHttp.Close() } catch { }
+            $Result.Lat = "$($sw.ElapsedMilliseconds)"
+            $Result.HTTP = "OK"
+            Write-DebugLog "HTTP: OK (Ping: $($Result.Lat))"
         }
-        $Result.Lat = "$($sw.ElapsedMilliseconds)"
-        $Result.HTTP = "OK"
-        Write-DebugLog "HTTP: OK (Ping: $($Result.Lat))"
     } catch {
         $Result.HTTP = "ERR"
         Write-DebugLog "HTTP: Ошибка -> $($_.Exception.Message)" "WARN"
-    } finally { if ($conn) { $conn.Tcp.Close() } }
+    }
 
     if ($Result.HTTP -eq "ERR") {
     $Result.T12 = "---"
@@ -4658,150 +3927,192 @@ $Worker = {
     $consider13 = ($tlsModeRaw -notmatch '^(?i)TLS12$')
     $consider12 = ($tlsModeRaw -notmatch '^(?i)TLS13$')
 
-    # 3. TLS Проверки
+    # 3. TLS Проверки (опционально: первый проход T13+T12 параллельно при Auto и обоих столбцах)
     $pHost = if ($ProxyConfig.Enabled) { $ProxyConfig.Host } else { "" }
     $pPort = if ($ProxyConfig.Enabled) { [int]$ProxyConfig.Port } else { 0 }
 
-    if ($consider13) {
-        $Result.T13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
-        Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
-        if ($Result.T13 -eq "DRP") {
-            Write-DebugLog "TLS T13: повтор с увеличенным таймаутом ($TlsTimeoutRetry ms)" "INFO"
-            $retryT13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
-            if ($retryT13 -eq "OK" -or $retryT13 -eq "RST") { $Result.T13 = $retryT13 }
+    $t12TimedOut = $false
+    $didParallelTls = ($consider13 -and $consider12 -and $ParallelTlsFirstPass)
+
+    # Параллельный первый проход через ThreadPool Tasks здесь нестабилен: делегаты на других потоках часто
+    # не заполняют PSCustomObject ($tlsSnap.T13/$tlsSnap.H12 остаются $null → ложный IP BLOCK).
+    $parallelTlsHandled = $false
+    if ($didParallelTls) {
+        $tlsSnap = [PSCustomObject]@{
+            IP=$Result.IP; THost=$Target; PH=$pHost; PP=$pPort
+            PU=$ProxyConfig.User; PPw=$ProxyConfig.Pass; Tf=$TlsTimeoutFast
+            Px=[bool]$ProxyConfig.Enabled; PxH=$ProxyConfig.Host; PxPt=[int]$ProxyConfig.Port; PxTy=[string]$ProxyConfig.Type
+            T13=$null; H12=$null
         }
-    } else {
-        $Result.T13 = "N/A"
-        Write-DebugLog "TLS T13: пропущено (режим TLS12)"
+        $t13Sb = {
+            param([object]$st)
+            $st.T13 = [YtDpi.TlsScanner]::TestT13($st.IP, $st.THost, $st.PH, $st.PP, $st.PU, $st.PPw, $st.Tf)
+        }
+        $t12Sb = {
+            param([object]$st)
+            if ($st.Px) {
+                $w = [YtDpi.ProxyThrough]::Establish([string]$st.PxH, [int]$st.PxPt, [string]$st.PxTy, [string]$st.THost, 443, ([string]$st.PU), ([string]$st.PPw), [int]$st.Tf)
+                try {
+                    $st.H12 = [YtDpi.Tls12Scripting]::HandshakeOverStreamDetailed($w.Stream, $st.THost, $st.Tf)
+                } finally {
+                    try { $w.Dispose() } catch { }
+                }
+            } else {
+                $st.H12 = [YtDpi.Tls12Scripting]::HandshakeDirectDetailed($st.IP, 443, $st.THost, $st.Tf)
+            }
+        }
+        $t13Del = [System.Action[object]]$t13Sb
+        $t12Del = [System.Action[object]]$t12Sb
+        $t13Task = [System.Threading.Tasks.Task]::Factory.StartNew($t13Del, $tlsSnap)
+        $t12Task = [System.Threading.Tasks.Task]::Factory.StartNew($t12Del, $tlsSnap)
+        [System.Threading.Tasks.Task]::WaitAll(@($t13Task, $t12Task))
+
+        $parallelOk = $false
+        try {
+            $parallelOk = (-not $t13Task.IsFaulted) -and (-not $t12Task.IsFaulted) -and ($null -ne $tlsSnap.T13) -and ($null -ne $tlsSnap.H12)
+        } catch { $parallelOk = $false }
+
+        if ($parallelOk) {
+            $Result.T13 = $tlsSnap.T13
+            $h12 = $tlsSnap.H12
+            $Result.T12 = $h12.Cell
+            $t12TimedOut = $h12.HandshakeTimedOut
+            $parallelTlsHandled = $true
+            Write-DebugLog "TLS parallel first pass: T13=$($Result.T13) T12=$($Result.T12) Host=$Target"
+            Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
+            if ($Result.T13 -eq "DRP") {
+                Write-DebugLog "TLS T13: повтор с увеличенным таймаутом ($TlsTimeoutRetry ms)" "INFO"
+                $retryT13 = [YtDpi.TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
+                if ($retryT13 -eq "OK" -or $retryT13 -eq "RST") { $Result.T13 = $retryT13 }
+            }
+        } else {
+            Write-DebugLog "TLS parallel (Tasks): нет результата или fault — последовательный TLS для $Target" "WARN"
+        }
     }
 
-    # Проверка TLS 1.2
-    $conn = $null; $ssl = $null
-    $t12TimedOut = $false
-    if ($consider12) {
-        try {
-            if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutFast }
-            else {
-                $tcp = [System.Net.Sockets.TcpClient]::new()
-                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
-                if (-not $ar.AsyncWaitHandle.WaitOne($TlsTimeoutFast)) { throw "TcpTimeout" }
-                $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+    if (-not $parallelTlsHandled) {
+        if ($consider13) {
+            $Result.T13 = [YtDpi.TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
+            Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
+            if ($Result.T13 -eq "DRP") {
+                Write-DebugLog "TLS T13: повтор с увеличенным таймаутом ($TlsTimeoutRetry ms)" "INFO"
+                $retryT13 = [YtDpi.TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
+                if ($retryT13 -eq "OK" -or $retryT13 -eq "RST") { $Result.T13 = $retryT13 }
             }
-
-            $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false)
-
-            # ВАЖНО: делаем handshake асинхронным, чтобы реально ограничить время операции.
-            $enabled = [System.Security.Authentication.SslProtocols]::Tls12
-            $auth = $ssl.BeginAuthenticateAsClient($Target, $null, $enabled, $false, $null, $null)
-            if (-not $auth.AsyncWaitHandle.WaitOne($TlsTimeoutFast)) {
-                $t12TimedOut = $true
-                try { $ssl.Close() } catch {}
-                throw "TLS12_TIMEOUT"
-            }
-
-            $ssl.EndAuthenticateAsClient($auth)
-            $Result.T12 = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
-        } catch {
-            if ($_.Exception.Message -eq "TLS12_TIMEOUT") {
-                $Result.T12 = "DRP"
-            } else {
-                $m = $_.Exception.Message
-                if ($_.Exception.InnerException) { $m += " | Inner: $($_.Exception.InnerException.Message)" }
-                if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $Result.T12 = "RST" }
-                elseif ($m -match "certificate|сертификат|remote|success") { $Result.T12 = "OK" }
-                else { $Result.T12 = "DRP" }
-            }
-        } finally {
-            if($ssl){ try { $ssl.Close() } catch {} }
-            if($conn){ try { $conn.Tcp.Close() } catch {} }
+        } else {
+            $Result.T13 = "N/A"
+            Write-DebugLog "TLS T13: пропущено (режим TLS12)"
         }
-    } else {
-        $Result.T12 = "N/A"
-        Write-DebugLog "TLS T12: пропущено (режим TLS13)"
+
+        if ($consider12) {
+            if ($ProxyConfig.Enabled) {
+                $conn = $null
+                try {
+                    $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutFast
+                    $h12 = [YtDpi.Tls12Scripting]::HandshakeOverStreamDetailed($conn.Stream, $Target, $TlsTimeoutFast)
+                } finally {
+                    if ($conn) { try { $conn.Tcp.Close() } catch {} }
+                }
+            } else {
+                $h12 = [YtDpi.Tls12Scripting]::HandshakeDirectDetailed($Result.IP, 443, $Target, $TlsTimeoutFast)
+            }
+            $Result.T12 = $h12.Cell
+            $t12TimedOut = $h12.HandshakeTimedOut
+        } else {
+            $Result.T12 = "N/A"
+            Write-DebugLog "TLS T12: пропущено (режим TLS13)"
+        }
     }
 
     # Retry при timeout T12: в Auto — только если T13 OK; в режиме только TLS12 — всегда при timeout
     $doT12Retry = $t12TimedOut -and $consider12 -and (($consider13 -and $Result.T13 -eq "OK") -or (-not $consider13))
     if ($doT12Retry) {
         Write-DebugLog "TLS T12: retry после timeout ($TlsTimeoutRetry ms)" "INFO"
-        $conn = $null; $ssl = $null
-        try {
-            if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutRetry }
-            else {
-                $tcp = [System.Net.Sockets.TcpClient]::new()
-                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
-                if (-not $ar.AsyncWaitHandle.WaitOne($TlsTimeoutRetry)) { throw "TcpTimeout" }
-                $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+        if ($ProxyConfig.Enabled) {
+            $conn = $null
+            try {
+                $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutRetry
+                $h12 = [YtDpi.Tls12Scripting]::HandshakeOverStreamDetailed($conn.Stream, $Target, $TlsTimeoutRetry)
+            } finally {
+                if ($conn) { try { $conn.Tcp.Close() } catch {} }
             }
+        } else {
+            $h12 = [YtDpi.Tls12Scripting]::HandshakeDirectDetailed($Result.IP, 443, $Target, $TlsTimeoutRetry)
+        }
+        $Result.T12 = $h12.Cell
+    }
 
-            $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false)
-            $enabled = [System.Security.Authentication.SslProtocols]::Tls12
-            $auth = $ssl.BeginAuthenticateAsClient($Target, $null, $enabled, $false, $null, $null)
-            if (-not $auth.AsyncWaitHandle.WaitOne($TlsTimeoutRetry)) {
-                $Result.T12 = "DRP"
-                try { $ssl.Close() } catch {}
-                throw "TLS12_TIMEOUT"
-            }
-            $ssl.EndAuthenticateAsClient($auth)
-            $Result.T12 = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
-        } catch {
-            if ($_.Exception.Message -eq "TLS12_TIMEOUT") {
-                $Result.T12 = "DRP"
+    # При режиме «только T12» или «только T13» основная колонка может быть DRP/RST, а второй протокол — OK (в Auto это THROTTLED).
+    # Вспомогательная проверка второго протокола влияет только на вердикт; противоположная колонка в таблице остаётся N/A.
+    $auxVerdictT13 = $null
+    $auxVerdictT12 = $null
+    if (-not $consider13 -and ($Result.T12 -eq "DRP" -or $Result.T12 -eq "RST")) {
+        Write-DebugLog "Режим TLS12-only: вспомогательная проверка T13 для вердикта ($Target)" "INFO"
+        $auxVerdictT13 = [YtDpi.TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
+        if ($auxVerdictT13 -eq "DRP") {
+            $retryAu13 = [YtDpi.TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
+            if ($retryAu13 -eq "OK" -or $retryAu13 -eq "RST") { $auxVerdictT13 = $retryAu13 }
+        }
+    }
+    elseif (-not $consider12 -and ($Result.T13 -eq "DRP" -or $Result.T13 -eq "RST")) {
+        Write-DebugLog "Режим TLS13-only: вспомогательная проверка T12 для вердикта ($Target)" "INFO"
+        $auTimedOut = $false
+        $connAu = $null
+        try {
+            if ($ProxyConfig.Enabled) {
+                $connAu = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutFast
+                $ah12 = [YtDpi.Tls12Scripting]::HandshakeOverStreamDetailed($connAu.Stream, $Target, $TlsTimeoutFast)
             } else {
-                $m = $_.Exception.Message
-                if ($_.Exception.InnerException) { $m += " | Inner: $($_.Exception.InnerException.Message)" }
-                if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $Result.T12 = "RST" }
-                elseif ($m -match "certificate|сертификат|remote|success") { $Result.T12 = "OK" }
-                else { $Result.T12 = "DRP" }
+                $ah12 = [YtDpi.Tls12Scripting]::HandshakeDirectDetailed($Result.IP, 443, $Target, $TlsTimeoutFast)
             }
+            $auxVerdictT12 = $ah12.Cell
+            $auTimedOut = $ah12.HandshakeTimedOut
         } finally {
-            if($ssl){ try { $ssl.Close() } catch {} }
-            if($conn){ try { $conn.Tcp.Close() } catch {} }
+            if ($connAu) { try { $connAu.Tcp.Close() } catch {} }
+            $connAu = $null
+        }
+        if ($auTimedOut) {
+            try {
+                if ($ProxyConfig.Enabled) {
+                    $connAu = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutRetry
+                    $ah12 = [YtDpi.Tls12Scripting]::HandshakeOverStreamDetailed($connAu.Stream, $Target, $TlsTimeoutRetry)
+                } else {
+                    $ah12 = [YtDpi.Tls12Scripting]::HandshakeDirectDetailed($Result.IP, 443, $Target, $TlsTimeoutRetry)
+                }
+                $auxVerdictT12 = $ah12.Cell
+            } finally {
+                if ($connAu) { try { $connAu.Tcp.Close() } catch {} }
+            }
         }
     }
 
     # 4. Логика вердикта (с учётом TlsMode: только 1.2 / только 1.3 / оба)
     if (-not $consider13) {
-        if ($Result.T12 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
-        elseif ($Result.T12 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
-        elseif ($Result.T12 -eq "DRP") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red" }
-        else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
+        if ($null -ne $auxVerdictT13) {
+            # Колонку T13 не заполняем: режим «только TLS 1.2»; вердикт считается по вспомогательному T13.
+            Set-Verdict-DualTlsCells -Cell12 $Result.T12 -Cell13 $auxVerdictT13
+        } else {
+            if ($Result.T12 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
+            elseif ($Result.T12 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
+            elseif ($Result.T12 -eq "DRP") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red" }
+            else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
+        }
         return $Result
     }
     if (-not $consider12) {
-        if ($Result.T13 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
-        elseif ($Result.T13 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
-        elseif ($Result.T13 -eq "DRP") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red" }
-        else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
+        if ($null -ne $auxVerdictT12) {
+            # Колонку T12 не трогаем: режим «только TLS 1.3»; вердикт по вспомогательному T12.
+            Set-Verdict-DualTlsCells -Cell12 $auxVerdictT12 -Cell13 $Result.T13
+        } else {
+            if ($Result.T13 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
+            elseif ($Result.T13 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
+            elseif ($Result.T13 -eq "DRP") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red" }
+            else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
+        }
         return $Result
     }
 
-    $t12Ok = ($Result.T12 -eq "OK")
-    $t13Ok = ($Result.T13 -eq "OK")
-    $t12Blocked = ($Result.T12 -eq "RST" -or $Result.T12 -eq "DRP")
-    $t13Blocked = ($Result.T13 -eq "RST" -or $Result.T13 -eq "DRP")
-
-    if ($t12Ok -and $t13Ok) {
-        $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
-    }
-    elseif ($t12Ok -or $t13Ok) {
-        # Один из протоколов работает, другой — нет
-        if ($t12Blocked -or $t13Blocked) {
-            $Result.Verdict = "THROTTLED"; $Result.Color = "Yellow"
-        } else {
-            # Например, один OK, а другой ERR (проблема настройки, а не блокировка)
-            $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
-        }
-    }
-    elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
-        $Result.Verdict = "DPI RESET"; $Result.Color = "Red"
-    }
-    elseif ($Result.T12 -eq "DRP" -or $Result.T13 -eq "DRP") {
-        $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red"
-    }
-    else {
-        $Result.Verdict = "IP BLOCK"; $Result.Color = "Red"
-    }
+    Set-Verdict-DualTlsCells -Cell12 $Result.T12 -Cell13 $Result.T13
     return $Result
 }
 
@@ -4829,14 +4140,9 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
     Sync-DynamicColPosFromLayout
 
     $cpuCount = [Environment]::ProcessorCount
-    # Для сетевых задач CPU не главный лимит, поэтому увеличиваем конкурентность,
-    # но держим разумные пределы, чтобы не перегружать сокеты/прокси.
-    $recommendedThreads = [Math]::Max(8, [Math]::Min(24, $cpuCount * 3))
-    if ($ProxyConfig.Enabled) {
-        $recommendedThreads = [Math]::Min($recommendedThreads, 12)
-    }
+    $recommendedThreads = Get-ScanRecommendedWorkerCap -ProxyEnabled:$($ProxyConfig.Enabled)
     $maxThreads = [Math]::Min($Targets.Count, $recommendedThreads)
-    Write-DebugLog "Запуск пула потоков: $maxThreads воркеров (CPU=$cpuCount, proxy=$($ProxyConfig.Enabled))."
+    Write-DebugLog "Запуск пула потоков: $maxThreads воркеров (CPU=$cpuCount, proxy=$($ProxyConfig.Enabled), cap=$recommendedThreads)."
 
     $pool = [runspacefactory]::CreateRunspacePool(1, $maxThreads)
     $pool.Open()
@@ -4851,12 +4157,12 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
             AddArgument($CONST).                 # 3. $CONST
             AddArgument($DebugLogFile).          # 4. $DebugLogFile
             AddArgument([bool](Test-DebugLogEnabled)). # 5. effective debug (env или конфиг)
-            AddArgument($script:DnsCache).       # 6. $DnsCache
-            AddArgument($script:DnsCacheLock).   # 7. $DnsCacheLock
-            AddArgument($script:NetInfo).        # 8. $NetInfo
-            AddArgument($script:Config.IpPreference). # 9. $IpPreference
-            AddArgument([string]$script:Config.TlsMode). # 10. $TlsMode
-            AddArgument([string]$script:DebugLogMutexName) # 11. mutex для записи в общий лог
+            AddArgument($script:DnsCache).       # 6. $DnsCache (ConcurrentDictionary)
+            AddArgument($script:NetInfo).        # 7. $NetInfo
+            AddArgument($script:Config.IpPreference). # 8. $IpPreference
+            AddArgument([string]$script:Config.TlsMode). # 9. $TlsMode
+            AddArgument([string]$script:DebugLogMutexName). # 10. mutex для записи в общий лог
+            AddArgument([bool]($script:Config.ScanParallelTlsFirstPass -eq $true)) # 11. параллельный первый T13+T12
 
         $ps.RunspacePool = $pool
         [void]$jobs.Add([PSCustomObject]@{
@@ -4900,7 +4206,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
         $resizedScan = Test-ScanPhaseConsoleLayoutChanged
         $nowBar = [Environment]::TickCount64
         $bucketScan = [int]($pctScan * 40)
-        if ($resizedScan -or ($completedTasks -ne $scanBarLastDone) -or (($nowBar - $scanBarLastMs) -ge 240) -or ($bucketScan -ne $scanBarLastBucket)) {
+        if ($resizedScan -or ($completedTasks -ne $scanBarLastDone) -or (($nowBar - $scanBarLastMs) -ge $CONST.UiScan.StatusBarThrottleCollectMs) -or ($bucketScan -ne $scanBarLastBucket)) {
             $scanBarLastMs = $nowBar
             $scanBarLastDone = $completedTasks
             $scanBarLastBucket = $bucketScan
@@ -4939,7 +4245,12 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
     if (-not $aborted) {
         $totalCount = $Targets.Count
         $frameCounter = 0
-        $animTargetMs = 1000.0 / [double]($CONST.AnimFps)
+        $revealFps = [double]$CONST.AnimFps
+        try {
+            $rf = $CONST.UiScan.RevealAnimFps
+            if ($null -ne $rf -and [int]$rf -gt 0) { $revealFps = [double][int]$rf }
+        } catch { }
+        $animTargetMs = 1000.0 / $revealFps
         $frameSw.Restart()
         $revealBarLastMs = [Environment]::TickCount64
         $revealBarLastI = -9999
@@ -4952,7 +4263,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
             $resizedReveal = Test-ScanPhaseConsoleLayoutChanged
             $nowRv = [Environment]::TickCount64
             $bucketRv = [int]($pctReveal * 40)
-            if ($resizedReveal -or ($i -ne $revealBarLastI) -or (($nowRv - $revealBarLastMs) -ge 280) -or ($bucketRv -ne $revealBarLastBucket)) {
+            if ($resizedReveal -or ($i -ne $revealBarLastI) -or (($nowRv - $revealBarLastMs) -ge $CONST.UiScan.StatusBarThrottleRevealMs) -or ($bucketRv -ne $revealBarLastBucket)) {
                 $revealBarLastMs = $nowRv
                 $revealBarLastI = $i
                 $revealBarLastBucket = $bucketRv
@@ -5048,13 +4359,12 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
         $script:NetInfo.HasIPv6 = $false
         if ($script:Config.NetCache) { $script:Config.NetCache.HasIPv6 = $false }
         Save-Config $script:Config
-        if ($script:DnsCacheLock.WaitOne(1000)) {
-            $toRemove = @()
-            foreach ($key in $script:DnsCache.Keys) {
-                if ($script:DnsCache[$key] -match ':') { $toRemove += $key }
+        foreach ($key in @($script:DnsCache.Keys)) {
+            $v = $null
+            if ($script:DnsCache.TryGetValue($key, [ref]$v) -and ($v -match ':')) {
+                $removed = $null
+                [void]$script:DnsCache.TryRemove($key, [ref]$removed)
             }
-            foreach ($key in $toRemove) { $script:DnsCache.Remove($key) }
-            [void]$script:DnsCacheLock.ReleaseMutex()
         }
     }
 
@@ -5074,10 +4384,10 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
 }
 
 function Sync-DnsCacheFromConfig {
-    $script:DnsCache = [hashtable]::Synchronized(@{})
+    $script:DnsCache = [System.Collections.Concurrent.ConcurrentDictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     if ($script:Config.DnsCache -and $script:Config.DnsCache.PSObject) {
         foreach ($prop in $script:Config.DnsCache.PSObject.Properties) {
-            if ($prop.MemberType -eq "NoteProperty") { $script:DnsCache[$prop.Name] = $prop.Value }
+            if ($prop.MemberType -eq "NoteProperty") { $script:DnsCache[$prop.Name] = [string]$prop.Value }
         }
     }
 }
@@ -5087,7 +4397,7 @@ function Test-InternetAvailable {
     try {
         # Самый быстрый тест - ping до 8.8.8.8
         $ping = New-Object System.Net.NetworkInformation.Ping
-        $reply = $ping.Send("8.8.8.8", 1000)
+        $reply = $ping.Send("8.8.8.8", $SCRIPT:CONST.Internet.PingTimeoutMs)
         $internetAvailable = ($reply.Status -eq [System.Net.NetworkInformation.IPStatus]::Success)
         $ping.Dispose()
     } catch {
@@ -5095,7 +4405,7 @@ function Test-InternetAvailable {
         try {
             $tcpTest = New-Object System.Net.Sockets.TcpClient
             $async = $tcpTest.BeginConnect("8.8.8.8", 53, $null, $null)
-            if ($async.AsyncWaitHandle.WaitOne(1000)) {
+            if ($async.AsyncWaitHandle.WaitOne($SCRIPT:CONST.Internet.TcpFallbackMs)) {
                 $tcpTest.EndConnect($async)
                 $internetAvailable = $true
             }
@@ -5118,7 +4428,7 @@ function Start-QuickNetInfoUpdater {
     }
 
     Start-Job -Name "NetInfoUpdater" -ScriptBlock {
-        param($configDir, $debugLog, $userAgent, $mutexName)
+        param($configDir, $debugLog, $userAgent, $mutexName, [int]$mutexWaitMs, [int]$redirectorTimeoutMs, [int]$ipv6WaitMs)
 
         function Write-BgLog($msg) {
             $line = "[$(Get-Date -Format 'HH:mm:ss')] [BG] $msg`r`n"
@@ -5126,7 +4436,7 @@ function Start-QuickNetInfoUpdater {
             $got = $false
             try {
                 try { $mtx = if ($mutexName) { [System.Threading.Mutex]::OpenExisting($mutexName) } else { $null } } catch { $mtx = $null }
-                if ($mtx) { try { $got = $mtx.WaitOne(15000) } catch { $got = $false } }
+                if ($mtx) { try { $got = $mtx.WaitOne($mutexWaitMs) } catch { $got = $false } }
                 if ($got) {
                     [System.IO.File]::AppendAllText($debugLog, $line, [System.Text.Encoding]::UTF8)
                 } else {
@@ -5158,7 +4468,7 @@ function Start-QuickNetInfoUpdater {
             Write-BgLog "Запрос локального CDN: $redirectorUrl"
 
             $req = [System.Net.WebRequest]::Create($redirectorUrl)
-            $req.Timeout = 3000
+            $req.Timeout = $redirectorTimeoutMs
             if ($userAgent) { $req.UserAgent = $userAgent }
 
             $resp = $req.GetResponse()
@@ -5212,7 +4522,7 @@ function Start-QuickNetInfoUpdater {
         try {
             $t = New-Object System.Net.Sockets.TcpClient([System.Net.Sockets.AddressFamily]::InterNetworkV6)
             $a = $t.BeginConnect("ipv6.google.com", 80, $null, $null)
-            if ($a.AsyncWaitHandle.WaitOne(1000)) {
+            if ($a.AsyncWaitHandle.WaitOne($ipv6WaitMs)) {
                 $t.EndConnect($a)
                 $hasV6 = $true
             }
@@ -5248,7 +4558,7 @@ function Start-QuickNetInfoUpdater {
 
         Write-BgLog "Фоновое обновление завершено"
         return $result
-    } -ArgumentList $script:ConfigDir, $DebugLogFile, $script:UserAgent, $script:DebugLogMutexName | Out-Null
+    } -ArgumentList $script:ConfigDir, $DebugLogFile, $script:UserAgent, $script:DebugLogMutexName, ([int]$SCRIPT:CONST.Mutex.WaitMs), ([int]$SCRIPT:CONST.NetInfo.RedirectorRequestMs), ([int]$SCRIPT:CONST.NetInfo.Ipv6ProbeWaitMs) | Out-Null
 }
 
 function Update-TargetsBeforeScan {
@@ -5400,7 +4710,7 @@ function Invoke-TraceAction {
                 }
 
                 try {
-                    $trace = Trace-TcpRoute -Target $target -Port 443 -MaxHops 15 -TimeoutSec 5 -onProgress $progressBlock
+                    $trace = Trace-TcpRoute -Target $target -Port 443 -MaxHops 15 -TimeoutSec $SCRIPT:CONST.Traceroute.DefaultTimeoutSec -onProgress $progressBlock
                 } catch {
                     Write-DebugLog "Invoke-TraceAction: Trace-TcpRoute: $_" "ERROR"
                     $trace = @()
@@ -5647,6 +4957,7 @@ $script:Config.RunCount++
 
 # 2. Синхронизация DNS кэша
 Sync-DnsCacheFromConfig
+Initialize-DisableBrokenParallelTlsTasks
 
 # 3. Выбираем готовые данные из завершённого фонового обновления/кэша или единую заглушку
 $script:NetInfo = Get-ReadyNetInfo
