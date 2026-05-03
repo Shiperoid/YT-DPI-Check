@@ -23,6 +23,10 @@
 * **Bash (`YT-DPI.sh`):** те же горячие клавиши при **русской раскладке** (физические клавиши, соответствующие Q/H/S/P/T/R).
 * **Релиз:** [Releases](https://github.com/Shiperoid/YT-DPI/releases) — для Windows нужны **`YT-DPI.bat`** и **`YT-DPI.ps1`** в одной папке; см. [v2.3.1](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.1) (или последний тег).
 
+## Превью: Terminal.Gui (.NET)
+
+В ветке **`feature/terminal-gui`** ведётся эксперимент: TUI на **[Terminal.Gui](https://gui-cs.github.io/Terminal.Gui/)** (отдельное .NET-приложение в `src/YT-DPI.App/`). **Основные релизы для пользователей по-прежнему** — `YT-DPI.bat` + `YT-DPI.ps1`; превью не заменяет их. Подробности сборки и атрибуция upstream: [docs/terminal-gui-preview.md](docs/terminal-gui-preview.md), [docs/third-party/Terminal.Gui.md](docs/third-party/Terminal.Gui.md).
+
 Полный разбор от последнего опубликованного **v2.2.3** — [CHANGELOG_ru.md](CHANGELOG_ru.md#yt-dpi-v230) (внутри блока **v2.3.0** пункты сгруппированы: добавлено / обновлено / исправлено / производительность; черновик **2.2.4** не выпускался — см. ввод там).
 
 ## Проверки перед релизом (`release-gate`)

@@ -3,4 +3,10 @@
 *.log
 *.tmp
 *.txt
+artifacts/
 TODO.md
+
+# .NET build outputs
+**/bin/
+**/obj/
+*.slnx

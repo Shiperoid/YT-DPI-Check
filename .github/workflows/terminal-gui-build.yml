@@ -1,0 +1,39 @@
+name: terminal-gui-build
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'YT-DPI.sln'
+      - '.github/workflows/terminal-gui-build.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'YT-DPI.sln'
+      - '.github/workflows/terminal-gui-build.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore YT-DPI.sln
+
+      - name: Build
+        run: dotnet build YT-DPI.sln -c Release --no-restore
+
+      - name: Publish preview (win-x64, framework-dependent)
+        run: dotnet publish src/YT-DPI.App/YT-DPI.App.csproj -c Release --no-restore -o ./artifacts/publish -r win-x64 --self-contained false
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yt-dpi-gui-preview-win-x64
+          path: artifacts/publish/
