@@ -10,15 +10,9 @@ on:
       - '.github/workflows/release-gate.yml'
       - 'CHANGELOG_ru.md'
       - 'README.md'
+  # No paths filter: branch protection requires gate statuses on every PR; path-only
+  # triggers left checks stuck at "Waiting for status to be reported".
   pull_request:
-    paths:
-      - 'YT-DPI.ps1'
-      - 'tools/release-gate.ps1'
-      - 'tools/release-gate-addtype.ps1'
-      - 'tools/smoke-yt-dpi-engines.ps1'
-      - '.github/workflows/release-gate.yml'
-      - 'CHANGELOG_ru.md'
-      - 'README.md'
 
 jobs:
   gate:
