@@ -27,6 +27,19 @@
 
 В ветке **`feature/terminal-gui`** ведётся эксперимент: TUI на **[Terminal.Gui](https://gui-cs.github.io/Terminal.Gui/)** (отдельное .NET-приложение в `src/YT-DPI.App/`). **Основные релизы для пользователей по-прежнему** — `YT-DPI.bat` + `YT-DPI.ps1`; превью не заменяет их. Подробности сборки и атрибуция upstream: [docs/terminal-gui-preview.md](docs/terminal-gui-preview.md), [docs/third-party/Terminal.Gui.md](docs/third-party/Terminal.Gui.md).
 
+Сборка и тесты из корня репозитория:
+
+```powershell
+dotnet build YT-DPI.sln -c Release
+dotnet test YT-DPI.sln -c Release
+```
+
+Быстрый запуск превью: **[`tools/Run-YT-DPI-Preview.ps1`](tools/Run-YT-DPI-Preview.ps1)** или **`tools\Run-YT-DPI-Preview.bat`** (из клонированного репо; нужен [.NET 10 SDK](https://dotnet.microsoft.com/download)).
+
+CI превью: [`.github/workflows/terminal-gui-build.yml`](.github/workflows/terminal-gui-build.yml) (артефакт publish для Windows).
+
+**Опционально один источник с PowerShell:** положите собранный **`YT-DPI.Core.dll`** в ту же папку, что и **`YT-DPI.ps1`** — скрипт загрузит его через `Add-Type -LiteralPath` и не будет компилировать here-string TLS/trace. Если DLL нет, используется прежний **`Add-Type`** из встроенного C#; вызовы в скрипте маршрутизируются через маленькие функции-обёртки (`Invoke-YtDpiTlsTest13` и т.д.).
+
 Полный разбор от последнего опубликованного **v2.2.3** — [CHANGELOG_ru.md](CHANGELOG_ru.md#yt-dpi-v230) (внутри блока **v2.3.0** пункты сгруппированы: добавлено / обновлено / исправлено / производительность; черновик **2.2.4** не выпускался — см. ввод там).
 
 ## Проверки перед релизом (`release-gate`)

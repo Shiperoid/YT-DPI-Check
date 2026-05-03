@@ -10,6 +10,8 @@
 | [`Tls/TlsScanner.cs`](Tls/TlsScanner.cs) | Порт встроенного C# из PS (here-string **строки 376–513** `YT-DPI.ps1`). |
 | [`Trace/TraceroutePorted.cs`](Trace/TraceroutePorted.cs) | Порт here-string **строки 544–1073** `YT-DPI.ps1` (`SynchronousProgress`, `AdvancedTraceroute`, …). |
 | [`Preview/PreviewEngine.cs`](Preview/PreviewEngine.cs) | Тонкие входные точки для превью UI и unit-тестов. |
+| [`Scan/`](Scan/) | Превью-скан: строки таблицы как в PS, `PreviewScanRunner` (TLS 1.3), таймауты как в скрипте. |
+| [`Config/UserConfigSaver.cs`](Config/UserConfigSaver.cs) | Запись JSON (PascalCase, совместимо с `ConvertTo-Json` / `Save-Config`). |
 
 ## Тесты
 

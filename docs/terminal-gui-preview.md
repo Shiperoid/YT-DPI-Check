@@ -21,7 +21,7 @@ dotnet run
 dotnet run --project src/YT-DPI.App/YT-DPI.App.csproj
 ```
 
-Окно превью: заголовок **YT-DPI Preview**; выход — **Esc** (как в шаблоне Terminal.Gui).
+Окно превью: заголовок **YT-DPI Preview**; выход — **Esc**; во время скана **Ctrl+C** отменяет фоновый TLS 1.3-проход. Таблица повторяет колонки консольного **Draw-UI** в `YT-DPI.ps1` (**#**, **TARGET DOMAIN**, **IP ADDRESS**, **HTTP**, **TLS 1.2**, **TLS 1.3**, **LAT (ms)**, **RESULT**); HTTP / TLS 1.2 / LAT в превью пока заглушки **`---`**.
 
 Превью **только читает** `%LocalAppData%\YT-DPI\YT-DPI_config.json` (тот же путь и правила дефолтов/миграции, что в `Load-Config` в `YT-DPI.ps1`) и показывает поля в шапке; **запись конфига из .NET не выполняется** — настройки по-прежнему сохраняет PowerShell-версия.
 

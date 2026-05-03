@@ -10,6 +10,19 @@ using System.Linq;
 using System.Security.Cryptography;
 
 public class TlsScanner {
+    private static int ReadBlocking(NetworkStream stream, byte[] buffer, int offset, int count)
+    {
+        var total = 0;
+        while (total < count)
+        {
+            var n = stream.Read(buffer, offset + total, count - total);
+            if (n == 0)
+                return total;
+            total += n;
+        }
+        return total;
+    }
+
     private static void FillRandomBytes(byte[] buffer) {
         using (var rng = RandomNumberGenerator.Create()) {
             rng.GetBytes(buffer);
@@ -33,12 +46,14 @@ public class TlsScanner {
                     byte[] greeting = new byte[] { 0x05, 0x01, 0x00 };
                     stream.Write(greeting, 0, greeting.Length);
                     byte[] authResp = new byte[2];
-                    stream.Read(authResp, 0, 2);
+                    if (ReadBlocking(stream, authResp, 0, 2) < 2)
+                        return "DRP";
 
                     byte[] connectReq = BuildSocksConnect(host, 443);
                     stream.Write(connectReq, 0, connectReq.Length);
                     byte[] connResp = new byte[10];
-                    stream.Read(connResp, 0, 10);
+                    if (ReadBlocking(stream, connResp, 0, 10) < 10)
+                        return "PRX_ERR";
                     if (connResp[1] != 0x00) return "PRX_ERR";
                 }
 
@@ -47,9 +62,9 @@ public class TlsScanner {
                 stream.Write(hello, 0, hello.Length);
 
                 byte[] header = new byte[5];
-                int read = 0;
+                int read;
                 try {
-                    read = stream.Read(header, 0, 5);
+                    read = ReadBlocking(stream, header, 0, 5);
                 } catch (System.IO.IOException ex) {
                     string m = ex.Message.ToLower();
                     if (m.Contains("reset") || m.Contains("сброс")) return "RST";

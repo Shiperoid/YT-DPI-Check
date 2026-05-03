@@ -1,4 +1,6 @@
 // Ported from YT-DPI.ps1 embedded C# (here-string lines 544-1073).
+// Verbatim port: nullable relaxed to avoid large diffs from PS source.
+#nullable disable
 
 namespace YT_DPI.Core.Trace;
 

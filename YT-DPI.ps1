@@ -516,7 +516,13 @@ $script:TlsScannerLoaded = $false
 $script:TlsScannerLoadFailed = $false
 
 function Test-TlsScannerReady {
-    if ($script:TlsScannerLoaded -or ([System.Management.Automation.PSTypeName]'TlsScanner').Type) {
+    if ($script:TlsScannerLoaded) { return $true }
+    try {
+        $null = [YT_DPI.Core.Tls.TlsScanner]
+        $script:TlsScannerLoaded = $true
+        return $true
+    } catch {}
+    if (([System.Management.Automation.PSTypeName]'TlsScanner').Type) {
         $script:TlsScannerLoaded = $true
         return $true
     }
@@ -526,6 +532,8 @@ function Test-TlsScannerReady {
 function Ensure-TlsScannerLoaded {
     if (Test-TlsScannerReady) { return $true }
     if ($script:TlsScannerLoadFailed) { return $false }
+
+    if (Try-LoadYtDpiCoreDll) { return $true }
 
     try {
         Add-Type -TypeDefinition $tlsCode -ErrorAction Stop
@@ -1077,7 +1085,13 @@ $script:TracerouteLoaded = $false
 $script:TracerouteLoadFailed = $false
 
 function Test-TracerouteReady {
-    if ($script:TracerouteLoaded -or ([System.Management.Automation.PSTypeName]'AdvancedTraceroute').Type) {
+    if ($script:TracerouteLoaded) { return $true }
+    try {
+        $null = [YT_DPI.Core.Trace.AdvancedTraceroute]
+        $script:TracerouteLoaded = $true
+        return $true
+    } catch {}
+    if (([System.Management.Automation.PSTypeName]'AdvancedTraceroute').Type) {
         $script:TracerouteLoaded = $true
         return $true
     }
@@ -1087,6 +1101,8 @@ function Test-TracerouteReady {
 function Ensure-TracerouteLoaded {
     if (Test-TracerouteReady) { return $true }
     if ($script:TracerouteLoadFailed) { return $false }
+
+    if (Try-LoadYtDpiCoreDll) { return $true }
 
     try {
         Add-Type -TypeDefinition $traceCode -ErrorAction Stop
@@ -1117,6 +1133,57 @@ if (-not (Test-Path $script:ConfigDir)) {
     try { New-Item -Path $script:ConfigDir -ItemType Directory -Force | Out-Null } catch {}
 }
 
+# --- Опционально: YT-DPI.Core.dll рядом с YT-DPI.ps1 (один источник с .NET превью) ---
+$script:YtDpiCoreDllLoaded = $false
+function Try-LoadYtDpiCoreDll {
+    if ($script:YtDpiCoreDllLoaded) { return $true }
+    if (-not $script:ParentDir) { return $false }
+    $dll = Join-Path $script:ParentDir "YT-DPI.Core.dll"
+    if (-not (Test-Path -LiteralPath $dll)) { return $false }
+    try {
+        Add-Type -LiteralPath $dll -ErrorAction Stop
+        $script:YtDpiCoreDllLoaded = $true
+        $script:TlsScannerLoaded = $true
+        $script:TracerouteLoaded = $true
+        Write-DebugLog "YT-DPI.Core.dll загружен (TLS + traceroute)." "INFO"
+        return $true
+    } catch {
+        Write-DebugLog "YT-DPI.Core.dll: $_" "WARN"
+        return $false
+    }
+}
+
+# Вызывать только после успешного Ensure-TlsScannerLoaded / Ensure-TracerouteLoaded.
+function Invoke-YtDpiTlsTest13(
+    [string]$targetIp, [string]$host, [string]$proxyHost, [int]$proxyPort,
+    [string]$user, [string]$pass, [int]$timeout
+) {
+    if ($script:YtDpiCoreDllLoaded) {
+        return [YT_DPI.Core.Tls.TlsScanner]::TestT13($targetIp, $host, $proxyHost, $proxyPort, $user, $pass, $timeout)
+    }
+    return [TlsScanner]::TestT13($targetIp, $host, $proxyHost, $proxyPort, $user, $pass, $timeout)
+}
+
+function New-YtDpiSynchronousProgress([Action[string]]$handler) {
+    if ($script:YtDpiCoreDllLoaded) {
+        return [YT_DPI.Core.Trace.SynchronousProgress]::new($handler)
+    }
+    return [SynchronousProgress]::new($handler)
+}
+
+function Get-YtDpiTraceMethodAuto {
+    if ($script:YtDpiCoreDllLoaded) { return [YT_DPI.Core.Trace.TraceMethod]::Auto }
+    return [TraceMethod]::Auto
+}
+
+function Invoke-YtDpiAdvancedTracerouteTrace(
+    [string]$Target, [int]$MaxHops, [int]$TimeoutMs, $method, $progressLogger
+) {
+    if ($script:YtDpiCoreDllLoaded) {
+        return [YT_DPI.Core.Trace.AdvancedTraceroute]::Trace($Target, $MaxHops, $TimeoutMs, $method, $progressLogger)
+    }
+    return [AdvancedTraceroute]::Trace($Target, $MaxHops, $TimeoutMs, $method, $progressLogger)
+}
 
 function Normalize-Version($v) {
     $clean = ($v -replace '[^0-9.]', '').Trim('.')
@@ -2317,7 +2384,7 @@ function Trace-TcpRoute {
     if ($onProgress) {
         try {
             $del = { param([string]$msg) if ($onProgress) { & $onProgress $msg } }
-            $progressLogger = [SynchronousProgress]::new([Action[string]]$del)
+            $progressLogger = New-YtDpiSynchronousProgress([Action[string]]$del)
         } catch {
             Write-DebugLog "SynchronousProgress: не удалось создать ($_) — трассировка без строк прогресса" "WARN"
         }
@@ -2325,10 +2392,10 @@ function Trace-TcpRoute {
 
     try {
         # Auto: ICMP → raw TCP (только с админом) → UDP. Принудительный TcpSyn без прав даёт «доступ к сокету запрещён».
-        $method = [TraceMethod]::Auto
+        $method = Get-YtDpiTraceMethodAuto
 
         # Выполняем трассировку
-        $hops = [AdvancedTraceroute]::Trace($Target, $MaxHops, $TimeoutSec * 1000, $method, $progressLogger)
+        $hops = Invoke-YtDpiAdvancedTracerouteTrace -Target $Target -MaxHops $MaxHops -TimeoutMs ($TimeoutSec * 1000) -method $method -progressLogger $progressLogger
 
         # Конвертируем в формат, понятный старому коду
         $result = @()
@@ -4663,11 +4730,11 @@ $Worker = {
     $pPort = if ($ProxyConfig.Enabled) { [int]$ProxyConfig.Port } else { 0 }
 
     if ($consider13) {
-        $Result.T13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
+        $Result.T13 = [YT_DPI.Core.Tls.TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
         Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
         if ($Result.T13 -eq "DRP") {
             Write-DebugLog "TLS T13: повтор с увеличенным таймаутом ($TlsTimeoutRetry ms)" "INFO"
-            $retryT13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
+            $retryT13 = Invoke-YtDpiTlsTest13 -targetIp $Result.IP -host $Target -proxyHost $pHost -proxyPort $pPort -user $ProxyConfig.User -pass $ProxyConfig.Pass -timeout $TlsTimeoutRetry
             if ($retryT13 -eq "OK" -or $retryT13 -eq "RST") { $Result.T13 = $retryT13 }
         }
     } else {

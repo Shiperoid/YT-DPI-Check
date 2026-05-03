@@ -95,11 +95,9 @@ public static class UserConfigLoader
             cfg.DnsCache.Clear();
             foreach (var p in dns.EnumerateObject())
             {
-                if (p.Value.ValueKind == JsonValueKind.String)
-                {
-                    var v = p.Value.GetString() ?? "";
+                var v = DnsValueToString(p.Value);
+                if (v is not null)
                     cfg.DnsCache[p.Name] = v;
-                }
             }
         }
     }
@@ -163,6 +161,16 @@ public static class UserConfigLoader
             _ => fallback,
         };
     }
+
+    private static string? DnsValueToString(JsonElement el) =>
+        el.ValueKind switch
+        {
+            JsonValueKind.String => el.GetString() ?? "",
+            JsonValueKind.Number => el.GetRawText(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            _ => null,
+        };
 
     private static string ReadString(JsonElement parent, string name, string fallback)
     {

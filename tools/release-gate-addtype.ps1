@@ -1,4 +1,5 @@
 # Compiles TLS + traceroute C# snippets (same as YT-DPI.ps1 embedded types). Used by release-gate.ps1 in a fresh process.
+# Note: YT-DPI.ps1 can load prebuilt YT-DPI.Core.dll instead of these snippets when the DLL is next to the script; this gate still validates the embedded sources extract + compile.
 param(
     [Parameter(Mandatory)][string]$TlsPath,
     [Parameter(Mandatory)][string]$TracePath,
