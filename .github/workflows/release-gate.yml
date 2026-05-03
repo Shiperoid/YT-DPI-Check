@@ -22,10 +22,22 @@ on:
 
 jobs:
   gate:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-latest]
+        # Pinned + latest: bump minors periodically for reproducibility.
+        pwsh_version: ['7.2.23', '7.4.15', 'latest']
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Run release gate (PS 5.1 host + child pwsh)
+
+      - name: Setup PowerShell (pwsh on PATH for gate)
+        uses: powershell/setup-powershell@v2
+        with:
+          version: ${{ matrix.pwsh_version }}
+
+      - name: Run release gate (orchestrator = PS 5.1; children = 5.1 x64/WOW64 + all pwsh candidates)
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'

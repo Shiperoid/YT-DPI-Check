@@ -25,6 +25,26 @@
 
 Полный разбор от последнего опубликованного **v2.2.3** — [CHANGELOG_ru.md](CHANGELOG_ru.md#yt-dpi-v230) (внутри блока **v2.3.0** пункты сгруппированы: добавлено / обновлено / исправлено / производительность; черновик **2.2.4** не выпускался — см. ввод там).
 
+## Проверки перед релизом (`release-gate`)
+
+Скрипт **[`tools/release-gate.ps1`](tools/release-gate.ps1)** перед релизом стоит прогнать локально и полагаться на workflow **`.github/workflows/release-gate.yml`** в CI.
+
+**Что проверяется (Windows):**
+
+* Извлечение из **`YT-DPI.ps1`** встроенных блоков **`$tlsCode`** / **`$traceCode`** и **`Add-Type`** в отдельных процессах: **PowerShell 5.1 x64** (`System32`), при наличии — **WOW64 (32‑битный `powershell.exe`)**, все найденные **`pwsh.exe`** (стандартный путь `Program Files\PowerShell\…`, плюс тот, что в `PATH`).
+* После успешной компиляции в том же процессе — **[`tools/smoke-yt-dpi-engines.ps1`](tools/smoke-yt-dpi-engines.ps1)** (AST всего `YT-DPI.ps1` + короткие паттерны runspace).
+* В лог печатаются **ОС**, **версия PS**, **runtime** — чтобы сопоставлять с жалобами пользователей.
+
+**CI:** матрица **`windows-2022`** и **`windows-latest`** × несколько версий **pwsh** (через [`powershell/setup-powershell`](https://github.com/PowerShell/setup-powershell)); это **не** потребительские «чистые» Win10/Win11, а ближайший суррогат разных образов и рантаймов.
+
+**Дополнительные интерпретаторы:** переменная окружения **`YT_DPI_GATE_EXTRA_PS`** — список полных путей к `powershell.exe` / `pwsh.exe`, разделитель **`;`** или **`|`** (например второй установленный **PS 7** или портативная сборка).
+
+Локальный запуск из корня репозитория:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\release-gate.ps1 -RepoRoot (Get-Location).Path
+```
+
 ## Установка: какой файл скачать и как запустить
 
 | Файл | Системы | Запуск |

@@ -1,7 +1,10 @@
 # Smoke: AST parse YT-DPI.ps1 + patterns used by scan jobs list and NetInfo runspace (PS 5.1 / 7+).
+param(
+    [string]$RepoRoot = $null
+)
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent
-$ytDpi = Join-Path $root 'YT-DPI.ps1'
+if (-not $RepoRoot) { $RepoRoot = Split-Path $PSScriptRoot -Parent }
+$ytDpi = Join-Path $RepoRoot 'YT-DPI.ps1'
 if (-not (Test-Path -LiteralPath $ytDpi)) {
     throw "YT-DPI.ps1 not found (tried $ytDpi)"
 }
