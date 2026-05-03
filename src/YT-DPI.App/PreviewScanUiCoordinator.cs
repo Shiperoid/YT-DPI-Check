@@ -21,7 +21,7 @@ internal sealed class PreviewScanUiCoordinator
         if (_scanCts is null || _scanCts.IsCancellationRequested || !_scanRunning)
             return false;
         _scanCts.Cancel();
-        status.Text = "status: cancelling scan (Ctrl+C)…";
+        status.Text = "Отмена скана (Ctrl+C)…";
         return true;
     }
 
@@ -40,9 +40,9 @@ internal sealed class PreviewScanUiCoordinator
         _scanCts = new CancellationTokenSource();
         var ct = _scanCts.Token;
         _scanRunning = true;
-        status.Text = "status: starting preview scan…";
+        status.Text = "Запуск скана…";
 
-        var progress = new Progress<string>(msg => app.Invoke(() => status.Text = "status: " + msg));
+        var progress = new Progress<string>(msg => app.Invoke(() => status.Text = msg));
         var rowProgress = new Progress<(int Index, ScanRow Row)>(p =>
         {
             app.Invoke(() =>
@@ -78,17 +78,17 @@ internal sealed class PreviewScanUiCoordinator
                     ScanTableSchema.FillFromRows(table, result);
                     tableView.SetNeedsDraw();
                     status.Text = ct.IsCancellationRequested
-                        ? "status: scan cancelled"
-                        : "status: scan finished";
+                        ? "Скан отменён."
+                        : "Скан завершён.";
                 });
             }
             catch (OperationCanceledException)
             {
-                app.Invoke(() => status.Text = "status: scan cancelled");
+                app.Invoke(() => status.Text = "Скан отменён.");
             }
             catch (Exception ex)
             {
-                app.Invoke(() => status.Text = "status: error — " + ex.Message);
+                app.Invoke(() => status.Text = "Ошибка: " + ex.Message);
             }
             finally
             {

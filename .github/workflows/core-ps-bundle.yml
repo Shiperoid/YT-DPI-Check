@@ -1,0 +1,48 @@
+# Optional bundle: YT-DPI.Core.dll + YT-DPI.ps1 for the main Windows script line (not the Terminal.Gui preview artifact).
+
+name: core-ps-bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - 'src/YT-DPI.Core/**'
+      - 'YT-DPI.ps1'
+      - 'docs/bundle-core-ps.md'
+      - '.github/workflows/core-ps-bundle.yml'
+
+jobs:
+  bundle:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish Core class library
+        run: dotnet publish src/YT-DPI.Core/YT-DPI.Core.csproj -c Release -o ./artifacts/core
+
+      - name: Assemble bundle folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ./artifacts/bundle | Out-Null
+          Copy-Item ./artifacts/core/YT-DPI.Core.dll ./artifacts/bundle/
+          Copy-Item ./YT-DPI.ps1 ./artifacts/bundle/
+          Copy-Item ./docs/bundle-core-ps.md ./artifacts/bundle/README-bundle.md
+
+      - name: Zip bundle
+        shell: pwsh
+        run: Compress-Archive -Path ./artifacts/bundle/* -DestinationPath ./artifacts/yt-dpi-core-ps-bundle.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yt-dpi-core-ps-bundle
+          path: |
+            artifacts/bundle/
+            artifacts/yt-dpi-core-ps-bundle.zip

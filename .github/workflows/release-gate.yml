@@ -2,6 +2,8 @@ name: release-gate
 
 on:
   push:
+    branches-ignore:
+      - 'feature/terminal-gui'
     paths:
       - 'YT-DPI.ps1'
       - 'src/YT-DPI.Core/**'
@@ -13,6 +15,8 @@ on:
       - 'CHANGELOG_ru.md'
       - 'README.md'
   pull_request:
+    branches-ignore:
+      - 'feature/terminal-gui'
     paths:
       - 'YT-DPI.ps1'
       - 'src/YT-DPI.Core/**'

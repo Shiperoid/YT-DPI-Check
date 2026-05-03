@@ -1156,10 +1156,11 @@ function Try-LoadYtDpiCoreDll {
 # Вызывать только после успешного Ensure-TlsScannerLoaded / Ensure-TracerouteLoaded.
 function Invoke-YtDpiTlsTest13(
     [string]$targetIp, [string]$host, [string]$proxyHost, [int]$proxyPort,
-    [string]$user, [string]$pass, [int]$timeout
+    [string]$user, [string]$pass, [int]$timeout,
+    [string]$proxyType = 'SOCKS5'
 ) {
     if ($script:YtDpiCoreDllLoaded) {
-        return [YT_DPI.Core.Tls.TlsScanner]::TestT13($targetIp, $host, $proxyHost, $proxyPort, $user, $pass, $timeout)
+        return [YT_DPI.Core.Tls.TlsScanner]::TestT13($targetIp, $host, $proxyHost, $proxyPort, $user, $pass, $timeout, $proxyType)
     }
     return [TlsScanner]::TestT13($targetIp, $host, $proxyHost, $proxyPort, $user, $pass, $timeout)
 }
@@ -4730,11 +4731,11 @@ $Worker = {
     $pPort = if ($ProxyConfig.Enabled) { [int]$ProxyConfig.Port } else { 0 }
 
     if ($consider13) {
-        $Result.T13 = [YT_DPI.Core.Tls.TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
+        $Result.T13 = [YT_DPI.Core.Tls.TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast, $ProxyConfig.Type)
         Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
         if ($Result.T13 -eq "DRP") {
             Write-DebugLog "TLS T13: повтор с увеличенным таймаутом ($TlsTimeoutRetry ms)" "INFO"
-            $retryT13 = Invoke-YtDpiTlsTest13 -targetIp $Result.IP -host $Target -proxyHost $pHost -proxyPort $pPort -user $ProxyConfig.User -pass $ProxyConfig.Pass -timeout $TlsTimeoutRetry
+            $retryT13 = Invoke-YtDpiTlsTest13 -targetIp $Result.IP -host $Target -proxyHost $pHost -proxyPort $pPort -user $ProxyConfig.User -pass $ProxyConfig.Pass -timeout $TlsTimeoutRetry -proxyType $ProxyConfig.Type
             if ($retryT13 -eq "OK" -or $retryT13 -eq "RST") { $Result.T13 = $retryT13 }
         }
     } else {

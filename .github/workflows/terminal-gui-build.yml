@@ -2,11 +2,15 @@ name: terminal-gui-build
 
 on:
   push:
+    branches:
+      - 'feature/terminal-gui'
     paths:
       - 'src/**'
       - 'YT-DPI.sln'
       - '.github/workflows/terminal-gui-build.yml'
   pull_request:
+    branches:
+      - 'feature/terminal-gui'
     paths:
       - 'src/**'
       - 'YT-DPI.sln'

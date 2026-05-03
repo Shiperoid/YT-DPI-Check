@@ -7,7 +7,8 @@
 | Путь | Назначение |
 |------|------------|
 | [`Config/`](Config/) | Путь к `%LocalAppData%\YT-DPI\YT-DPI_config.json`, DTO, `UserConfigLoader.TryLoadUserConfig` (read-only, совместимо с `Load-Config`). |
-| [`Tls/TlsScanner.cs`](Tls/TlsScanner.cs) | Порт встроенного C# из PS (here-string **строки 376–513** `YT-DPI.ps1`). |
+| [`Tls/TlsScanner.cs`](Tls/TlsScanner.cs) | TLS 1.3 probe; через прокси — [`Net/ProxyTunnel.cs`](Net/ProxyTunnel.cs) (SOCKS5 с auth, HTTP CONNECT). |
+| [`Net/ProxyTunnel.cs`](Net/ProxyTunnel.cs) | Туннель SOCKS5 / HTTP CONNECT к `host:port` как в `YT-DPI.ps1` ~2980–3120. |
 | [`Trace/TraceroutePorted.cs`](Trace/TraceroutePorted.cs) | Порт here-string **строки 544–1073** `YT-DPI.ps1` (`SynchronousProgress`, `AdvancedTraceroute`, …). |
 | [`Preview/PreviewEngine.cs`](Preview/PreviewEngine.cs) | Тонкие входные точки для превью UI и unit-тестов. |
 | [`Scan/`](Scan/) | `ScanTargetsBuilder` (`Get-Targets`), `DnsConnectIpResolver` (кэш DNS + выбор IP), `TargetRowScanner` (одна строка таблицы, логика как в PS ~4612–4872), `PreviewScanRunner` (оркестрация цикла), `VerdictCalculator`, `Tls12Probe`, `PortConnectivity`, таймауты. |

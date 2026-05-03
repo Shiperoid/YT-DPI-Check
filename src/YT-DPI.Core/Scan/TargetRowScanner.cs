@@ -1,4 +1,5 @@
 using YT_DPI.Core.Config;
+using YT_DPI.Core.Net;
 using YT_DPI.Core.Tls;
 
 namespace YT_DPI.Core.Scan;
@@ -14,12 +15,11 @@ internal static class TargetRowScanner
         var pPort = cfg.Proxy.Port;
         var pUser = proxyOn ? cfg.Proxy.User : "";
         var pPass = proxyOn ? cfg.Proxy.Pass : "";
+        var proxyType = proxyOn ? (cfg.Proxy.Type ?? "SOCKS5") : "SOCKS5";
 
         string ip;
         if (proxyOn)
-        {
             ip = PreviewScanRunner.ProxiedIpMarker;
-        }
         else
             ip = DnsConnectIpResolver.Resolve(domain, cfg);
 
@@ -49,6 +49,21 @@ internal static class TargetRowScanner
                 return Row(number, domain, ip, http, "---", "---", "---", VerdictCalculator.Compute(cfg.TlsMode ?? "Auto", http, "---", "---"));
             }
         }
+        else
+        {
+            var httpMs = ScanTimeouts.HttpFastMs(cfg);
+            if (ProxyTunnel.TryOpen(cfg.Proxy, domain, 80, httpMs, out var tun80, out var latMs, out _))
+            {
+                http = "OK";
+                lat = latMs.ToString();
+                tun80.Dispose();
+            }
+            else
+            {
+                http = "ERR";
+                return Row(number, domain, ip, http, "---", "---", "---", VerdictCalculator.Compute(cfg.TlsMode ?? "Auto", http, "---", "---"));
+            }
+        }
 
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -65,11 +80,11 @@ internal static class TargetRowScanner
         {
             if (proxyOn)
             {
-                t13 = TlsScanner.TestT13(ip, domain, pHost, pPort, pUser, pPass, tlsFast);
+                t13 = TlsScanner.TestT13(ip, domain, pHost, pPort, pUser, pPass, tlsFast, proxyType);
                 if (t13 is "DRP" or "RST")
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var retryVal = TlsScanner.TestT13(ip, domain, pHost, pPort, pUser, pPass, tlsRetry);
+                    var retryVal = TlsScanner.TestT13(ip, domain, pHost, pPort, pUser, pPass, tlsRetry, proxyType);
                     if (retryVal != t13)
                         t13 = retryVal;
                 }
@@ -93,7 +108,30 @@ internal static class TargetRowScanner
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (consider12 && !proxyOn)
+        if (consider12 && proxyOn)
+        {
+            if (ProxyTunnel.TryOpen(cfg.Proxy, domain, 443, t12Fast, out var tun443, out _, out _))
+            {
+                using (tun443)
+                {
+                    t12 = Tls12Probe.HandshakeOverStream(tun443.Stream, domain, t12Fast, leaveInnerStreamOpen: true);
+                    var t12TimedOut = t12 == "DRP";
+                    var doRetry = t12TimedOut && ((consider13 && t13 == "OK") || !consider13);
+                    if (doRetry)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (ProxyTunnel.TryOpen(cfg.Proxy, domain, 443, t12Retry, out var tun443b, out _, out _))
+                        {
+                            using (tun443b)
+                                t12 = Tls12Probe.HandshakeOverStream(tun443b.Stream, domain, t12Retry, leaveInnerStreamOpen: true);
+                        }
+                    }
+                }
+            }
+            else
+                t12 = "DRP";
+        }
+        else if (consider12 && !proxyOn)
         {
             t12 = Tls12Probe.Handshake(ip, domain, t12Fast);
             var t12TimedOut = t12 == "DRP";
@@ -108,9 +146,6 @@ internal static class TargetRowScanner
         {
             t12 = "N/A";
         }
-
-        if (proxyOn && consider12)
-            t12 = "---";
 
         var verdict = VerdictCalculator.Compute(cfg.TlsMode ?? "Auto", http, t12, t13);
         return Row(number, domain, ip, http, t12, t13, lat, verdict);

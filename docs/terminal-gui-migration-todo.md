@@ -22,17 +22,21 @@
 - [x] **Запись конфига + round-trip:** [`UserConfigSaver`](../src/YT-DPI.Core/Config/UserConfigSaver.cs), тест [`UserConfigRoundTripTests`](../src/YT-DPI.Core.Tests/UserConfigRoundTripTests.cs).
 - [x] **Качество:** CA2022 в TLS (`ReadBlocking`); `#nullable disable` в порте trace.
 - [x] **Корневые доки:** [`README.md`](../README.md), [`CHANGELOG_ru.md`](../CHANGELOG_ru.md), [`docs/terminal-gui-preview.md`](terminal-gui-preview.md), [`docs/terminal-gui-merge-policy.md`](terminal-gui-merge-policy.md).
-- [x] **HTTP / TLS 1.2 / LAT** в превью-скане (рядом с TLS 1.3): см. [`PreviewScanRunner`](../src/YT-DPI.Core/Scan/PreviewScanRunner.cs), [`VerdictCalculator`](../src/YT-DPI.Core/Scan/VerdictCalculator.cs); при прокси колонки HTTP/T12 могут оставаться `---` до доработки CONNECT.
+- [x] **HTTP / TLS 1.2 / LAT** в превью-скане (рядом с TLS 1.3): [`TargetRowScanner`](../src/YT-DPI.Core/Scan/TargetRowScanner.cs), [`VerdictCalculator`](../src/YT-DPI.Core/Scan/VerdictCalculator.cs); при прокси — [`ProxyTunnel`](../src/YT-DPI.Core/Net/ProxyTunnel.cs).
 - [x] **`SchemaVersion`** в [`YtDpiUserConfig`](../src/YT-DPI.Core/Config/YtDpiUserConfig.cs) + merge в [`UserConfigLoader`](../src/YT-DPI.Core/Config/UserConfigLoader.cs); round-trip в тестах; TUI по-прежнему только читает конфиг (запись — [`UserConfigSaver`](../src/YT-DPI.Core/Config/UserConfigSaver.cs) для других сценариев).
 - [x] **Артефакт CI превью:** workflow публикует папку + `yt-dpi-gui-preview-win-x64.zip` (см. [`.github/workflows/terminal-gui-build.yml`](../.github/workflows/terminal-gui-build.yml)).
-- [x] **Поставка превью:** [`tools/Run-YT-DPI-Preview.ps1`](../tools/Run-YT-DPI-Preview.ps1), [`tools/Run-YT-DPI-Preview.bat`](../tools/Run-YT-DPI-Preview.bat); **release-gate** триггеры расширены на `src/YT-DPI.Core/**` и `YT-DPI.sln`.
+- [x] **Поставка превью:** [`tools/Run-YT-DPI-Preview.ps1`](../tools/Run-YT-DPI-Preview.ps1), [`tools/Run-YT-DPI-Preview.bat`](../tools/Run-YT-DPI-Preview.bat); CI превью — [`.github/workflows/terminal-gui-build.yml`](../.github/workflows/terminal-gui-build.yml) (только ветка `feature/terminal-gui`). **`release-gate`** на этой ветке не запускается (`branches-ignore` в workflow).
 - [x] **PS + DLL:** `YT-DPI.ps1` — `Try-LoadYtDpiCoreDll`, вызовы типов с полными именами `YT_DPI.Core.*`; при отсутствии DLL — прежний `Add-Type` here-string.
+- [x] **Прокси в Core:** [`Net/ProxyTunnel.cs`](../src/YT-DPI.Core/Net/ProxyTunnel.cs), скан через туннель + `TlsScanner` с типом прокси (`Invoke-YtDpiTlsTest13` / прямой вызов DLL в PS обновлены).
+- [x] **TUI сохранение конфига (F3):** [`ConfigEditDialog.cs`](../src/YT-DPI.App/ConfigEditDialog.cs) — v2-контролы: **RadioStyle** `CheckBox` для IP, **DropDownList** для TLS и `Proxy.Type`, **FrameView** «Прокси», пароль **`TextField.Secret`**, разметка **`Dim.Auto` / `Dim.Percent`**; запись и `SchemaVersion` ≥ 1 как раньше.
+- [x] **Артефакт `core-ps-bundle`:** [`.github/workflows/core-ps-bundle.yml`](../.github/workflows/core-ps-bundle.yml), [`bundle-core-ps.md`](bundle-core-ps.md).
 
 ## В работу / дальше
 
-- [ ] **Прокси + HTTP/T12 на 80/443:** полноценный CONNECT-туннель в Core (сейчас TLS 1.3 через существующий `TlsScanner`; HTTP/T12 без туннеля — см. доки превью).
-- [ ] **Редактирование и сохранение конфига из TUI:** при появлении — миграции по `SchemaVersion` + расширение round-trip тестов.
-- [ ] **Опциональный релизный zip** основной линии: `YT-DPI.Core.dll` + `YT-DPI.ps1` + документация (см. [`terminal-gui-merge-policy.md`](terminal-gui-merge-policy.md)).
+- [x] **Прокси + HTTP/T12 на 80/443:** [`Net/ProxyTunnel.cs`](../src/YT-DPI.Core/Net/ProxyTunnel.cs) (SOCKS5 + auth, HTTP CONNECT); [`TargetRowScanner`](../src/YT-DPI.Core/Scan/TargetRowScanner.cs); [`TlsScanner`](../src/YT-DPI.Core/Tls/TlsScanner.cs) с типом прокси; тесты [`ProxyTunnelTests`](../src/YT-DPI.Core.Tests/ProxyTunnelTests.cs).
+- [x] **Опциональный zip основной линии:** [`.github/workflows/core-ps-bundle.yml`](../.github/workflows/core-ps-bundle.yml), [`docs/bundle-core-ps.md`](bundle-core-ps.md).
+
+- [ ] **Дальше по желанию:** миграции JSON по `SchemaVersion` при расширении полей диалога; для **`Proxy.Type=AUTO`** — определение HTTP vs SOCKS как в PS (`Detect-ProxyType`), сейчас в туннеле **AUTO → SOCKS5**.
 
 ---
 

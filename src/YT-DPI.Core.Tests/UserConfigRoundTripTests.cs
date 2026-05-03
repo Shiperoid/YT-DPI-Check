@@ -18,6 +18,9 @@ public class UserConfigRoundTripTests
             cfg.Proxy.Enabled = true;
             cfg.Proxy.Host = "127.0.0.1";
             cfg.Proxy.Port = 8080;
+            cfg.Proxy.Type = "HTTP";
+            cfg.Proxy.User = "u";
+            cfg.Proxy.Pass = "p";
             cfg.DnsCache["example.com"] = "1.2.3.4";
             cfg.SchemaVersion = 2;
 
@@ -37,6 +40,9 @@ public class UserConfigRoundTripTests
             Assert.True(loaded.Proxy.Enabled);
             Assert.Equal("127.0.0.1", loaded.Proxy.Host);
             Assert.Equal(8080, loaded.Proxy.Port);
+            Assert.Equal("HTTP", loaded.Proxy.Type);
+            Assert.Equal("u", loaded.Proxy.User);
+            Assert.Equal("p", loaded.Proxy.Pass);
             Assert.Equal("1.2.3.4", loaded.DnsCache["example.com"]);
             Assert.Equal(2, loaded.SchemaVersion);
         }
