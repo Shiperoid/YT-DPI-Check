@@ -48,6 +48,7 @@ public static class UserConfigLoader
     private static void MergeFromJson(YtDpiUserConfig cfg, JsonElement root)
     {
         var def = YtDpiUserConfig.CreateDefaults();
+        cfg.SchemaVersion = ReadInt(root, nameof(YtDpiUserConfig.SchemaVersion), 0);
         cfg.RunCount = ReadInt(root, nameof(YtDpiUserConfig.RunCount), def.RunCount);
         cfg.LastPromptRun = ReadInt(root, nameof(YtDpiUserConfig.LastPromptRun), def.LastPromptRun);
         cfg.LastCheckedVersion = ReadString(root, nameof(YtDpiUserConfig.LastCheckedVersion), def.LastCheckedVersion);

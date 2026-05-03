@@ -7,5 +7,6 @@ public static class TlsTimeouts
 {
     public static int FastMs(YtDpiUserConfig cfg) => cfg.Proxy.Enabled ? 2200 : 1600;
 
-    public static int RetryMs(YtDpiUserConfig cfg) => cfg.Proxy.Enabled ? Math.Max(2600, 2600) : 2600;
+    public static int RetryMs(YtDpiUserConfig cfg) =>
+        cfg.Proxy.Enabled ? Math.Max(2600, ScanTimeouts.ProxyTimeoutMs) : 2600;
 }

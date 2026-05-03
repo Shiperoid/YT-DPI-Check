@@ -35,8 +35,14 @@ jobs:
       - name: Publish preview (win-x64, framework-dependent)
         run: dotnet publish src/YT-DPI.App/YT-DPI.App.csproj -c Release --no-restore -o ./artifacts/publish -r win-x64 --self-contained false
 
-      - name: Upload artifact
+      - name: Zip publish output
+        shell: pwsh
+        run: Compress-Archive -Path ./artifacts/publish/* -DestinationPath ./artifacts/yt-dpi-gui-preview-win-x64.zip -Force
+
+      - name: Upload artifact (folder + zip)
         uses: actions/upload-artifact@v4
         with:
           name: yt-dpi-gui-preview-win-x64
-          path: artifacts/publish/
+          path: |
+            artifacts/publish/
+            artifacts/yt-dpi-gui-preview-win-x64.zip

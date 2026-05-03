@@ -19,6 +19,7 @@ public class UserConfigRoundTripTests
             cfg.Proxy.Host = "127.0.0.1";
             cfg.Proxy.Port = 8080;
             cfg.DnsCache["example.com"] = "1.2.3.4";
+            cfg.SchemaVersion = 2;
 
             var (okSave, errSave) = UserConfigSaver.TrySaveUserConfig(cfg, path);
             Assert.True(okSave, errSave);
@@ -37,6 +38,7 @@ public class UserConfigRoundTripTests
             Assert.Equal("127.0.0.1", loaded.Proxy.Host);
             Assert.Equal(8080, loaded.Proxy.Port);
             Assert.Equal("1.2.3.4", loaded.DnsCache["example.com"]);
+            Assert.Equal(2, loaded.SchemaVersion);
         }
         finally
         {

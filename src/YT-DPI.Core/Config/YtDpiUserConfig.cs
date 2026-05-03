@@ -29,6 +29,9 @@ public sealed class NetCacheSection
 /// <summary>Subset of YT-DPI.ps1 New-ConfigObject / Load-Config JSON (read-only in Core).</summary>
 public sealed class YtDpiUserConfig
 {
+    /// <summary>Optional JSON schema version for forward-compatible saves from .NET preview (0 = legacy / unset).</summary>
+    public int SchemaVersion { get; set; }
+
     public int RunCount { get; set; }
     public int LastPromptRun { get; set; }
     public string LastCheckedVersion { get; set; } = "";
@@ -46,6 +49,7 @@ public sealed class YtDpiUserConfig
         var staleTicks = DateTime.Now.AddDays(-1).Ticks;
         return new YtDpiUserConfig
         {
+            SchemaVersion = 1,
             RunCount = 0,
             LastPromptRun = 0,
             LastCheckedVersion = "",

@@ -23,6 +23,7 @@ public class PreviewEngineTests
         Assert.Equal("IPv6", cfg.IpPreference);
         Assert.Equal("Auto", cfg.TlsMode);
         Assert.False(cfg.Proxy.Enabled);
+        Assert.Equal(1, cfg.SchemaVersion);
     }
 
     [Fact]
