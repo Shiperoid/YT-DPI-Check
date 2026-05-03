@@ -35,7 +35,7 @@
 * После успешной компиляции в том же процессе — **[`tools/smoke-yt-dpi-engines.ps1`](tools/smoke-yt-dpi-engines.ps1)** (AST всего `YT-DPI.ps1` + короткие паттерны runspace).
 * В лог печатаются **ОС**, **версия PS**, **runtime** — чтобы сопоставлять с жалобами пользователей.
 
-**CI:** матрица **`windows-2022`** и **`windows-latest`** × несколько версий **pwsh** (через [`powershell/setup-powershell`](https://github.com/PowerShell/setup-powershell)); это **не** потребительские «чистые» Win10/Win11, а ближайший суррогат разных образов и рантаймов.
+**CI:** матрица **`windows-2022`** и **`windows-latest`** × несколько версий **pwsh** (через [`PowerShell/setup-powershell`](https://github.com/PowerShell/setup-powershell)); это **не** потребительские «чистые» Win10/Win11, а ближайший суррогат разных образов и рантаймов.
 
 **Дополнительные интерпретаторы:** переменная окружения **`YT_DPI_GATE_EXTRA_PS`** — список полных путей к `powershell.exe` / `pwsh.exe`, разделитель **`;`** или **`|`** (например второй установленный **PS 7** или портативная сборка).
 
