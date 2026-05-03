@@ -15,6 +15,9 @@ fi
 # YT-DPI.sh — интерактивный терминальный сканер доступности YouTube-доменов.
 # Скрипт проверяет HTTP, TLS 1.2 и TLS 1.3, поддерживает прокси и сохраняет отчёт.
 # Часть настроек хранится в ~/.config/yt-dpi/config.json (если установлен jq).
+#
+# PS→SH parity (v2.3.0): HTTP/TLS через curl (не C#); Deep Trace — traceroute/mtr + curl;
+# обновление — один файл .sh; ресайз — SIGWINCH/stty; фон NetInfo — упрощённый опрос в главном цикле.
 
 # Инициализация TUI: скрываем ввод/курсор и переходим в альтернативный экран.
 stty -echo
@@ -22,7 +25,8 @@ printf "\033[?1049h"
 printf "\033[?25l"
 
 cleanup() {
-    stty echo
+    config_save 2>/dev/null || true
+    stty echo 2>/dev/null || true
     printf "\033[?1049l"
     printf "\033[?25h"
     rm -rf "$TMP_DIR"
@@ -48,19 +52,23 @@ if [[ "$OSTYPE" == "darwin"* ]]; then OS_MAC=true; fi
 
 READ_TIMEOUT="0.05"
 if (( BASH_VERSINFO[0] < 4 )); then READ_TIMEOUT="1"; fi
-ANIM_EVERY=1
 
-# Профиль обновления экрана для Git Bash на Windows.
+# Профиль опроса клавиш для Git Bash на Windows.
 if [[ -n "${MSYSTEM:-}" ]]; then
     READ_TIMEOUT="0.03"
-    ANIM_EVERY=2
 fi
 
 TMP_DIR=$(mktemp -d)
 E=$'\033'
 trap 'cleanup' INT TERM EXIT
+trap 'NEED_UI_REDRAW=true' WINCH 2>/dev/null || true
 
-SCRIPT_VERSION="2.3.0"
+SCRIPT_VERSION="2.3.1"
+SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
+DEBUG_LOG_FILE="$SCRIPT_DIR/YT-DPI_Debug.log"
+DEBUG_LOG_MAX=$((5 * 1024 * 1024))
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/yt-dpi"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 
@@ -68,6 +76,82 @@ CONFIG_FILE="$CONFIG_DIR/config.json"
 export IP_PREFERENCE="IPv6"
 export TLS_MODE="Auto"
 HAS_IPV6=false
+
+LAST_CHECKED_VERSION=""
+RUN_COUNT=0
+DEBUG_LOG_CFG=false
+DEBUG_FULL_IDS_CFG=false
+NEED_UI_REDRAW=false
+LAST_NET_POLL_TS=0
+STATUS_BAR_CACHE=""
+DEBUG_SESSION_HEADER_DONE=false
+YT_DPI_DEBUG_ON=0
+YT_DPI_DEBUG_ID_ON=0
+
+env_match_on() {
+    local v="${1:-}"
+    [[ "$v" =~ ^(1|true|yes|on)$ ]]
+}
+
+refresh_env_debug_flags() {
+    env_match_on "${YT_DPI_DEBUG:-}" && YT_DPI_DEBUG_ON=1 || YT_DPI_DEBUG_ON=0
+    env_match_on "${YT_DPI_DEBUG_IDENTIFIERS:-}" && YT_DPI_DEBUG_ID_ON=1 || YT_DPI_DEBUG_ID_ON=0
+}
+refresh_env_debug_flags
+
+debug_enabled() {
+    (( YT_DPI_DEBUG_ON )) && return 0
+    [[ "$DEBUG_LOG_CFG" == true ]] || [[ "$DEBUG_LOG_CFG" == "1" ]] && return 0
+    return 1
+}
+
+full_identifiers_enabled() {
+    (( YT_DPI_DEBUG_ID_ON )) && return 0
+    [[ "$DEBUG_FULL_IDS_CFG" == true ]] || [[ "$DEBUG_FULL_IDS_CFG" == "1" ]] && return 0
+    return 1
+}
+
+debug_log_rotate_if_needed() {
+    [[ -f "$DEBUG_LOG_FILE" ]] || return 0
+    local sz=0
+    if [[ "$OSTYPE" == "darwin"* ]]; then sz=$(stat -f%z "$DEBUG_LOG_FILE" 2>/dev/null || echo 0)
+    else sz=$(stat -c%s "$DEBUG_LOG_FILE" 2>/dev/null || echo 0); fi
+    (( sz < DEBUG_LOG_MAX )) && return 0
+    local bak="$SCRIPT_DIR/YT-DPI_Debug_$(date '+%Y%m%d_%H%M%S').log"
+    mv -f "$DEBUG_LOG_FILE" "$bak" 2>/dev/null || rm -f "$DEBUG_LOG_FILE"
+}
+
+write_debug_log() {
+    debug_enabled || return 0
+    debug_log_rotate_if_needed
+    local lvl="${2:-DEBUG}"
+    local line="[$(date '+%H:%M:%S')] [$lvl] $1"
+    if command -v flock &>/dev/null; then
+        (
+            flock -w 8 200 || exit 0
+            printf '%s\n' "$line" >> "$DEBUG_LOG_FILE"
+        ) 200>>"${DEBUG_LOG_FILE}.lock"
+    else
+        printf '%s\n' "$line" >> "$DEBUG_LOG_FILE"
+    fi
+}
+
+write_debug_session_header_once() {
+    debug_enabled || return 0
+    $DEBUG_SESSION_HEADER_DONE && return 0
+    DEBUG_SESSION_HEADER_DONE=true
+    printf '%s\n' "==================== YT-DPI SESSION START (bash) ====================" >> "$DEBUG_LOG_FILE"
+    write_debug_log "Скрипт версия: $SCRIPT_VERSION" "INFO"
+    write_debug_log "ОС: $(uname -srmo 2>/dev/null || uname -a)" "INFO"
+    write_debug_log "Bash: $BASH_VERSION | PID: $$" "INFO"
+    if full_identifiers_enabled; then
+        write_debug_log "Пользователь/узел: ${USER:-?} @ $(hostname 2>/dev/null)" "INFO"
+        write_debug_log "Путь к скрипту: $SCRIPT_PATH | CWD: $(pwd 2>/dev/null)" "INFO"
+    else
+        write_debug_log "Узел/пользователь: [обезличено] (YT_DPI_DEBUG_IDENTIFIERS=1 или пункт S5)" "INFO"
+    fi
+    write_debug_log "Лог-файл: $DEBUG_LOG_FILE | env debug=$YT_DPI_DEBUG_ON cfg debug=$DEBUG_LOG_CFG" "INFO"
+}
 
 PROXY_ENABLED=false
 PROXY_TYPE="HTTP"
@@ -122,10 +206,10 @@ X_VER=$((X_LAT + W_LAT + 1))
 C_BLK="${E}[40m"; C_RED="${E}[31m"; C_GRN="${E}[32m"; C_YEL="${E}[33m"
 C_MAG="${E}[35m"; C_CYA="${E}[36m"; C_WHT="${E}[97m"; C_GRY="${E}[90m"; C_RST="${E}[0m"
 
-NAV_STR="[ READY ] [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [T] TEST | [R] REPORT | [H] HELP | [Q] QUIT"
-NAV_SCAN="[ BUSY ] SCANNING IN PROGRESS... PRESS [Q] TO ABORT"
-NAV_ABORT="[ ABORTED ] SCAN STOPPED. [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [T] TEST | [R] REPORT | [H] HELP | [Q] QUIT"
-NAV_DONE="[ SUCCESS ] SCAN FINISHED. [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [T] TEST | [R] REPORT | [H] HELP | [Q] QUIT"
+NAV_STR="[ READY ] ENTER SCAN | S SETTINGS | P PROXY | D TRACE | U UPDATE | R REPORT | H HELP | Q QUIT"
+NAV_SCAN="[ BUSY ] SCANNING... Q/ESC ABORT"
+NAV_ABORT="[ ABORTED ] ENTER SCAN | S P D U R H Q"
+NAV_DONE="[ DONE ] ENTER SCAN | S P D U R H Q"
 
 FRAME_BUFFER=""
 # Запись строки в буфер кадра (без немедленной отправки в терминал).
@@ -137,21 +221,129 @@ out_str() {
 }
 flush_buffer() { printf "%b" "$FRAME_BUFFER"; FRAME_BUFFER=""; }
 
+# Нижняя строка статуса (кеш по тексту).
+draw_status_bar() {
+    local msg="$1"
+    local pct="${2:-}"
+    local bar=""
+    if [[ -n "$pct" ]] && [[ "$pct" =~ ^[0-9]+$ ]] && (( pct >= 0 && pct <= 100 )); then
+        local filled=$((pct / 5))
+        (( filled > 20 )) && filled=20
+        local i
+        bar=" ["
+        for (( i=0; i<20; i++ )); do
+            (( i < filled )) && bar+="█" || bar+="░"
+        done
+        bar+="] ${pct}%"
+    fi
+    local key="${msg}${bar}"
+    [[ "$key" == "$STATUS_BAR_CACHE" ]] && return 0
+    STATUS_BAR_CACHE="$key"
+    out_str 2 "$UI_Y" 121 "${msg}${bar}" "$C_WHT"
+    flush_buffer
+}
+
+targets_signature() {
+    local s; s=$(printf '%s\n' "${TARGETS[@]}")
+    if command -v sha256sum &>/dev/null; then printf '%s' "$s" | sha256sum | awk '{print $1}'
+    elif command -v shasum &>/dev/null; then printf '%s' "$s" | shasum -a 256 | awk '{print $1}'
+    else printf '%s' "$s" | cksum | awk '{print $1}'; fi
+}
+
+test_internet_available() {
+    local px=""
+    if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then px="-x $PROXY_STR"; fi
+    if curl -s -m 3 $px -o /dev/null -w "%{http_code}" "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -q .; then return 0; fi
+    if curl -s -m 3 $px -o /dev/null "http://connectivitycheck.gstatic.com/generate_204" 2>/dev/null; then return 0; fi
+    if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then return 0; fi
+    if ping -n 1 -w 2 8.8.8.8 &>/dev/null; then return 0; fi
+    return 1
+}
+
+flush_dns_cache() {
+    if command -v resolvectl &>/dev/null; then resolvectl flush-caches 2>/dev/null && return 0; fi
+    if $OS_MAC; then
+        dscacheutil -flushcache 2>/dev/null
+        killall -HUP mDNSResponder 2>/dev/null
+        return 0
+    fi
+    return 1
+}
+
+version_newer() {
+    awk -v cur="${1:-}" -v new="${2:-}" 'BEGIN{
+      gsub(/^v/,"",cur); gsub(/^v/,"",new);
+      if (length(new)==0) exit 1;
+      split(cur,a,"."); split(new,b,".");
+      for (i=1;i<=3;i++) {
+        ai = (i in a) ? a[i]+0 : 0;
+        bi = (i in b) ? b[i]+0 : 0;
+        if (bi>ai) exit 0;
+        if (bi<ai) exit 1;
+      }
+      exit 1;
+    }'
+}
+
+github_latest_tag() {
+    local raw tag
+    raw=$(curl -s -m 12 -H "User-Agent: YT-DPI/$SCRIPT_VERSION" \
+        "https://api.github.com/repos/Shiperoid/YT-DPI/releases/latest" 2>/dev/null) || return 1
+    if have_jq; then
+        tag=$(printf '%s' "$raw" | jq -r '.tag_name // empty' 2>/dev/null)
+    else
+        tag=$(printf '%s' "$raw" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)
+    fi
+    [[ -n "$tag" ]] && echo "$tag"
+}
+
+summarize_verdicts() {
+    local av=0 th=0 dpi=0 ipb=0 rt=0 other=0
+    local i row v
+    for i in "${!TARGETS[@]}"; do
+        row=$((12 + i))
+        [[ -f "$TMP_DIR/$row.res" ]] || continue
+        v=$(cut -d'|' -f6 < "$TMP_DIR/$row.res")
+        case "$v" in
+            AVAILABLE) ((av++)) ;;
+            THROTTLED) ((th++)) ;;
+            "DPI BLOCK") ((dpi++)) ;;
+            "IP BLOCK") ((ipb++)) ;;
+            "ROUTING ERROR") ((rt++)) ;;
+            *) ((other++)) ;;
+        esac
+    done
+    echo "AV=$av TH=$th DPI=$dpi IP=$ipb RT=$rt O=$other"
+}
+
 # Проверка доступности jq (нужен только для работы с JSON-конфигом).
 have_jq() { command -v jq &>/dev/null; }
 
-# Сохранение настроек в JSON-конфиг.
+# Сохранение настроек в JSON-конфиг (merge с существующим файлом — не затираем чужие ключи).
 config_save() {
-    have_jq || return 0
     mkdir -p "$CONFIG_DIR" || return 1
     local hist_json
     hist_json=$(printf '%s\n' "${PROXY_HISTORY[@]}" | jq -R . 2>/dev/null | jq -s . 2>/dev/null) || hist_json='[]'
     local pe=false
     if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then pe=true; fi
-    local pj port_safe
-    port_safe="${PROXY_PORT:-0}"
+    local port_safe="${PROXY_PORT:-0}"
     [[ "$port_safe" =~ ^[0-9]+$ ]] || port_safe=0
+    local dj=false df=false
+    [[ "$DEBUG_LOG_CFG" == true ]] || [[ "$DEBUG_LOG_CFG" == "1" ]] && dj=true
+    [[ "$DEBUG_FULL_IDS_CFG" == true ]] || [[ "$DEBUG_FULL_IDS_CFG" == "1" ]] && df=true
+    local rc="${RUN_COUNT:-0}"
+    [[ "$rc" =~ ^[0-9]+$ ]] || rc=0
+
+    if ! have_jq; then
+        write_debug_log "jq не найден — конфиг не сохранён на диск" "WARN"
+        return 0
+    fi
+
+    local cur='{}'
+    [[ -f "$CONFIG_FILE" ]] && cur=$(jq -c '.' "$CONFIG_FILE" 2>/dev/null) || cur='{}'
+
     jq -n \
+        --argjson cur "$cur" \
         --arg IpPreference "$IP_PREFERENCE" \
         --arg TlsMode "$TLS_MODE" \
         --argjson ProxyEnabled "$pe" \
@@ -161,8 +353,21 @@ config_save() {
         --arg User "${PROXY_USER:-}" \
         --arg Pass "${PROXY_PASS:-}" \
         --argjson History "$hist_json" \
-        '{IpPreference:$IpPreference,TlsMode:$TlsMode,Proxy:{Enabled:$ProxyEnabled,Type:$Type,Host:$Host,Port:$Port,User:$User,Pass:$Pass},ProxyHistory:$History}' \
+        --arg LastCheckedVersion "${LAST_CHECKED_VERSION:-}" \
+        --argjson RunCount "$rc" \
+        --argjson DebugLogEnabled "$dj" \
+        --argjson DebugLogFullIdentifiers "$df" \
+        '$cur
+            | .IpPreference = $IpPreference
+            | .TlsMode = $TlsMode
+            | .Proxy = {Enabled:$ProxyEnabled,Type:$Type,Host:$Host,Port:$Port,User:$User,Pass:$Pass}
+            | .ProxyHistory = $History
+            | .LastCheckedVersion = $LastCheckedVersion
+            | .RunCount = $RunCount
+            | .DebugLogEnabled = $DebugLogEnabled
+            | .DebugLogFullIdentifiers = $DebugLogFullIdentifiers' \
         > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
+    write_debug_log "Конфиг сохранён" "INFO"
 }
 
 config_load() {
@@ -170,6 +375,12 @@ config_load() {
     [[ -f "$CONFIG_FILE" ]] || return 0
     IP_PREFERENCE=$(jq -r '.IpPreference // "IPv6"' "$CONFIG_FILE")
     TLS_MODE=$(jq -r '.TlsMode // "Auto"' "$CONFIG_FILE")
+    LAST_CHECKED_VERSION=$(jq -r '.LastCheckedVersion // ""' "$CONFIG_FILE")
+    RUN_COUNT=$(jq -r '.RunCount // 0' "$CONFIG_FILE")
+    [[ "$RUN_COUNT" =~ ^[0-9]+$ ]] || RUN_COUNT=0
+    DEBUG_LOG_CFG=$(jq -r '.DebugLogEnabled // false' "$CONFIG_FILE")
+    DEBUG_FULL_IDS_CFG=$(jq -r '.DebugLogFullIdentifiers // false' "$CONFIG_FILE")
+
     PROXY_HISTORY=()
     local line
     while IFS= read -r line; do
@@ -197,8 +408,9 @@ config_load() {
         t_lower=$(echo "$PROXY_TYPE" | tr 'A-Z' 'a-z')
         if [[ -n "$PROXY_USER" && -n "$PROXY_PASS" ]]; then userpass_str="${PROXY_USER}:${PROXY_PASS}@"; fi
         PROXY_STR="${t_lower}://${userpass_str}${PROXY_HOST}:${PROXY_PORT}"
-        if [[ "$PROXY_TYPE" == "SOCKS5" ]]; then PROXY_STR="${PROXY_STR/socks5:\/\//socks5h:\/\/}"; fi
+        if [[ "${PROXY_TYPE}" == "SOCKS5" ]]; then PROXY_STR="${PROXY_STR/socks5:\/\//socks5h:\/\/}"; fi
     fi
+    refresh_env_debug_flags
 }
 
 detect_ipv6() {
@@ -374,56 +586,110 @@ draw_ui() {
     flush_buffer
 }
 
-show_help() {
-    clear
-    echo -e "${C_CYA}=== YT-DPI v${SCRIPT_VERSION} : GUIDE ===${C_RST}"
-    echo -e "\n${C_YEL}[ STATUS CODES ]${C_RST}"
-    echo -e "  ${C_GRN}OK   - Connection successful.${C_RST}"
-    echo -e "  ${C_RED}RST  - Connection Reset. DPI injected a TCP RST packet.${C_RST}"
-    echo -e "  ${C_RED}DRP  - Connection Dropped (Blackholed/Timeout).${C_RST}"
-    echo -e "  ${C_GRY}N/A  - Not Available (e.g. lack of TLS 1.3 support).${C_RST}"
-    echo -e "  ${C_RED}FAIL - Connection failed or general error.${C_RST}"
-
-    echo -e "\n${C_YEL}[ RESULT ]${C_RST}"
-    echo -e "  ${C_GRN}AVAILABLE     - TLS passed. Domain is fully accessible.${C_RST}"
-    echo -e "  ${C_YEL}DPI BLOCK     - HTTP works, but TLS is blocked/dropped.${C_RST}"
-    echo -e "  ${C_YEL}THROTTLED    - HTTP works, but one TLS version is blocked.${C_RST}"
-    echo -e "  ${C_RED}IP  BLOCK     - Both HTTP and TLS are unreachable.${C_RST}"
-    echo -e "  ${C_RED}ROUTING ERROR - Network issues, proxy failure, bad routing.${C_RST}"
-
-    echo -ne "\n${C_CYA}PRESS ANY KEY TO RETURN...${C_RST}"
-    read -r -n 1 -s
+show_help_menu() {
+    local page=0
+    local total=5
+    while true; do
+        stty echo
+        clear
+        echo -e "${C_CYA}── YT-DPI v${SCRIPT_VERSION} — справка (стр. $((page + 1))/${total}) ──${C_RST}\n"
+        case $page in
+            0)
+                echo -e "${C_WHT}[ ЧТО ДЕЛАЕТ ]${C_RST}"
+                echo -e "  Параллельно проверяет домены: HTTP:80, TLS 1.2 и 1.3 на 443 (SNI). Диагностика DPI/ТСПУ."
+                echo -e "\n${C_WHT}[ ГОРЯЧИЕ КЛАВИШИ ]${C_RST}"
+                echo -e "  ${C_YEL}ENTER${C_RST} — скан таблицы | ${C_YEL}S${C_RST} настройки | ${C_YEL}P${C_RST} прокси"
+                echo -e "  ${C_YEL}D${C_RST} Deep Trace | ${C_YEL}U${C_RST} обновление с GitHub | ${C_YEL}R${C_RST} отчёт"
+                echo -e "  ${C_YEL}H${C_RST} справка | ${C_YEL}Q / ESC${C_RST} выход"
+                ;;
+            1)
+                echo -e "${C_WHT}[ КОЛОНКИ ]${C_RST} №/TARGET, IP, HTTP, T12, T13, LAT, RESULT."
+                echo -e "\n${C_WHT}[ КОДЫ ЯЧЕЕК ]${C_RST}"
+                echo -e "  ${C_GRN}OK${C_RST} OK | ${C_RED}ERR/RST/DRP${C_RST} см. README PS | ${C_GRY}N/A ---${C_RST}"
+                ;;
+            2)
+                echo -e "${C_WHT}[ ВЕРДИКТЫ ]${C_RST} AVAILABLE, THROTTLED, DPI BLOCK, IP BLOCK, ROUTING ERROR."
+                echo -e "  Сначала смотрите HTTP, затем TLS."
+                ;;
+            3)
+                echo -e "${C_WHT}[ DEEP TRACE (D) ]${C_RST}"
+                echo -e "  Номер строки 1…N; в sh используются traceroute/mtr и curl к :443 (не C#)."
+                ;;
+            4)
+                echo -e "${C_WHT}[ ПРОКСИ P ]${C_RST} 1 тест 2 выкл 3 очистить историю 4 новый адрес; 5+ история; 0/Esc назад."
+                echo -e "${C_WHT}[ S ]${C_RST} 1 IP pref 2 сброс DNS-кэша (где есть) 3 TLS цикл 4 лог 5 полные ID в логе."
+                echo -e "${C_WHT}[ U ]${C_RST} сверка релиза GitHub, загрузка ${C_CYA}YT-DPI.sh${C_RST}."
+                echo -e "${C_WHT}[ TLS ]${C_RST} chrome://flags/#enable-tls13-kyber — при нестабильности Kyber."
+                ;;
+        esac
+        echo -e "\n${C_GRY}N/→ далее  P/← назад  Enter/Esc/другая — закрыть${C_RST}"
+        read -rsn1 k || true
+        [[ "$k" == $'\e' ]] && read -rsn2 k2 2>/dev/null || k2=""
+        if [[ "$k" == $'\n' || "$k" == $'\r' ]] || [[ "$k$k2" == $'\e[A' ]] || [[ "$k$k2" == $'\e[D' ]] || [[ "$k" == "p" || "$k" == "P" || "$k" == "з" || "$k" == "З" ]]; then
+            page=$(( (page - 1 + total) % total ))
+            continue
+        fi
+        if [[ "$k" == "n" || "$k" == "N" || "$k" == "т" || "$k" == "Т" ]] || [[ "$k$k2" == $'\e[B' ]] || [[ "$k$k2" == $'\e[C' ]]; then
+            page=$(( (page + 1) % total ))
+            continue
+        fi
+        break
+    done
+    stty -echo
 }
 
-# Меню общих настроек сканера (IP preference и TLS mode).
+# Меню настроек (паритет PS [S]).
 show_settings_menu() {
-    stty echo
-    clear
-    echo -e "${C_CYA}=== SETTINGS (как в YT-DPI.bat, упрощённо) ===${C_RST}"
-    echo -e "  IpPreference: ${C_YEL}$IP_PREFERENCE${C_RST}   TlsMode: ${C_YEL}$TLS_MODE${C_RST}"
-    echo -e "  IPv6 detected: ${C_YEL}$HAS_IPV6${C_RST}"
-    echo -e "\n${C_CYA}Выберите:${C_RST}"
-    echo -e "  ${C_GRY}1${C_RST} — IpPreference: IPv6"
-    echo -e "  ${C_GRY}2${C_RST} — IpPreference: IPv4"
-    echo -e "  ${C_GRY}3${C_RST} — TlsMode: Auto"
-    echo -e "  ${C_GRY}4${C_RST} — TlsMode: TLS12"
-    echo -e "  ${C_GRY}5${C_RST} — TlsMode: TLS13"
-    echo -e "  ${C_GRY}Enter${C_RST} — назад"
-    echo -ne "\n${C_YEL}> ${C_RST}"
-    local c
-    read -r c
-    stty -echo
-    case "$c" in
-        1) IP_PREFERENCE="IPv6" ;;
-        2) IP_PREFERENCE="IPv4" ;;
-        3) TLS_MODE="Auto" ;;
-        4) TLS_MODE="TLS12" ;;
-        5) TLS_MODE="TLS13" ;;
-        *) return 0 ;;
-    esac
-    config_save
-    echo -e "\n${C_GRN}[OK] Сохранено.${C_RST}"
-    sleep 1
+    while true; do
+        stty echo
+        clear
+        echo -e "${C_CYA}=== SETTINGS / НАСТРОЙКИ ===${C_RST}\n"
+        echo -e "  1. Протокол IP: ${C_YEL}$IP_PREFERENCE${C_RST} (переключить IPv6 pref ↔ только IPv4)"
+        echo -e "  2. Сброс сетевого кэша (DNS resolver где доступно)"
+        echo -e "  3. Режим TLS: ${C_YEL}$TLS_MODE${C_RST} (цикл Auto → TLS12 → TLS13)"
+        local dsl="ВЫКЛ"; [[ "$DEBUG_LOG_CFG" == true ]] || [[ "$DEBUG_LOG_CFG" == "1" ]] && dsl="ВКЛ"
+        local dsf="ВЫКЛ"; [[ "$DEBUG_FULL_IDS_CFG" == true ]] || [[ "$DEBUG_FULL_IDS_CFG" == "1" ]] && dsf="ВКЛ"
+        echo -e "  4. Отладочный лог: ${C_YEL}$dsl${C_RST} ($DEBUG_LOG_FILE)"
+        echo -e "  5. Полные ID в заголовке лога: ${C_YEL}$dsf${C_RST}"
+        echo -e "  ${C_GRY}0 / Enter — назад${C_RST}"
+        echo -ne "\n${C_YEL}> ${C_RST}"
+        local c
+        read -r c
+        stty -echo
+        case "$c" in
+            1)
+                if [[ "$IP_PREFERENCE" == "IPv6" ]]; then IP_PREFERENCE="IPv4"; else IP_PREFERENCE="IPv6"; fi
+                config_save; write_debug_session_header_once
+                ;;
+            2)
+                if flush_dns_cache; then echo -e "${C_GRN}[OK] DNS cache flush попытка выполнена.${C_RST}"
+                else echo -e "${C_YEL}[i] Авто-сброс DNS недоступен на этой ОС — пропустите или сбросьте вручную.${C_RST}"; fi
+                ISP="UNKNOWN"; LOC="UNKNOWN"
+                sleep 1
+                ;;
+            3)
+                case "$TLS_MODE" in
+                    Auto) TLS_MODE="TLS12" ;;
+                    TLS12) TLS_MODE="TLS13" ;;
+                    *) TLS_MODE="Auto" ;;
+                esac
+                config_save
+                ;;
+            4)
+                if [[ "$DEBUG_LOG_CFG" == true ]] || [[ "$DEBUG_LOG_CFG" == "1" ]]; then DEBUG_LOG_CFG=false; else DEBUG_LOG_CFG=true; fi
+                config_save
+                DEBUG_SESSION_HEADER_DONE=false
+                write_debug_session_header_once
+                ;;
+            5)
+                if [[ "$DEBUG_FULL_IDS_CFG" == true ]] || [[ "$DEBUG_FULL_IDS_CFG" == "1" ]]; then DEBUG_FULL_IDS_CFG=false; else DEBUG_FULL_IDS_CFG=true; fi
+                config_save
+                DEBUG_SESSION_HEADER_DONE=false
+                write_debug_session_header_once
+                ;;
+            0|""|$'\r') break ;;
+        esac
+    done
 }
 
 # Применение записи из истории прокси.
@@ -457,155 +723,189 @@ apply_proxy_history_entry() {
     PROXY_STR="${t_lower}://${userpass_str}${PROXY_HOST}:${PROXY_PORT}"
     PROXY_ENABLED=true
     if [[ "$PROXY_TYPE" == "SOCKS5" ]]; then PROXY_STR="${PROXY_STR/socks5:\/\//socks5h:\/\/}"; fi
-    proxy_history_add
     return 0
 }
 
-# Интерактивное меню настройки прокси.
-show_proxy_menu() {
-    stty echo
-    clear
-    echo -e "${C_CYA}=== НАСТРОЙКИ ПРОКСИ (YT-DPI v${SCRIPT_VERSION}) ===${C_RST}"
+SNAP_PE=false SNAP_PT="" SNAP_PH="" SNAP_PP="" SNAP_PU="" SNAP_PPASS="" SNAP_PSTR=""
 
-    if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then
-        echo -e "  [ СТАТУС ]  ${C_GRN}ВКЛЮЧЕН${C_RST}"
-        echo -e "  [ ТИП ]     ${C_YEL}$PROXY_TYPE${C_RST}"
-        echo -e "  [ АДРЕС ]   ${C_YEL}$PROXY_HOST:$PROXY_PORT${C_RST}"
-        if [ -n "$PROXY_USER" ]; then echo -e "  [ ЛОГИН ]   ${C_YEL}$PROXY_USER${C_RST}"; fi
-    else
-        echo -e "  [ СТАТУС ]  ${C_GRY}ОТКЛЮЧЕН${C_RST}"
-    fi
-
-    if ((${#PROXY_HISTORY[@]} > 0)); then
-        echo -e "\n${C_CYA}ИСТОРИЯ (номер для выбора):${C_RST}"
-        local hi
-        for (( hi=0; hi<${#PROXY_HISTORY[@]}; hi++ )); do
-            echo -e "    $((hi+1)). ${PROXY_HISTORY[$hi]}"
-        done
-        echo -e "    ${C_GRY}0. Очистить историю (CLEAR)${C_RST}"
-    fi
-
-    echo -e "\n${C_CYA}Команды:${C_RST} ${C_GRY}TEST${C_RST} — проверить текущий прокси | ${C_GRY}CLEAR${C_RST} — очистить историю"
-    echo -e "${C_CYA}Форматы:${C_RST} host:port | socks5://... | http://user:pass@host:port | ${C_GRY}OFF/0${C_RST}"
-
-    echo -ne "\n${C_YEL}> Введите прокси (или номер из истории): ${C_RST}"
-    local px_input
-    read -r px_input
-    stty -echo
-
-    px_input=$(echo "$px_input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    [[ -z "$px_input" ]] && return 0
-
-    shopt -s nocasematch
-    if [[ "$px_input" == "TEST" ]]; then
-        shopt -u nocasematch
-        test_proxy
-        return 0
-    fi
-    if [[ "$px_input" == "CLEAR" ]]; then
-        shopt -u nocasematch
-        PROXY_HISTORY=()
-        config_save
-        echo -e "\n${C_GRN}[OK] История очищена.${C_RST}"; sleep 1
-        return 0
-    fi
-    shopt -u nocasematch
-
-    if [[ "$px_input" =~ ^[0-9]+$ ]]; then
-        local n=$px_input
-        if (( n == 0 )) && ((${#PROXY_HISTORY[@]} > 0)); then
-            PROXY_HISTORY=()
-            config_save
-            echo -e "\n${C_GRN}[OK] История очищена.${C_RST}"; sleep 1
-            return 0
-        fi
-        if (( n >= 1 && n <= ${#PROXY_HISTORY[@]} )); then
-            if apply_proxy_history_entry "${PROXY_HISTORY[$((n-1))]}"; then
-                echo -e "\n${C_GRN}[OK] Прокси из истории применён.${C_RST}"; sleep 1
-            fi
-            return 0
-        fi
-    fi
-
-    if [[ "$px_input" == "0" || "$px_input" == "off" || "$px_input" == "OFF" ]]; then
-        PROXY_ENABLED=false
-        PROXY_TYPE="HTTP"; PROXY_HOST=""; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""; PROXY_STR=""
-        config_save
-        echo -e "\n${C_GRN}[OK] Прокси отключён.${C_RST}"; sleep 1
-        return 0
-    fi
-
-    local re="^((http|https|socks5)://)?(([^:]+):([^@]+)@)?([^:/]+|\[[a-fA-F0-9:]+\]):([0-9]{1,5})$"
-
-    shopt -s nocasematch
-    if [[ "$px_input" =~ $re ]]; then
-        shopt -u nocasematch
-
-        local t="${BASH_REMATCH[2]}" u="${BASH_REMATCH[4]}" pw="${BASH_REMATCH[5]}"
-        local h="${BASH_REMATCH[6]}" p="${BASH_REMATCH[7]}"
-
-        if (( p <= 0 || p > 65535 )); then
-            echo -e "\n${C_RED}[x] Неверный порт.${C_RST}"; sleep 2
-            return 0
-        fi
-
-        local userpass_str=""
-        if [[ -n "$u" && -n "$pw" ]]; then userpass_str="${u}:${pw}@"; fi
-
-        if [[ -z "$t" ]]; then
-            echo -e "\n${C_GRY}[*] Автоопределение типа...${C_RST}"
-            local detected="HTTP"
-            echo -ne "  -> SOCKS5... ${C_GRY}"
-            if curl -s -m 3 -x "socks5://${userpass_str}${h}:${p}" -I "http://google.com" -o /dev/null; then
-                detected="SOCKS5"; echo -e "${C_GRN}OK${C_RST}"
-            else
-                echo -e "${C_RED}нет${C_RST}"; echo -ne "  -> HTTP... ${C_GRY}"
-                if curl -s -m 3 -x "http://${userpass_str}${h}:${p}" -I "http://google.com" -o /dev/null; then
-                    detected="HTTP"; echo -e "${C_GRN}OK${C_RST}"
-                else
-                    echo -e "${C_RED}нет${C_RST}"
-                    echo -e "  ${C_GRY}[!] Оставляем HTTP.${C_RST}"
-                fi
-            fi
-            t="$detected"
-        fi
-
-        PROXY_ENABLED=true
-        PROXY_TYPE=$(echo "$t" | tr 'a-z' 'A-Z')
-        PROXY_HOST="$h"; PROXY_PORT="$p"; PROXY_USER="$u"; PROXY_PASS="$pw"
-
-        local t_lower=$(echo "$PROXY_TYPE" | tr 'A-Z' 'a-z')
-        PROXY_STR="${t_lower}://${userpass_str}${PROXY_HOST}:${PROXY_PORT}"
-        if [[ "$PROXY_TYPE" == "SOCKS5" ]]; then PROXY_STR="${PROXY_STR/socks5:\/\//socks5h:\/\/}"; fi
-
-        proxy_history_add
-        echo -e "\n${C_GRN}[OK] Прокси сохранён.${C_RST}"; sleep 1
-    else
-        shopt -u nocasematch
-        echo -e "\n${C_RED}[x] Неверный формат.${C_RST}"; sleep 2
-    fi
+proxy_snapshot_save() {
+    SNAP_PE=$PROXY_ENABLED
+    SNAP_PT=$PROXY_TYPE
+    SNAP_PH=$PROXY_HOST
+    SNAP_PP=$PROXY_PORT
+    SNAP_PU=$PROXY_USER
+    SNAP_PPASS=$PROXY_PASS
+    SNAP_PSTR=$PROXY_STR
 }
 
-# Быстрая проверка текущих прокси-настроек.
-test_proxy() {
+proxy_snapshot_restore() {
+    PROXY_ENABLED=$SNAP_PE
+    PROXY_TYPE=$SNAP_PT
+    PROXY_HOST=$SNAP_PH
+    PROXY_PORT=$SNAP_PP
+    PROXY_USER=$SNAP_PU
+    PROXY_PASS=$SNAP_PPASS
+    PROXY_STR=$SNAP_PSTR
+}
+
+proxy_ping_google_ms() {
+    local ms ec
+    ms=$(curl -s -m 6 -x "$PROXY_STR" -o /dev/null -w "%{time_connect}" -I "http://google.com" 2>/dev/null)
+    ec=$?
+    (( ec != 0 )) && return 1
+    echo "$(awk -v m="$ms" 'BEGIN{ printf "%d", int(m*1000+0.5) }')"
+}
+
+apply_manual_proxy_and_verify() {
+    local px_input=$1
+    local re="^((http|https|socks5)://)?(([^:]+):([^@]+)@)?([^:/]+|\[[a-fA-F0-9:]+\]):([0-9]{1,5})$"
+    shopt -s nocasematch
+    if ! [[ "$px_input" =~ $re ]]; then
+        shopt -u nocasematch
+        echo -e "${C_RED}[FAIL] Неверный формат.${C_RST}"; sleep 2
+        return 1
+    fi
+    shopt -u nocasematch
+    local t="${BASH_REMATCH[2]}" u="${BASH_REMATCH[4]}" pw="${BASH_REMATCH[5]}"
+    local h="${BASH_REMATCH[6]}" p="${BASH_REMATCH[7]}"
+    if (( p <= 0 || p > 65535 )); then echo -e "${C_RED}[FAIL] Порт.${C_RST}"; sleep 2; return 1; fi
+    local userpass_str=""
+    if [[ -n "$u" && -n "$pw" ]]; then userpass_str="${u}:${pw}@"; fi
+    if [[ -z "$t" ]]; then
+        echo -e "${C_GRY}[*] Определение типа прокси...${C_RST}"
+        if curl -s -m 4 -x "socks5://${userpass_str}${h}:${p}" -I "http://google.com" -o /dev/null 2>/dev/null; then t="socks5"
+        elif curl -s -m 4 -x "http://${userpass_str}${h}:${p}" -I "http://google.com" -o /dev/null 2>/dev/null; then t="http"
+        else
+            echo -e "${C_RED}[FAIL] Укажите явно socks5:// или http://${C_RST}"; sleep 2; return 1
+        fi
+    fi
+    proxy_snapshot_save
+    PROXY_ENABLED=true
+    PROXY_TYPE=$(echo "$t" | tr 'a-z' 'A-Z')
+    PROXY_HOST="$h"; PROXY_PORT="$p"; PROXY_USER="${u:-}"; PROXY_PASS="${pw:-}"
+    local t_lower=$(echo "$PROXY_TYPE" | tr 'A-Z' 'a-z')
+    PROXY_STR="${t_lower}://${userpass_str}${PROXY_HOST}:${PROXY_PORT}"
+    if [[ "$PROXY_TYPE" == "SOCKS5" ]]; then PROXY_STR="${PROXY_STR/socks5:\/\//socks5h:\/\/}"; fi
+    local ms
+    ms=$(proxy_ping_google_ms) || {
+        proxy_snapshot_restore
+        echo -e "${C_RED}[FAIL] Прокси не отвечает. Настройки восстановлены.${C_RST}"; sleep 2
+        return 1
+    }
+    echo -e "${C_GRN}[OK] Прокси OK (~${ms} мс).${C_RST}"
+    proxy_history_add
+    config_save
+    sleep 1
+    return 0
+}
+
+# Меню прокси как в PS (цифры).
+show_proxy_menu() {
+    local hist_base=5
+    while true; do
+        stty echo
+        clear
+        echo -e "${C_CYA}=== НАСТРОЙКА ПРОКСИ ===${C_RST}\n"
+        if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then
+            echo -e "  ТЕКУЩИЙ: ${C_GRN}$PROXY_TYPE://${PROXY_HOST}:$PROXY_PORT${C_RST}"
+        else
+            echo -e "  ТЕКУЩИЙ: ${C_GRY}ОТКЛЮЧЕН${C_RST}"
+        fi
+        echo -e "\n  ${C_WHT}Действия:${C_RST}"
+        echo -e "    1 — проверить текущий прокси"
+        echo -e "    2 — выключить прокси"
+        echo -e "    3 — очистить историю (Y/N)"
+        echo -e "    4 — ввести новый адрес"
+        if ((${#PROXY_HISTORY[@]} > 0)); then
+            echo -e "\n  ${C_WHT}Из истории:${C_RST}"
+            local hi
+            for (( hi=0; hi<${#PROXY_HISTORY[@]}; hi++ )); do
+                echo -e "    $((hist_base + hi)) — ${PROXY_HISTORY[$hi]}"
+            done
+        fi
+        echo -e "\n  ${C_GRY}0 или Esc — назад${C_RST}"
+        echo -ne "\n${C_YEL}Цифра: ${C_RST}"
+        local dig
+        read -rsn1 dig || true
+        stty -echo
+        [[ "$dig" == $'\e' || "$dig" == "0" ]] && break
+        case "$dig" in
+            1)
+                test_proxy_connection
+                ;;
+            2)
+                PROXY_ENABLED=false
+                PROXY_TYPE="HTTP"; PROXY_HOST=""; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""; PROXY_STR=""
+                config_save
+                echo -e "${C_GRN}[OK] Прокси выключен.${C_RST}"; sleep 1
+                ;;
+            3)
+                if ((${#PROXY_HISTORY[@]} == 0)); then echo -e "${C_YEL}История пуста.${C_RST}"; sleep 1; continue; fi
+                stty echo
+                echo -ne "${C_YEL}Очистить историю? Y/N: ${C_RST}"
+                local yn
+                read -rn1 yn
+                echo
+                stty -echo
+                if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
+                    PROXY_HISTORY=()
+                    config_save
+                    echo -e "${C_GRN}[OK] Очищено.${C_RST}"; sleep 1
+                fi
+                ;;
+            4)
+                stty echo
+                echo -ne "${C_YEL}Прокси (пустой Enter — отмена): ${C_RST}"
+                local line
+                read -r line
+                stty -echo
+                line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                [[ -z "$line" ]] && continue
+                apply_manual_proxy_and_verify "$line"
+                ;;
+            [5-9])
+                local idx=$((dig - hist_base))
+                if (( idx >= 0 && idx < ${#PROXY_HISTORY[@]} )); then
+                    proxy_snapshot_save
+                    if apply_proxy_history_entry "${PROXY_HISTORY[$idx]}"; then
+                        local ms
+                        ms=$(proxy_ping_google_ms) || {
+                            proxy_snapshot_restore
+                            echo -e "${C_RED}[FAIL] Запись истории не работает.${C_RST}"; sleep 2
+                            continue
+                        }
+                        echo -e "${C_GRN}[OK] Из истории (~${ms} мс).${C_RST}"
+                        proxy_history_add
+                        config_save
+                        sleep 1
+                    fi
+                else
+                    echo -e "${C_YEL}Нет такого пункта.${C_RST}"; sleep 1
+                fi
+                ;;
+            *)
+                ;;
+        esac
+    done
+}
+
+# Полный тест прокси (пункт P→1 или бывший T).
+test_proxy_connection() {
+    stty echo
     clear
     echo -e "${C_CYA}=== ТЕСТ ПРОКСИ ===${C_RST}"
     if [[ "${PROXY_ENABLED}" != true ]] && [[ "${PROXY_ENABLED}" != "1" ]]; then
-        echo -e "${C_RED}Прокси отключён.${C_RST}"; sleep 2
-        return
+        echo -e "${C_RED}Прокси отключён.${C_RST}"; sleep 2; stty -echo; return
     fi
-
-    echo -e "${C_YEL}Подключение к google.com:80 через $PROXY_TYPE...${C_RST}"
-    local out
-    out=$(curl -s -w "\n%{time_connect}" -m 3 -x "$PROXY_STR" -I "http://google.com")
-    if [ $? -eq 0 ]; then
-        local ms=$(echo "$out" | tail -n1 | awk '{print int($1*1000)}')
-        echo -e "${C_GRN}OK за ${ms} мс.${C_RST}"
-    else
-        echo -e "${C_RED}Ошибка соединения.${C_RST}"
-    fi
-    echo -ne "\n${C_CYA}Нажмите любую клавишу...${C_RST}"; read -r -n 1 -s
+    echo -e "${C_YEL}google.com через $PROXY_TYPE...${C_RST}"
+    local ms
+    ms=$(proxy_ping_google_ms) && echo -e "${C_GRN}OK, connect ~ ${ms} мс${C_RST}" || echo -e "${C_RED}Ошибка.${C_RST}"
+    echo -ne "\n${C_CYA}Клавиша...${C_RST}"; read -rn1 -s; echo
+    stty -echo
 }
+
+# Совместимость: старый вызов test_proxy → меню или быстрый тест.
+test_proxy() { test_proxy_connection; }
 
 # Резолв адреса цели с учётом IP preference и доступности IPv6.
 resolve_target_ip() {
@@ -722,35 +1022,328 @@ worker() {
     echo "$ip|$http|$t12|$t13|$lat|$verdict|$color" > "$TMP_DIR/$row.res"
 }
 
+paint_result_row() {
+    local row=$1
+    [[ -f "$TMP_DIR/$row.res" ]] || return 0
+    local ip http t12 t13 lat verdict color
+    IFS='|' read -r ip http t12 t13 lat verdict color < "$TMP_DIR/$row.res"
+    out_str $X_IP   $row $W_IP "$ip" "$C_GRY"
+    local hcol=$C_RED
+    [ "$http" == "OK" ] && hcol="$C_GRN"
+    out_str $X_HTTP $row $W_HTTP "$http" "$hcol"
+    local t12col=$C_RED
+    [ "$t12" == "OK" ] && t12col="$C_GRN"
+    [[ "$t12" == "---" ]] && t12col="$C_GRY"
+    out_str $X_T12  $row $W_T12 "$t12" "$t12col"
+    local t13col=$C_RED
+    if [ "$t13" == "OK" ]; then t13col="$C_GRN"
+    elif [ "$t13" == "N/A" ] || [ "$t13" == "---" ]; then t13col="$C_GRY"; fi
+    out_str $X_T13  $row $W_T13 "$t13" "$t13col"
+    out_str $X_LAT  $row $W_LAT "$lat" "$C_CYA"
+    out_str $X_VER  $row $W_VER "$verdict" "$color"
+}
+
+run_scan_table() {
+    UI_Y=$((12 + ${#TARGETS[@]} + 1))
+    STATUS_BAR_CACHE=""
+    draw_status_bar "[ CHECK ] Проверка интернета..."
+    write_debug_log "Старт скана" "INFO"
+    if ! test_internet_available; then
+        draw_status_bar "[ ERROR ] НЕТ ИНТЕРНЕТА!"
+        sleep 3
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
+        return 1
+    fi
+    draw_status_bar "[ CACHE ] Загрузка сетевых данных..."
+    get_network_info
+    rebuild_targets
+    UI_Y=$((12 + ${#TARGETS[@]} + 1))
+    draw_ui
+    draw_status_bar "[ SCAN ] Запуск сканирования..."
+    rm -f "$TMP_DIR"/*.res
+
+    local n=${#TARGETS[@]}
+    (( n < 1 )) && return 1
+    local max_par=$(( ($(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4) * 3) ))
+    (( max_par > 24 )) && max_par=24
+    if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then (( max_par > 12 )) && max_par=12; fi
+
+    export PROXY_ENABLED PROXY_TYPE PROXY_STR IP_PREFERENCE TLS_MODE HAS_IPV6 OS_MAC
+
+    declare -a queue=()
+    local i
+    for ((i = 0; i < n; i++)); do
+        queue+=("$i")
+        local row=$((12 + i))
+        out_str $X_VER $row $W_VER "WAIT..." "$C_GRY"
+    done
+    flush_buffer
+
+    declare -A JDONE
+    for ((i = 0; i < n; i++)); do JDONE[$i]=0; done
+
+    local completed=0 aborted=false last_sec=-1
+    while (( completed < n )) || (( $(jobs -rp 2>/dev/null | wc -l) > 0 )); do
+        while (( $(jobs -rp 2>/dev/null | wc -l) < max_par )) && ((${#queue[@]} > 0)); do
+            local idx=${queue[0]}
+            queue=("${queue[@]:1}")
+            local row=$((12 + idx))
+            worker "${TARGETS[$idx]}" "$row" < /dev/null &
+        done
+
+        local now_sec
+        now_sec=$(date +%s)
+        if (( now_sec != last_sec )); then
+            last_sec=$now_sec
+            local pct=$((completed * 100 / n))
+            draw_status_bar "[ SCAN ] Сбор: $completed / $n" "$pct"
+        fi
+
+        local inkey=""
+        read -t "$READ_TIMEOUT" -n 1 -s inkey 2>/dev/null || true
+        if [[ "$inkey" == "q" || "$inkey" == "Q" || "$inkey" == "й" || "$inkey" == "Й" || "$inkey" == $'\e' ]]; then
+            aborted=true
+            kill $(jobs -p) 2>/dev/null
+            wait 2>/dev/null || true
+            break
+        fi
+
+        for ((i = 0; i < n; i++)); do
+            (( JDONE[$i] == 1 )) && continue
+            local row=$((12 + i))
+            if [[ -f "$TMP_DIR/$row.res" ]]; then
+                paint_result_row "$row"
+                JDONE[$i]=1
+                ((completed++))
+            fi
+        done
+        [[ -n "$FRAME_BUFFER" ]] && flush_buffer
+    done
+    wait 2>/dev/null || true
+
+    if $aborted; then
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_ABORT" ""
+        write_debug_log "Скан прерван" "WARN"
+    else
+        local summary
+        summary=$(summarize_verdicts)
+        STATUS_BAR_CACHE=""
+        draw_status_bar "[ SUCCESS ] Скан OK — $summary" ""
+        write_debug_log "Скан завершён: $summary" "INFO"
+        HAS_COMPLETED_SCAN=true
+        ((RUN_COUNT++))
+        config_save
+        if (( RUN_COUNT % 10 == 0 )); then
+            local lat_tag
+            lat_tag=$(github_latest_tag) || lat_tag=""
+            if [[ -n "$lat_tag" ]] && version_newer "$SCRIPT_VERSION" "$lat_tag"; then
+                sleep 1
+                STATUS_BAR_CACHE=""
+                draw_status_bar "[ UPDATE ] Новая версия v$lat_tag — нажмите U" ""
+                sleep 3
+            fi
+        fi
+    fi
+    STATUS_BAR_CACHE=""
+    draw_status_bar "$NAV_STR"
+    while read -t 0.05 -n 1 -s 2>/dev/null; do : ; done
+    return 0
+}
+
+deep_trace_flow() {
+    write_debug_log "Deep Trace меню" "INFO"
+    stty echo
+    clear
+    echo -e "${C_CYA}Deep Trace — номер строки 1-${#TARGETS[@]} (пустой Enter — отмена):${C_RST}"
+    local num
+    read -r num
+    stty -echo
+    [[ -z "$num" ]] && return 0
+    [[ "$num" =~ ^[0-9]+$ ]] || return 0
+    (( num >= 1 && num <= ${#TARGETS[@]} )) || return 0
+    local target="${TARGETS[$((num - 1))]}"
+    echo -e "\n${C_CYA}Цель #$num — $target${C_RST}"
+    local ip=""
+    ip=$(resolve_target_ip "$target" 2>/dev/null || true)
+    echo "Резолв: ${ip:-?}"
+    echo "--- trace ---"
+    if command -v traceroute &>/dev/null; then
+        traceroute -n -m 15 -w 2 "$target" 2>&1 | head -n 50
+    elif command -v tracepath &>/dev/null; then
+        tracepath "$target" 2>&1 | head -n 50
+    elif command -v mtr &>/dev/null; then
+        mtr -r -c 3 --report-wide "$target" 2>&1 | head -n 40
+    else
+        echo "[i] Нет traceroute/tracepath/mtr в PATH."
+    fi
+    echo "--- TLS probe (curl) ---"
+    curl -k -s -o /dev/null -w "code=%{response_code} connect=%{time_connect}s\n" -m 15 "https://$target" || echo "curl: ошибка"
+    echo -ne "\n${C_CYA}Клавиша для возврата...${C_RST}"
+    read -rn1 -s
+    echo
+}
+
+invoke_update_github() {
+    STATUS_BAR_CACHE=""
+    draw_status_bar "[ UPDATE ] GitHub..."
+    local latest
+    latest=$(github_latest_tag) || latest=""
+    if [[ -z "$latest" ]]; then
+        draw_status_bar "[ UPDATE ] API недоступен или лимит"
+        sleep 2
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
+        return 1
+    fi
+    if ! version_newer "$SCRIPT_VERSION" "$latest"; then
+        if version_newer "$latest" "$SCRIPT_VERSION"; then
+            draw_status_bar "[ UPDATE ] Локальная версия новее GitHub"
+            LAST_CHECKED_VERSION="$SCRIPT_VERSION"
+        else
+            draw_status_bar "[ UPDATE ] Уже последняя ($SCRIPT_VERSION)"
+            LAST_CHECKED_VERSION="$SCRIPT_VERSION"
+        fi
+        config_save
+        sleep 2
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
+        return 0
+    fi
+    draw_status_bar "[ UPDATE ] Доступна $latest. Скачать? Y/N"
+    stty echo 2>/dev/null || true
+    local ans=""
+    read -rn1 ans || true
+    echo
+    stty -echo 2>/dev/null || true
+    if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+        LAST_CHECKED_VERSION="$latest"
+        config_save
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
+        return 0
+    fi
+    local tmp="${SCRIPT_PATH}.new"
+    if ! curl -sL -m 90 -o "$tmp" "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.sh"; then
+        rm -f "$tmp"
+        draw_status_bar "[ UPDATE ] Ошибка загрузки"
+        sleep 2
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
+        return 1
+    fi
+    local sz
+    sz=$(wc -c < "$tmp" 2>/dev/null || echo 0)
+    if (( sz < 8000 )); then
+        rm -f "$tmp"
+        draw_status_bar "[ UPDATE ] Файл подозрительно мал"
+        sleep 2
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
+        return 1
+    fi
+    if ! grep -q 'SCRIPT_VERSION=' "$tmp"; then
+        rm -f "$tmp"
+        draw_status_bar "[ UPDATE ] Нет маркера SCRIPT_VERSION"
+        sleep 2
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
+        return 1
+    fi
+    chmod +x "$tmp" 2>/dev/null || true
+    if ! mv -f "$tmp" "$SCRIPT_PATH" 2>/dev/null; then
+        rm -f "$tmp"
+        draw_status_bar "[ UPDATE ] Не удалось заменить файл (права?)"
+        sleep 3
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
+        return 1
+    fi
+    LAST_CHECKED_VERSION="$latest"
+    config_save
+    draw_status_bar "[ UPDATE ] Успех — перезапустите: bash $SCRIPT_PATH"
+    sleep 3
+    STATUS_BAR_CACHE=""
+    draw_status_bar "$NAV_STR"
+}
+
+ui_refresh_after_submenu() {
+    get_network_info
+    rebuild_targets
+    UI_Y=$((12 + ${#TARGETS[@]} + 1))
+    draw_ui
+    STATUS_BAR_CACHE=""
+    draw_status_bar "$NAV_STR"
+}
+
 config_load
+refresh_env_debug_flags
+write_debug_session_header_once
 
 FIRST_RUN=true
-FRAMES=("[=   ]" "[ =  ]" "[  = ]" "[   =]" "[  = ]" "[ =  ]")
-# Кадры анимации строки LAT во время ожидания результата.
-LAT_WAVE=("=     " "==    " "===   " " ===  " "  === " "   ===" "  === " " ===  " "===   " "==    ")
+LAST_TARGETS_SIG=""
+UI_Y=15
 f=0
 
 while true; do
-    if $FIRST_RUN; then
+    if $FIRST_RUN || $NEED_UI_REDRAW; then
         get_network_info
         rebuild_targets
-        draw_ui
         UI_Y=$((12 + ${#TARGETS[@]} + 1))
-        out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
+        draw_ui
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
         FIRST_RUN=false
+        NEED_UI_REDRAW=false
     fi
 
-    read -t $READ_TIMEOUT -n 1 -s key
-    READ_STATUS=$?
+    local ts_now
+    ts_now=$(date +%s)
+    if (( ts_now - LAST_NET_POLL_TS >= 4 )); then
+        LAST_NET_POLL_TS=$ts_now
+        local sig_before sig_after
+        sig_before=$(targets_signature)
+        get_network_info
+        rebuild_targets
+        sig_after=$(targets_signature)
+        if [[ "$sig_before" != "$sig_after" ]]; then
+            UI_Y=$((12 + ${#TARGETS[@]} + 1))
+            draw_ui
+            STATUS_BAR_CACHE=""
+            draw_status_bar "$NAV_STR"
+        fi
+    fi
 
-    # Горячие клавиши: EN и те же физические клавиши под RU (ЙЦУКЕН).
-    if [[ "$key" == "q" || "$key" == "Q" || "$key" == "й" || "$key" == "Й" || "$key" == $'\e' ]]; then break
-    elif [[ "$key" == "h" || "$key" == "H" || "$key" == "р" || "$key" == "Р" ]]; then show_help; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
-    elif [[ "$key" == "s" || "$key" == "S" || "$key" == "ы" || "$key" == "Ы" ]]; then show_settings_menu; get_network_info; rebuild_targets; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
-    elif [[ "$key" == "p" || "$key" == "P" || "$key" == "з" || "$key" == "З" ]]; then show_proxy_menu; get_network_info; rebuild_targets; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
-    elif [[ "$key" == "t" || "$key" == "T" || "$key" == "е" || "$key" == "Е" ]]; then test_proxy; draw_ui; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
+    local key=""
+    read -t "$READ_TIMEOUT" -n 1 -s key 2>/dev/null || true
+
+    if $NEED_UI_REDRAW; then continue; fi
+
+    if [[ "$key" == "q" || "$key" == "Q" || "$key" == "й" || "$key" == "Й" ]]; then break
+    elif [[ "$key" == $'\e' ]]; then break
+    elif [[ "$key" == "h" || "$key" == "H" || "$key" == "р" || "$key" == "Р" ]]; then
+        show_help_menu
+        ui_refresh_after_submenu
+    elif [[ "$key" == "s" || "$key" == "S" || "$key" == "ы" || "$key" == "Ы" ]]; then
+        show_settings_menu
+        refresh_env_debug_flags
+        ui_refresh_after_submenu
+    elif [[ "$key" == "p" || "$key" == "P" || "$key" == "з" || "$key" == "З" ]]; then
+        show_proxy_menu
+        ui_refresh_after_submenu
+    elif [[ "$key" == "t" || "$key" == "T" || "$key" == "е" || "$key" == "Е" ]]; then
+        test_proxy_connection
+        ui_refresh_after_submenu
+    elif [[ "$key" == "d" || "$key" == "D" || "$key" == "в" || "$key" == "В" ]]; then
+        deep_trace_flow
+        ui_refresh_after_submenu
+    elif [[ "$key" == "u" || "$key" == "U" || "$key" == "г" || "$key" == "Г" ]]; then
+        invoke_update_github
+        ui_refresh_after_submenu
     elif [[ "$key" == "r" || "$key" == "R" || "$key" == "к" || "$key" == "К" ]]; then
-        out_str 2 $UI_Y 121 "[ WAIT ] SAVING REPORT..." "$C_CYA"; flush_buffer
+        STATUS_BAR_CACHE=""
+        draw_status_bar "[ WAIT ] SAVING REPORT..."
         LOG="YT-DPI_Report.txt"
         {
             echo "=== YT-DPI REPORT v${SCRIPT_VERSION} ==="
@@ -764,88 +1357,20 @@ while true; do
             echo "------------------------------------------------------------------------------------------"
             for i in "${!TARGETS[@]}"; do
                 row=$((12 + i))
-                if [ -f "$TMP_DIR/$row.res" ]; then
+                if [[ -f "$TMP_DIR/$row.res" ]]; then
                     IFS='|' read -r rip http t12 t13 lat verdict color < "$TMP_DIR/$row.res"
                     if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then rip="[ PROXIED ]"; fi
                     printf "%-38s %-16s %-6s %-8s %-8s %-6s %s\n" "${TARGETS[$i]}" "$rip" "$http" "$t12" "$t13" "$lat" "$verdict"
                 fi
             done
         } > "$LOG"
-        out_str 2 $UI_Y 121 "[ SUCCESS ] SAVED: $(pwd)/$LOG" "$C_GRN"; flush_buffer
-        sleep 2; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
+        STATUS_BAR_CACHE=""
+        draw_status_bar "[ SUCCESS ] SAVED: $(pwd)/$LOG"
+        sleep 2
+        STATUS_BAR_CACHE=""
+        draw_status_bar "$NAV_STR"
 
-    elif [[ -z "$key" && $READ_STATUS -eq 0 ]]; then
-        out_str 2 $UI_Y 121 "[ WAIT ] REFRESHING NETWORK STATE..." "$C_CYA"; flush_buffer
-        get_network_info
-        rebuild_targets
-
-        draw_ui; UI_Y=$((12 + ${#TARGETS[@]} + 1))
-        out_str 2 $UI_Y 121 "$NAV_SCAN" "$C_YEL"; flush_buffer
-
-        rm -f "$TMP_DIR"/*.res
-        JOB_STATE=()
-        ACTIVE_JOBS=${#TARGETS[@]}
-
-        export PROXY_ENABLED PROXY_TYPE PROXY_STR IP_PREFERENCE TLS_MODE HAS_IPV6 OS_MAC
-
-        for i in "${!TARGETS[@]}"; do
-            row=$((12 + i))
-            out_str $X_VER $row $W_VER "PREPARING..." "$C_GRY"
-            JOB_STATE[$i]=1
-            worker "${TARGETS[$i]}" "$row" < /dev/null &
-        done
-        flush_buffer
-
-        aborted=false
-        while [ $ACTIVE_JOBS -gt 0 ]; do
-            ((f++))
-            should_draw_anim=false
-            if (( f % ANIM_EVERY == 0 )); then should_draw_anim=true; fi
-
-            read -t $READ_TIMEOUT -n 1 -s inkey
-            if [[ "$inkey" == "q" || "$inkey" == "Q" || "$inkey" == "й" || "$inkey" == "Й" || "$inkey" == $'\e' ]]; then aborted=true; break; fi
-
-            for i in "${!TARGETS[@]}"; do
-                if [ "${JOB_STATE[$i]}" -eq 0 ]; then continue; fi
-                row=$((12 + i))
-
-                if [ -f "$TMP_DIR/$row.res" ]; then
-                    IFS='|' read -r ip http t12 t13 lat verdict color < "$TMP_DIR/$row.res"
-
-                    out_str $X_IP   $row $W_IP "$ip" "$C_GRY"
-                    [ "$http" == "OK" ] && hcol="$C_GRN" || hcol="$C_RED"
-                    out_str $X_HTTP $row $W_HTTP "$http" "$hcol"
-                    [ "$t12" == "OK" ] && t12col="$C_GRN" || t12col="$C_RED"
-                    [[ "$t12" == "---" ]] && t12col="$C_GRY"
-                    out_str $X_T12  $row $W_T12 "$t12" "$t12col"
-                    if [ "$t13" == "OK" ]; then t13col="$C_GRN"
-                    elif [ "$t13" == "N/A" ] || [ "$t13" == "---" ]; then t13col="$C_GRY"
-                    else t13col="$C_RED"; fi
-                    out_str $X_T13  $row $W_T13 "$t13" "$t13col"
-                    out_str $X_LAT  $row $W_LAT "$lat" "$C_CYA"
-                    out_str $X_VER  $row $W_VER "$verdict" "$color"
-
-                    JOB_STATE[$i]=0
-                    ((ACTIVE_JOBS--))
-                else
-                    if $should_draw_anim; then
-                        anim_idx=$(( (f + row) % 6 ))
-                        wave_idx=$(( f % ${#LAT_WAVE[@]} ))
-                        out_str $X_VER $row $W_VER "SCANNING ${FRAMES[$anim_idx]}" "$C_CYA"
-                        out_str $X_LAT $row $W_LAT "${LAT_WAVE[$wave_idx]}" "$C_CYA"
-                    fi
-                fi
-            done
-            if [[ -n "$FRAME_BUFFER" ]]; then flush_buffer; fi
-        done
-
-        if $aborted; then
-            kill $(jobs -p) 2>/dev/null
-            out_str 2 $UI_Y 121 "$NAV_ABORT" "$C_RED"
-        else
-            out_str 2 $UI_Y 121 "$NAV_DONE" "$C_GRN"
-        fi
-        flush_buffer
-        while read -t 0.1 -n 1 -s; do : ; done
+    elif [[ "$key" == $'\n' || "$key" == $'\r' ]]; then
+        run_scan_table
     fi
 done

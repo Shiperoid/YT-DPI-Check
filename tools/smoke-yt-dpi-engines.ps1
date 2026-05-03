@@ -51,3 +51,4 @@ if ($one.Echo -ne 42) { throw "Runspace result wrong: $($one | ConvertTo-Json -C
 Write-Host 'Runspace async pattern: OK'
 
 Write-Host 'SMOKE ALL OK'
+exit 0
