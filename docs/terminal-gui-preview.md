@@ -23,9 +23,21 @@ dotnet run --project src/YT-DPI.App/YT-DPI.App.csproj
 
 Окно превью: заголовок **YT-DPI Preview**; выход — **Esc** (как в шаблоне Terminal.Gui).
 
+Превью **только читает** `%LocalAppData%\YT-DPI\YT-DPI_config.json` (тот же путь и правила дефолтов/миграции, что в `Load-Config` в `YT-DPI.ps1`) и показывает поля в шапке; **запись конфига из .NET не выполняется** — настройки по-прежнему сохраняет PowerShell-версия.
+
+### Тесты
+
+```powershell
+dotnet test YT-DPI.sln -c Release
+```
+
 ## CI
 
-Сборка превью: workflow [`.github/workflows/terminal-gui-build.yml`](../.github/workflows/terminal-gui-build.yml) (артефакт publish для Windows при push/PR по затронутым путям).
+Сборка превью: workflow [`.github/workflows/terminal-gui-build.yml`](../.github/workflows/terminal-gui-build.yml) — `dotnet build`, **`dotnet test`**, затем publish и артефакт для Windows при push/PR по затронутым путям.
+
+## Запись конфига из превью (отложено)
+
+Редактирование и сохранение `YT-DPI_config.json` из .NET не реализовано: нужны согласованная схема с `Save-Config` в PowerShell и round-trip тесты. До стабилизации чтения и переноса движка не начинать.
 
 ## Атрибуция
 

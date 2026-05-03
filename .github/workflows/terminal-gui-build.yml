@@ -29,6 +29,9 @@ jobs:
       - name: Build
         run: dotnet build YT-DPI.sln -c Release --no-restore
 
+      - name: Test
+        run: dotnet test YT-DPI.sln -c Release --no-build --verbosity normal
+
       - name: Publish preview (win-x64, framework-dependent)
         run: dotnet publish src/YT-DPI.App/YT-DPI.App.csproj -c Release --no-restore -o ./artifacts/publish -r win-x64 --self-contained false
 

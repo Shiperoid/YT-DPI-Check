@@ -1,4 +1,5 @@
-﻿Microsoft Visual Studio Solution File, Format Version 12.00
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
@@ -7,6 +8,8 @@ EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "YT-DPI.Core", "src\YT-DPI.Core\YT-DPI.Core.csproj", "{769A5A1E-AC69-4CF1-A3A5-ECA4C57A3F40}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "YT-DPI.Core.Tests", "src\YT-DPI.Core.Tests\YT-DPI.Core.Tests.csproj", "{0E809924-11DD-45FA-BECE-B45D433BC190}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -42,6 +45,18 @@ Global
 		{769A5A1E-AC69-4CF1-A3A5-ECA4C57A3F40}.Release|x64.Build.0 = Release|Any CPU
 		{769A5A1E-AC69-4CF1-A3A5-ECA4C57A3F40}.Release|x86.ActiveCfg = Release|Any CPU
 		{769A5A1E-AC69-4CF1-A3A5-ECA4C57A3F40}.Release|x86.Build.0 = Release|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Debug|x64.Build.0 = Debug|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Debug|x86.Build.0 = Debug|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Release|x64.ActiveCfg = Release|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Release|x64.Build.0 = Release|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Release|x86.ActiveCfg = Release|Any CPU
+		{0E809924-11DD-45FA-BECE-B45D433BC190}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -49,5 +64,6 @@ Global
 	GlobalSection(NestedProjects) = preSolution
 		{B8C9A7F3-2E4D-4F1A-9C6E-8B5D3A1F0E2C} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{769A5A1E-AC69-4CF1-A3A5-ECA4C57A3F40} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{0E809924-11DD-45FA-BECE-B45D433BC190} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

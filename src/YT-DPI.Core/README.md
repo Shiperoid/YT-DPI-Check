@@ -1,22 +1,20 @@
 # YT-DPI.Core
 
-Библиотека для **этапа 2** переноса: сетевой движок, TLS, DNS, прокси — **без** Terminal.Gui.
+Библиотека переноса логики из **`YT-DPI.ps1`**: сеть, TLS, трассировка, чтение конфига — **без** Terminal.Gui.
 
-## Зачем отдельный проект
+## Структура
 
-- **`YT-DPI.App`** — только TUI и оркестрация.
-- **`YT-DPI.Core`** — переносимая логика, которую позже можно вызывать из тестов или других host-процессов.
+| Путь | Назначение |
+|------|------------|
+| [`Config/`](Config/) | Путь к `%LocalAppData%\YT-DPI\YT-DPI_config.json`, DTO, `UserConfigLoader.TryLoadUserConfig` (read-only, совместимо с `Load-Config`). |
+| [`Tls/TlsScanner.cs`](Tls/TlsScanner.cs) | Порт встроенного C# из PS (here-string **строки 376–513** `YT-DPI.ps1`). |
+| [`Trace/TraceroutePorted.cs`](Trace/TraceroutePorted.cs) | Порт here-string **строки 544–1073** `YT-DPI.ps1` (`SynchronousProgress`, `AdvancedTraceroute`, …). |
+| [`Preview/PreviewEngine.cs`](Preview/PreviewEngine.cs) | Тонкие входные точки для превью UI и unit-тестов. |
 
-## Откуда переносить
+## Тесты
 
-Источник правды сегодня: встроенные блоки C# (`$tlsCode`, `$traceCode`) и оркестрация в PowerShell — см. [`YT-DPI.ps1`](../../YT-DPI.ps1).
-
-## Порядок работ (черновик)
-
-1. Вынести типы TLS-сканера и трассировки в `.cs` файлы Core (без `Add-Type` в рантайме PS).
-2. Добавить модульные тесты на парсинг вердиктов и таймауты (по мере переноса).
-3. Подключить из `YT-DPI.App` (вызовы из UI в фоне `Task` / `IProgress`).
+Проект [`../YT-DPI.Core.Tests/`](../YT-DPI.Core.Tests/) (xUnit).
 
 ## Связь с Bash
 
-`YT-DPI.sh` не использует эту DLL; при необходимости общая логика только на уровне **спецификаций вердиктов / списков целей** (документация или общий JSON), не бинарник.
+`YT-DPI.sh` эту DLL не использует; общие спецификации — только документация или JSON, не бинарник.
