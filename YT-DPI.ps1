@@ -46,6 +46,77 @@ $DebugLogFile = Join-Path (Get-Location).Path "YT-DPI_Debug.log"
 $script:DebugLogMutexName = "Global\YT-DPI-Debug-Mutex"
 $DebugLogMutex = New-Object System.Threading.Mutex($false, $script:DebugLogMutexName)
 
+$SCRIPT:CONST = @{
+    TimeoutMs    = 700       # Снижено с 1500
+    ProxyTimeout = 1200      # Снижено с 2500
+    HttpPort     = 80
+    HttpsPort    = 443
+    Tls13Proto   = 12288
+    AnimFps      = 30
+    ScanPoolMinWorkers    = 8
+    ScanPoolDirectMax     = 24
+    ScanPoolProxyMax      = 12
+    ScanPoolCpuMultiplier = 3
+    Mutex = @{ WaitMs = 7000 }   # Снижено с 15000
+    Scan = @{
+        HttpDirectCapMs       = 600    # Снижено с 1200
+        TlsFastMsDirect       = 800    # Снижено с 1600
+        TlsFastMsProxy        = 1200   # Снижено с 2200
+        TlsRetryMsDirect      = 1300   # Снижено с 2600
+        TlsRetryMsProxyFloor  = 1300   # Снижено с 2600
+    }
+    NetInfo = @{
+        WebFastDefaultMs      = 1000   # Снижено с 3000
+        RedirectorMs          = 700    # Снижено с 2000
+        GeoPerRequestMs       = 500    # Снижено с 1500
+        Ipv6ProbeWaitMs       = 350    # Снижено с 1000
+        RedirectorRequestMs   = 700    # Снижено с 3000
+    }
+    Traceroute = @{
+        DefaultTimeoutSec       = 2   # Снижено с 5
+        HopTcpTlsTimeoutSec     = 1   # Снижено с 2
+        HopTlsCapMs             = 1200   # Снижено с 3000
+        HopTcpCapMs             = 800    # Снижено с 2000
+        TracertHopWaitMs        = 120    # Снижено с 350
+        TraceProcessKillMsBase  = 5000    # Снижено с 12000
+        TraceProcessKillMsPerHop = 400    # Снижено с 1400
+        WaitForExitAfterKillMs  = 400     # Снижено с 1000
+        TcpPollSliceMs          = 40      # Снижено с 90
+        UdpRecvPollMs           = 300     # Снижено с 1000
+    }
+    ProxySelfTest = @{
+        DetectTcpConnectMs = 700     # Снижено с 2000
+        DetectStreamRwMs   = 800     # Снижено с 2000
+        QuickTunnelMs      = 2000    # Снижено с 5000
+        TcpToProxyMs       = 1500    # Снижено с 4000
+        Tunnel443Ms        = 2000    # Снижено с 7000
+        HttpGstaticMs      = 1300    # Снижено с 5000
+        HttpSlowWarnMs     = 1500    # Снижено с 4800
+        PauseAfterTcpMs    = 60      # Снижено с 120
+        PauseAfterTunnelMs = 60      # Снижено с 150
+        PauseAfterHttpMs   = 80      # Снижено с 200
+    }
+    UiScan = @{
+        StatusBarThrottleCollectMs = 90   # Снижено с 240
+        StatusBarThrottleRevealMs  = 110  # Снижено с 280
+        RevealAnimFps            = 48
+    }
+    Internet = @{
+        PingTimeoutMs    = 400    # Снижено с 1000
+        TcpFallbackMs    = 400    # Снижено с 1000
+    }
+    HttpMisc = @{
+        GitHubReleaseApiMs      = 1500   # Снижено с 5000
+        RedirectorViaProxyMs    = 1200   # Снижено с 3000
+        GeoProviderViaProxyMs   = 500    # Снижено с 1500
+    }
+    UI = @{
+        Num = 1; Dom = 6; IP = 50; HTTP = 68; T12 = 76; T13 = 86; Lat = 96; Ver = 106
+    }
+    NavStr = "[READY] [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [D] TRACE | [U] UPDATE | [R] REPORT | [H] HELP | [Q] QUIT"
+}
+$CONST = $SCRIPT:CONST
+
 # ===== ЛОГИРОВАНИЕ И РОТАЦИЯ =====
 $maxLogSizeBytes = 5 * 1024 * 1024
 if (Test-Path $DebugLogFile) {
@@ -107,7 +178,7 @@ function Write-DebugLog($msg, $level = "DEBUG") {
     $line = "[$(Get-Date -Format 'HH:mm:ss.fff')] [$level] $msg`r`n"
     $got = $false
     try {
-        try { $got = $DebugLogMutex.WaitOne(15000) } catch { $got = $false }
+        try { $got = $DebugLogMutex.WaitOne([int]$CONST.Mutex.WaitMs) } catch { $got = $false }
         if (-not $got) { return }
         [System.IO.File]::AppendAllText($DebugLogFile, $line, [System.Text.Encoding]::UTF8)
     } catch { }
@@ -209,28 +280,6 @@ $script:LastScanResults = @()
 $script:DynamicColPos = $null
 $script:IpColumnWidth = 16
 $script:UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
-# --- КОНСТАНТЫ ---
-$SCRIPT:CONST = @{
-    TimeoutMs    = 1500
-    ProxyTimeout = 2500
-    HttpPort     = 80
-    HttpsPort    = 443
-    Tls13Proto   = 12288
-    AnimFps      = 30
-    UI = @{
-        Num = 1      # Номер домена (новая колонка)
-        Dom = 6      # TARGET DOMAIN (было 2, теперь 6)
-        IP  = 50     # IP ADDRESS (было 45, сдвинуто на 5)
-        HTTP = 68    # HTTP (было 63)
-        T12 = 76     # TLS 1.2 (было 71)
-        T13 = 86     # TLS 1.3 (было 81)
-        Lat = 96     # LAT (было 91)
-        Ver = 106    # RESULT (было 99)
-    }
-        NavStr = "[READY] [ENTER] SCAN | [S] SETTINGS | [P] PROXY | [D] TRACE | [U] UPDATE | [R] REPORT | [H] HELP | [Q] QUIT"
-}
-Write-DebugLog "Константы инициализированы."
 
 # --- ИНИЦИАЛИЗАЦИЯ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 $script:Config = $null
@@ -1145,7 +1194,18 @@ function New-ConfigObject {
         DebugLogEnabled = $false
         # true = в заголовке лога полные имя ПК, учётная запись и пути (осторожно при публикации лога)
         DebugLogFullIdentifiers = $false
+        # Первый проход T13+T12 через ThreadPool Tasks в воркере нестабилен — по умолчанию выключено.
+        ScanParallelTlsFirstPass = $false
     }
+}
+
+function Initialize-DisableBrokenParallelTlsTasks {
+    if (-not $script:Config) { return }
+    if ($null -ne $script:Config.ParallelTlsTasksDisabled032026) { return }
+    $script:Config | Add-Member -MemberType NoteProperty -Name "ParallelTlsTasksDisabled032026" -Value $true -Force
+    $script:Config | Add-Member -MemberType NoteProperty -Name "ScanParallelTlsFirstPass" -Value $false -Force
+    Write-DebugLog "Миграция: параллельный первый проход TLS отключён по умолчанию (ParallelTlsTasksDisabled032026)" "INFO"
+    Save-Config $script:Config
 }
 
 function Get-PaddedCenter {
@@ -3426,10 +3486,13 @@ function Show-SettingsMenu {
 
         Write-Host "`n  3. Режим TLS при сканировании " -NoNewline -ForegroundColor White
         Write-Host "[ $curTls ]" -ForegroundColor Cyan
-        Write-Host "     Auto  — колонки T12 и T13 (как по умолчанию)" -ForegroundColor Gray
-        Write-Host "     TLS12 — только TLS 1.2 (T13 = N/A)" -ForegroundColor Gray
-        Write-Host "     TLS13 — только проверка столбца T13 (T12 = N/A)" -ForegroundColor Gray
+        Write-Host "     Auto — колонки T12 и T13 (как по умолчанию)." -ForegroundColor Gray
+        Write-Host "     TLS12 — в таблице осмысленен столбец T12 (T13 остаётся N/A); при DRP/RST тихо проверяется T13 только для вердикта." -ForegroundColor Gray
+        Write-Host "     TLS13 — наоборот: столбец T13 основной (T12 N/A); при DRP/RST тихо проверяется T12 для вердикта." -ForegroundColor Gray
         Write-Host "     Нажмите 3, чтобы переключить: Auto → TLS12 → TLS13 → Auto" -ForegroundColor DarkGray
+
+        $curParallelTls = $false
+        if ($script:Config -and ($script:Config.ScanParallelTlsFirstPass -eq $true)) { $curParallelTls = $true }
 
         $curDbgLog = $false
         if ($script:Config -and ($script:Config.DebugLogEnabled -eq $true)) { $curDbgLog = $true }
@@ -3452,9 +3515,14 @@ function Show-SettingsMenu {
         }
         Write-Host "     Для разового полного заголовка: YT_DPI_DEBUG_IDENTIFIERS=1 (перекрывает ВЫКЛ в конфиге)." -ForegroundColor Gray
 
+        Write-Host "`n  6. Параллельный первый проход TLS (Auto, T13+T12) " -NoNewline -ForegroundColor White
+        if ($curParallelTls) { Write-Host "[ ВКЛ ]" -ForegroundColor Yellow } else { Write-Host "[ ВЫКЛ ]" -ForegroundColor DarkGray }
+        Write-Host "     Если ВКЛ: эксперимент, параллельные Tasks; при сбое — последовательный TLS без ложного IP BLOCK." -ForegroundColor Gray
+        Write-Host "     Если ВЫКЛ: последовательно T13 → T12 (медленнее строка скана)." -ForegroundColor Gray
+
         Write-Host "`n  0. Назад в главное меню" -ForegroundColor DarkGray
         Write-Host "`n $line" -ForegroundColor Cyan
-        Write-Host " ВЫБЕРИТЕ ПУНКТ (1–5, 0): " -NoNewline -ForegroundColor Yellow
+        Write-Host " ВЫБЕРИТЕ ПУНКТ (1–6, 0): " -NoNewline -ForegroundColor Yellow
 
         Update-UiConsoleSnapshot
         $menuKey = Read-MenuKeyOrResize
@@ -3527,6 +3595,14 @@ function Show-SettingsMenu {
                 }
                 $st5 = if ($nextFull) { "ВКЛ (осторожно при отправке лога в чат)" } else { "ВЫКЛ (обезличивание)" }
                 Write-Host "`n  [OK] Полные идентификаторы в логе: $st5" -ForegroundColor Green
+                Start-Sleep -Seconds 1
+            }
+            elseif ($key -eq "6") {
+                $nextPar = -not $curParallelTls
+                $script:Config | Add-Member -MemberType NoteProperty -Name "ScanParallelTlsFirstPass" -Value $nextPar -Force
+                Save-Config $script:Config
+                $st6 = if ($nextPar) { "ВКЛ" } else { "ВЫКЛ" }
+                Write-Host "`n  [OK] Параллельный первый проход TLS: $st6 (сохранено в конфиг)" -ForegroundColor Green
                 Start-Sleep -Seconds 1
             }
             elseif ($key -eq "0" -or $key -eq "`r") {
@@ -4369,7 +4445,7 @@ function Add-ToProxyHistory {
 # РАБОЧИЙ ПОТОК
 # ====================================================================================
 $Worker = {
-    param($Target, $ProxyConfig, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock, $NetInfo, $IpPreference, $TlsMode, $DebugLogMutexName)
+    param($Target, $ProxyConfig, $CONST, $DebugLogFile, $DEBUG_ENABLED, $DnsCache, $DnsCacheLock, $NetInfo, $IpPreference, $TlsMode, $DebugLogMutexName, [bool]$ParallelTlsFirstPass)
 
     function Write-DebugLog($msg, $level = "DEBUG") {
         if (-not $DEBUG_ENABLED) { return }
@@ -4379,7 +4455,7 @@ $Worker = {
         try {
             try { $mtx = if ($DebugLogMutexName) { [System.Threading.Mutex]::OpenExisting($DebugLogMutexName) } else { $null } } catch { $mtx = $null }
             if ($mtx) {
-                try { $got = $mtx.WaitOne(15000) } catch { $got = $false }
+                try { $got = $mtx.WaitOne([int]$CONST.Mutex.WaitMs) } catch { $got = $false }
             }
             if ($got) {
                 [System.IO.File]::AppendAllText($DebugLogFile, $line, [System.Text.Encoding]::UTF8)
@@ -4542,11 +4618,68 @@ $Worker = {
         }
     }
 
+    function Set-Verdict-DualTlsCells {
+        param([string]$Cell12, [string]$Cell13)
+        $t12Ok = ($Cell12 -eq "OK")
+        $t13Ok = ($Cell13 -eq "OK")
+        $t12Blocked = ($Cell12 -eq "RST" -or $Cell12 -eq "DRP")
+        $t13Blocked = ($Cell13 -eq "RST" -or $Cell13 -eq "DRP")
+        if ($t12Ok -and $t13Ok) { return @{ Verdict = "AVAILABLE"; Color = "Green" } }
+        if ($t12Ok -or $t13Ok) {
+            if ($t12Blocked -or $t13Blocked) { return @{ Verdict = "THROTTLED"; Color = "Yellow" } }
+            return @{ Verdict = "AVAILABLE"; Color = "Green" }
+        }
+        if ($Cell12 -eq "RST" -or $Cell13 -eq "RST") { return @{ Verdict = "DPI RESET"; Color = "Red" } }
+        if ($Cell12 -eq "DRP" -or $Cell13 -eq "DRP") { return @{ Verdict = "DPI BLOCK"; Color = "Red" } }
+        return @{ Verdict = "IP BLOCK"; Color = "Red" }
+    }
+
+    function Invoke-Tls12HandshakeOnce {
+        param([int]$TimeoutMs)
+        $timedOut = $false
+        $cell = "---"
+        $conn = $null; $ssl = $null
+        try {
+            if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $TimeoutMs }
+            else {
+                $tcp = [System.Net.Sockets.TcpClient]::new()
+                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
+                if (-not $ar.AsyncWaitHandle.WaitOne($TimeoutMs)) { throw "TcpTimeout" }
+                $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+            }
+            $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false)
+            $enabled = [System.Security.Authentication.SslProtocols]::Tls12
+            $auth = $ssl.BeginAuthenticateAsClient($Target, $null, $enabled, $false, $null, $null)
+            if (-not $auth.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+                $timedOut = $true
+                try { $ssl.Close() } catch {}
+                throw "TLS12_TIMEOUT"
+            }
+            $ssl.EndAuthenticateAsClient($auth)
+            $cell = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
+        } catch {
+            if ($_.Exception.Message -eq "TLS12_TIMEOUT") {
+                $cell = "DRP"
+            } else {
+                $m = $_.Exception.Message
+                if ($_.Exception.InnerException) { $m += " | Inner: $($_.Exception.InnerException.Message)" }
+                if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $cell = "RST" }
+                elseif ($m -match "certificate|сертификат|remote|success") { $cell = "OK" }
+                else { $cell = "DRP" }
+            }
+        } finally {
+            if ($ssl) { try { $ssl.Close() } catch {} }
+            if ($conn) { try { $conn.Tcp.Close() } catch {} }
+        }
+        return [PSCustomObject]@{ Cell = $cell; TimedOut = $timedOut }
+    }
+
     $Result = [PSCustomObject]@{ IP="FAILED"; HTTP="---"; T12="---"; T13="---"; Lat="---"; Verdict="UNKNOWN"; Color="White"; Target=$Target; Number=0 }
     $TO = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { $CONST.TimeoutMs }
-    $HttpTimeoutFast = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { [Math]::Min($TO, 1200) }
-    $TlsTimeoutFast  = if ($ProxyConfig.Enabled) { 2200 } else { 1600 }
-    $TlsTimeoutRetry = if ($ProxyConfig.Enabled) { [Math]::Max(2600, $CONST.ProxyTimeout) } else { 2600 }
+    $httpCap = [int]$CONST.Scan.HttpDirectCapMs
+    $HttpTimeoutFast = if ($ProxyConfig.Enabled) { $CONST.ProxyTimeout } else { [Math]::Min($TO, $httpCap) }
+    $TlsTimeoutFast  = if ($ProxyConfig.Enabled) { [int]$CONST.Scan.TlsFastMsProxy } else { [int]$CONST.Scan.TlsFastMsDirect }
+    $TlsTimeoutRetry = if ($ProxyConfig.Enabled) { [Math]::Max([int]$CONST.Scan.TlsRetryMsProxyFloor, $CONST.ProxyTimeout) } else { [int]$CONST.Scan.TlsRetryMsDirect }
 
     Write-DebugLog "--- НАЧАЛО ПРОВЕРКИ ---"
 
@@ -4662,146 +4795,129 @@ $Worker = {
     $pHost = if ($ProxyConfig.Enabled) { $ProxyConfig.Host } else { "" }
     $pPort = if ($ProxyConfig.Enabled) { [int]$ProxyConfig.Port } else { 0 }
 
-    if ($consider13) {
-        $Result.T13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
-        Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
-        if ($Result.T13 -eq "DRP") {
-            Write-DebugLog "TLS T13: повтор с увеличенным таймаутом ($TlsTimeoutRetry ms)" "INFO"
-            $retryT13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
-            if ($retryT13 -eq "OK" -or $retryT13 -eq "RST") { $Result.T13 = $retryT13 }
+    $parallelTlsHandled = $false
+    $t12TimedOut = $false
+
+    if ($consider13 -and $consider12 -and $ParallelTlsFirstPass) {
+        try {
+            $t13task = [System.Threading.Tasks.Task]::Run({
+                [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
+            })
+            $t12task = [System.Threading.Tasks.Task]::Run({
+                Invoke-Tls12HandshakeOnce -TimeoutMs $TlsTimeoutFast
+            })
+            [System.Threading.Tasks.Task]::WaitAll(@($t13task, $t12task))
+            $parallelOk = (-not $t13task.IsFaulted) -and (-not $t12task.IsFaulted)
+            $tr = $null
+            $hr = $null
+            if ($parallelOk) {
+                try { $tr = $t13task.Result } catch { $parallelOk = $false }
+                try { $hr = $t12task.Result } catch { $parallelOk = $false }
+            }
+            if ($parallelOk -and ($null -ne $tr) -and ($null -ne $hr)) {
+                $Result.T13 = [string]$tr
+                $Result.T12 = [string]$hr.Cell
+                $t12TimedOut = [bool]$hr.TimedOut
+                $parallelTlsHandled = $true
+                Write-DebugLog "TLS: параллельный первый проход T13/T12 завершён" "INFO"
+                if ($Result.T13 -eq "DRP") {
+                    Write-DebugLog "TLS T13: повтор с увеличенным таймаутом ($TlsTimeoutRetry ms)" "INFO"
+                    $retryT13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
+                    if ($retryT13 -eq "OK" -or $retryT13 -eq "RST") { $Result.T13 = $retryT13 }
+                }
+            } else {
+                Write-DebugLog "TLS: параллельный первый проход не удался, переход на последовательный путь" "WARN"
+            }
+        } catch {
+            Write-DebugLog "TLS: ошибка параллельного первого прохода: $($_.Exception.Message)" "WARN"
         }
-    } else {
-        $Result.T13 = "N/A"
-        Write-DebugLog "TLS T13: пропущено (режим TLS12)"
     }
 
-    # Проверка TLS 1.2
-    $conn = $null; $ssl = $null
-    $t12TimedOut = $false
-    if ($consider12) {
-        try {
-            if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutFast }
-            else {
-                $tcp = [System.Net.Sockets.TcpClient]::new()
-                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
-                if (-not $ar.AsyncWaitHandle.WaitOne($TlsTimeoutFast)) { throw "TcpTimeout" }
-                $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
+    if (-not $parallelTlsHandled) {
+        if ($consider13) {
+            $Result.T13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
+            Write-DebugLog "TLS T13 : [RAW] Host=$Target Result=$($Result.T13)"
+            if ($Result.T13 -eq "DRP") {
+                Write-DebugLog "TLS T13: повтор с увеличенным таймаутом ($TlsTimeoutRetry ms)" "INFO"
+                $retryT13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
+                if ($retryT13 -eq "OK" -or $retryT13 -eq "RST") { $Result.T13 = $retryT13 }
             }
-
-            $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false)
-
-            # ВАЖНО: делаем handshake асинхронным, чтобы реально ограничить время операции.
-            $enabled = [System.Security.Authentication.SslProtocols]::Tls12
-            $auth = $ssl.BeginAuthenticateAsClient($Target, $null, $enabled, $false, $null, $null)
-            if (-not $auth.AsyncWaitHandle.WaitOne($TlsTimeoutFast)) {
-                $t12TimedOut = $true
-                try { $ssl.Close() } catch {}
-                throw "TLS12_TIMEOUT"
-            }
-
-            $ssl.EndAuthenticateAsClient($auth)
-            $Result.T12 = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
-        } catch {
-            if ($_.Exception.Message -eq "TLS12_TIMEOUT") {
-                $Result.T12 = "DRP"
-            } else {
-                $m = $_.Exception.Message
-                if ($_.Exception.InnerException) { $m += " | Inner: $($_.Exception.InnerException.Message)" }
-                if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $Result.T12 = "RST" }
-                elseif ($m -match "certificate|сертификат|remote|success") { $Result.T12 = "OK" }
-                else { $Result.T12 = "DRP" }
-            }
-        } finally {
-            if($ssl){ try { $ssl.Close() } catch {} }
-            if($conn){ try { $conn.Tcp.Close() } catch {} }
+        } else {
+            $Result.T13 = "N/A"
+            Write-DebugLog "TLS T13: пропущено (режим TLS12)"
         }
-    } else {
-        $Result.T12 = "N/A"
-        Write-DebugLog "TLS T12: пропущено (режим TLS13)"
+
+        if ($consider12) {
+            $hFirst = Invoke-Tls12HandshakeOnce -TimeoutMs $TlsTimeoutFast
+            $Result.T12 = $hFirst.Cell
+            $t12TimedOut = $hFirst.TimedOut
+        } else {
+            $Result.T12 = "N/A"
+            Write-DebugLog "TLS T12: пропущено (режим TLS13)"
+        }
     }
 
     # Retry при timeout T12: в Auto — только если T13 OK; в режиме только TLS12 — всегда при timeout
     $doT12Retry = $t12TimedOut -and $consider12 -and (($consider13 -and $Result.T13 -eq "OK") -or (-not $consider13))
     if ($doT12Retry) {
         Write-DebugLog "TLS T12: retry после timeout ($TlsTimeoutRetry ms)" "INFO"
-        $conn = $null; $ssl = $null
-        try {
-            if ($ProxyConfig.Enabled) { $conn = Connect-ThroughProxy $Target 443 $ProxyConfig $TlsTimeoutRetry }
-            else {
-                $tcp = [System.Net.Sockets.TcpClient]::new()
-                $ar = $tcp.BeginConnect($Result.IP, 443, $null, $null)
-                if (-not $ar.AsyncWaitHandle.WaitOne($TlsTimeoutRetry)) { throw "TcpTimeout" }
-                $tcp.EndConnect($ar); $conn = @{ Tcp = $tcp; Stream = $tcp.GetStream() }
-            }
+        $hRetry = Invoke-Tls12HandshakeOnce -TimeoutMs $TlsTimeoutRetry
+        $Result.T12 = $hRetry.Cell
+    }
 
-            $ssl = [System.Net.Security.SslStream]::new($conn.Stream, $false)
-            $enabled = [System.Security.Authentication.SslProtocols]::Tls12
-            $auth = $ssl.BeginAuthenticateAsClient($Target, $null, $enabled, $false, $null, $null)
-            if (-not $auth.AsyncWaitHandle.WaitOne($TlsTimeoutRetry)) {
-                $Result.T12 = "DRP"
-                try { $ssl.Close() } catch {}
-                throw "TLS12_TIMEOUT"
+    $auxVerdictT13 = $null
+    $auxVerdictT12 = $null
+    if (-not $consider13) {
+        if ($Result.T12 -eq "DRP" -or $Result.T12 -eq "RST") {
+            $auxVerdictT13 = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutFast)
+            if ($auxVerdictT13 -eq "DRP") {
+                $retryAux = [TlsScanner]::TestT13($Result.IP, $Target, $pHost, $pPort, $ProxyConfig.User, $ProxyConfig.Pass, $TlsTimeoutRetry)
+                if ($retryAux -eq "OK" -or $retryAux -eq "RST") { $auxVerdictT13 = $retryAux }
             }
-            $ssl.EndAuthenticateAsClient($auth)
-            $Result.T12 = if ($ssl.IsAuthenticated) { "OK" } else { "DRP" }
-        } catch {
-            if ($_.Exception.Message -eq "TLS12_TIMEOUT") {
-                $Result.T12 = "DRP"
-            } else {
-                $m = $_.Exception.Message
-                if ($_.Exception.InnerException) { $m += " | Inner: $($_.Exception.InnerException.Message)" }
-                if ($m -match "reset|сброс|forcibly|closed|разорвано|failed") { $Result.T12 = "RST" }
-                elseif ($m -match "certificate|сертификат|remote|success") { $Result.T12 = "OK" }
-                else { $Result.T12 = "DRP" }
+        }
+    }
+    if (-not $consider12) {
+        if ($Result.T13 -eq "DRP" -or $Result.T13 -eq "RST") {
+            $hx = Invoke-Tls12HandshakeOnce -TimeoutMs $TlsTimeoutFast
+            $auxVerdictT12 = $hx.Cell
+            if ($hx.TimedOut) {
+                $hx2 = Invoke-Tls12HandshakeOnce -TimeoutMs $TlsTimeoutRetry
+                $auxVerdictT12 = $hx2.Cell
             }
-        } finally {
-            if($ssl){ try { $ssl.Close() } catch {} }
-            if($conn){ try { $conn.Tcp.Close() } catch {} }
         }
     }
 
     # 4. Логика вердикта (с учётом TlsMode: только 1.2 / только 1.3 / оба)
     if (-not $consider13) {
-        if ($Result.T12 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
-        elseif ($Result.T12 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
-        elseif ($Result.T12 -eq "DRP") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red" }
-        else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
+        if ($null -ne $auxVerdictT13) {
+            $vd = Set-Verdict-DualTlsCells -Cell12 $Result.T12 -Cell13 $auxVerdictT13
+            $Result.Verdict = $vd.Verdict
+            $Result.Color = $vd.Color
+        } else {
+            if ($Result.T12 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
+            elseif ($Result.T12 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
+            elseif ($Result.T12 -eq "DRP") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red" }
+            else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
+        }
         return $Result
     }
     if (-not $consider12) {
-        if ($Result.T13 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
-        elseif ($Result.T13 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
-        elseif ($Result.T13 -eq "DRP") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red" }
-        else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
+        if ($null -ne $auxVerdictT12) {
+            $vd = Set-Verdict-DualTlsCells -Cell12 $auxVerdictT12 -Cell13 $Result.T13
+            $Result.Verdict = $vd.Verdict
+            $Result.Color = $vd.Color
+        } else {
+            if ($Result.T13 -eq "OK") { $Result.Verdict = "AVAILABLE"; $Result.Color = "Green" }
+            elseif ($Result.T13 -eq "RST") { $Result.Verdict = "DPI RESET"; $Result.Color = "Red" }
+            elseif ($Result.T13 -eq "DRP") { $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red" }
+            else { $Result.Verdict = "IP BLOCK"; $Result.Color = "Red" }
+        }
         return $Result
     }
 
-    $t12Ok = ($Result.T12 -eq "OK")
-    $t13Ok = ($Result.T13 -eq "OK")
-    $t12Blocked = ($Result.T12 -eq "RST" -or $Result.T12 -eq "DRP")
-    $t13Blocked = ($Result.T13 -eq "RST" -or $Result.T13 -eq "DRP")
-
-    if ($t12Ok -and $t13Ok) {
-        $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
-    }
-    elseif ($t12Ok -or $t13Ok) {
-        # Один из протоколов работает, другой — нет
-        if ($t12Blocked -or $t13Blocked) {
-            $Result.Verdict = "THROTTLED"; $Result.Color = "Yellow"
-        } else {
-            # Например, один OK, а другой ERR (проблема настройки, а не блокировка)
-            $Result.Verdict = "AVAILABLE"; $Result.Color = "Green"
-        }
-    }
-    elseif ($Result.T12 -eq "RST" -or $Result.T13 -eq "RST") {
-        $Result.Verdict = "DPI RESET"; $Result.Color = "Red"
-    }
-    elseif ($Result.T12 -eq "DRP" -or $Result.T13 -eq "DRP") {
-        $Result.Verdict = "DPI BLOCK"; $Result.Color = "Red"
-    }
-    else {
-        $Result.Verdict = "IP BLOCK"; $Result.Color = "Red"
-    }
+    $vdAuto = Set-Verdict-DualTlsCells -Cell12 $Result.T12 -Cell13 $Result.T13
+    $Result.Verdict = $vdAuto.Verdict
+    $Result.Color = $vdAuto.Color
     return $Result
 }
 
@@ -4829,11 +4945,13 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
     Sync-DynamicColPosFromLayout
 
     $cpuCount = [Environment]::ProcessorCount
-    # Для сетевых задач CPU не главный лимит, поэтому увеличиваем конкурентность,
-    # но держим разумные пределы, чтобы не перегружать сокеты/прокси.
-    $recommendedThreads = [Math]::Max(8, [Math]::Min(24, $cpuCount * 3))
+    $poolMin = [int]$CONST.ScanPoolMinWorkers
+    $poolDirectMax = [int]$CONST.ScanPoolDirectMax
+    $poolProxyMax = [int]$CONST.ScanPoolProxyMax
+    $poolCpuMul = [int]$CONST.ScanPoolCpuMultiplier
+    $recommendedThreads = [Math]::Max($poolMin, [Math]::Min($poolDirectMax, $cpuCount * $poolCpuMul))
     if ($ProxyConfig.Enabled) {
-        $recommendedThreads = [Math]::Min($recommendedThreads, 12)
+        $recommendedThreads = [Math]::Min($recommendedThreads, $poolProxyMax)
     }
     $maxThreads = [Math]::Min($Targets.Count, $recommendedThreads)
     Write-DebugLog "Запуск пула потоков: $maxThreads воркеров (CPU=$cpuCount, proxy=$($ProxyConfig.Enabled))."
@@ -4856,7 +4974,8 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
             AddArgument($script:NetInfo).        # 8. $NetInfo
             AddArgument($script:Config.IpPreference). # 9. $IpPreference
             AddArgument([string]$script:Config.TlsMode). # 10. $TlsMode
-            AddArgument([string]$script:DebugLogMutexName) # 11. mutex для записи в общий лог
+            AddArgument([string]$script:DebugLogMutexName). # 11. mutex для записи в общий лог
+            AddArgument([bool]($script:Config.ScanParallelTlsFirstPass -eq $true)) # 12. параллельный первый проход TLS
 
         $ps.RunspacePool = $pool
         [void]$jobs.Add([PSCustomObject]@{
@@ -4890,6 +5009,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
     $scanBarLastMs = [Environment]::TickCount64
     $scanBarLastDone = -9999
     $scanBarLastBucket = -9999
+    $uiThrottleCollect = if ($CONST.UiScan -and $null -ne $CONST.UiScan.StatusBarThrottleCollectMs) { [int]$CONST.UiScan.StatusBarThrottleCollectMs } else { 240 }
 
     # --- ЭТАП 1 ---
     while (-not $aborted) {
@@ -4900,7 +5020,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
         $resizedScan = Test-ScanPhaseConsoleLayoutChanged
         $nowBar = [Environment]::TickCount64
         $bucketScan = [int]($pctScan * 40)
-        if ($resizedScan -or ($completedTasks -ne $scanBarLastDone) -or (($nowBar - $scanBarLastMs) -ge 240) -or ($bucketScan -ne $scanBarLastBucket)) {
+        if ($resizedScan -or ($completedTasks -ne $scanBarLastDone) -or (($nowBar - $scanBarLastMs) -ge $uiThrottleCollect) -or ($bucketScan -ne $scanBarLastBucket)) {
             $scanBarLastMs = $nowBar
             $scanBarLastDone = $completedTasks
             $scanBarLastBucket = $bucketScan
@@ -4939,11 +5059,19 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
     if (-not $aborted) {
         $totalCount = $Targets.Count
         $frameCounter = 0
-        $animTargetMs = 1000.0 / [double]($CONST.AnimFps)
+        $revealFps = [double]$CONST.AnimFps
+        if ($CONST.UiScan -and ($null -ne $CONST.UiScan.RevealAnimFps)) {
+            try {
+                $ri = [int]$CONST.UiScan.RevealAnimFps
+                if ($ri -gt 0) { $revealFps = [double]$ri }
+            } catch { }
+        }
+        $animTargetMs = 1000.0 / $revealFps
         $frameSw.Restart()
         $revealBarLastMs = [Environment]::TickCount64
         $revealBarLastI = -9999
         $revealBarLastBucket = -9999
+        $uiThrottleReveal = if ($CONST.UiScan -and $null -ne $CONST.UiScan.StatusBarThrottleRevealMs) { [int]$CONST.UiScan.StatusBarThrottleRevealMs } else { 280 }
 
         for ($i = 0; $i -lt $totalCount; $i++) {
             $frameCounter++
@@ -4952,7 +5080,7 @@ function Start-ScanWithAnimation($Targets, $ProxyConfig, [bool]$PlaceholderRowsV
             $resizedReveal = Test-ScanPhaseConsoleLayoutChanged
             $nowRv = [Environment]::TickCount64
             $bucketRv = [int]($pctReveal * 40)
-            if ($resizedReveal -or ($i -ne $revealBarLastI) -or (($nowRv - $revealBarLastMs) -ge 280) -or ($bucketRv -ne $revealBarLastBucket)) {
+            if ($resizedReveal -or ($i -ne $revealBarLastI) -or (($nowRv - $revealBarLastMs) -ge $uiThrottleReveal) -or ($bucketRv -ne $revealBarLastBucket)) {
                 $revealBarLastMs = $nowRv
                 $revealBarLastI = $i
                 $revealBarLastBucket = $bucketRv
@@ -5118,7 +5246,7 @@ function Start-QuickNetInfoUpdater {
     }
 
     Start-Job -Name "NetInfoUpdater" -ScriptBlock {
-        param($configDir, $debugLog, $userAgent, $mutexName)
+        param($configDir, $debugLog, $userAgent, $mutexName, $mutexWaitMs)
 
         function Write-BgLog($msg) {
             $line = "[$(Get-Date -Format 'HH:mm:ss')] [BG] $msg`r`n"
@@ -5126,7 +5254,7 @@ function Start-QuickNetInfoUpdater {
             $got = $false
             try {
                 try { $mtx = if ($mutexName) { [System.Threading.Mutex]::OpenExisting($mutexName) } else { $null } } catch { $mtx = $null }
-                if ($mtx) { try { $got = $mtx.WaitOne(15000) } catch { $got = $false } }
+                if ($mtx) { try { $got = $mtx.WaitOne([int]$mutexWaitMs) } catch { $got = $false } }
                 if ($got) {
                     [System.IO.File]::AppendAllText($debugLog, $line, [System.Text.Encoding]::UTF8)
                 } else {
@@ -5248,7 +5376,7 @@ function Start-QuickNetInfoUpdater {
 
         Write-BgLog "Фоновое обновление завершено"
         return $result
-    } -ArgumentList $script:ConfigDir, $DebugLogFile, $script:UserAgent, $script:DebugLogMutexName | Out-Null
+    } -ArgumentList $script:ConfigDir, $DebugLogFile, $script:UserAgent, $script:DebugLogMutexName, [int]$CONST.Mutex.WaitMs | Out-Null
 }
 
 function Update-TargetsBeforeScan {
@@ -5647,6 +5775,7 @@ $script:Config.RunCount++
 
 # 2. Синхронизация DNS кэша
 Sync-DnsCacheFromConfig
+Initialize-DisableBrokenParallelTlsTasks
 
 # 3. Выбираем готовые данные из завершённого фонового обновления/кэша или единую заглушку
 $script:NetInfo = Get-ReadyNetInfo
