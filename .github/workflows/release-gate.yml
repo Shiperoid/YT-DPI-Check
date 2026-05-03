@@ -32,10 +32,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup PowerShell (pwsh on PATH for gate)
-        uses: PowerShell/setup-powershell@v2
+      # PowerShell/setup-powershell is not a resolvable public action; use PSModule/install-powershell.
+      - name: Install PowerShell (pwsh on PATH for gate)
+        uses: PSModule/install-powershell@v1
         with:
-          version: ${{ matrix.pwsh_version }}
+          Version: ${{ matrix.pwsh_version }}
 
       - name: Run release gate (orchestrator = PS 5.1; children = 5.1 x64/WOW64 + all pwsh candidates)
         shell: powershell
