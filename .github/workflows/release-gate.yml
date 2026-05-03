@@ -1,0 +1,32 @@
+name: release-gate
+
+on:
+  push:
+    paths:
+      - 'YT-DPI.ps1'
+      - 'tools/release-gate.ps1'
+      - 'tools/release-gate-addtype.ps1'
+      - 'tools/smoke-yt-dpi-engines.ps1'
+      - '.github/workflows/release-gate.yml'
+      - 'CHANGELOG_ru.md'
+      - 'README.md'
+  pull_request:
+    paths:
+      - 'YT-DPI.ps1'
+      - 'tools/release-gate.ps1'
+      - 'tools/release-gate-addtype.ps1'
+      - 'tools/smoke-yt-dpi-engines.ps1'
+      - '.github/workflows/release-gate.yml'
+      - 'CHANGELOG_ru.md'
+      - 'README.md'
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run release gate (PS 5.1 host + child pwsh)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'tools\release-gate.ps1') -RepoRoot $env:GITHUB_WORKSPACE

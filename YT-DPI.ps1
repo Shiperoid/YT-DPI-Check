@@ -28,7 +28,7 @@ if ($script:AllowInsecureTls) {
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.3.0"   # текущая версия yt-dpi
+$scriptVersion = "2.3.1"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $debugEnvRaw = [System.Environment]::GetEnvironmentVariable("YT_DPI_DEBUG", "Process")
 if (-not $debugEnvRaw) { $debugEnvRaw = [System.Environment]::GetEnvironmentVariable("YT_DPI_DEBUG", "User") }
@@ -378,8 +378,14 @@ using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Text;
 using System.Linq;
+using System.Security.Cryptography;
 
 public class TlsScanner {
+    private static void FillRandomBytes(byte[] buffer) {
+        using (var rng = RandomNumberGenerator.Create()) {
+            rng.GetBytes(buffer);
+        }
+    }
     public static string TestT13(string targetIp, string host, string proxyHost, int proxyPort, string user, string pass, int timeout) {
         try {
             using (TcpClient tcp = new TcpClient()) {
@@ -454,13 +460,13 @@ public class TlsScanner {
         body.AddRange(new byte[] { 0x03, 0x03 }); // TLS 1.2 (for compatibility header)
 
         byte[] random = new byte[32];
-        Random.Shared.NextBytes(random);
+        FillRandomBytes(random);
         body.AddRange(random);
 
         body.Add(0x00); // Session ID len
         body.AddRange(new byte[] { 0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03 }); // Ciphers: TLS_AES_128_GCM_SHA256 и др.
         body.Add(0x20); // Length 32
-        byte[] sessId = new byte[32]; Random.Shared.NextBytes(sessId);
+        byte[] sessId = new byte[32]; FillRandomBytes(sessId);
         body.AddRange(sessId);
 
         List<byte> exts = new List<byte>();
@@ -493,7 +499,7 @@ public class TlsScanner {
 
         // 7. Key Share (0x0033)
         exts.AddRange(new byte[] { 0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20 });
-        byte[] key = new byte[32]; Random.Shared.NextBytes(key);
+        byte[] key = new byte[32]; FillRandomBytes(key);
         exts.AddRange(key);
 
         body.Add((byte)(exts.Count >> 8)); body.Add((byte)(exts.Count & 0xFF));
@@ -553,11 +559,19 @@ public sealed class SynchronousProgress : IProgress<string>
 {
     private readonly Action<string> _handler;
     public SynchronousProgress(Action<string> handler) { _handler = handler; }
-    public void Report(string value) { _handler?.Invoke(value); }
+    public void Report(string value) { if (_handler != null) { _handler.Invoke(value); } }
 }
 
 public class AdvancedTraceroute
 {
+    private static readonly object s_synRngLock = new object();
+    private static readonly Random s_synRng = new Random();
+
+    private static int NextBoundedInt(int minInclusive, int maxExclusive)
+    {
+        lock (s_synRngLock) { return s_synRng.Next(minInclusive, maxExclusive); }
+    }
+
     // ========== ПУБЛИЧНЫЕ МЕТОДЫ ==========
 
     /// <summary>
@@ -567,20 +581,20 @@ public class AdvancedTraceroute
                                        TraceMethod method = TraceMethod.Auto, IProgress<string> progress = null)
     {
         // Разрешаем DNS
-        progress?.Report($"[*] Разрешение DNS: {target}");
+        if (progress != null) { progress.Report(string.Format("[*] Разрешение DNS: {0}", target)); }
         var targetIp = ResolveTarget(target);
         if (targetIp == null)
         {
-            progress?.Report($"[!] Не удалось разрешить DNS: {target}");
+            if (progress != null) { progress.Report(string.Format("[!] Не удалось разрешить DNS: {0}", target)); }
             return new List<TraceHop>();
         }
-        progress?.Report($"[+] Целевой IP: {targetIp}");
+        if (progress != null) { progress.Report(string.Format("[+] Целевой IP: {0}", targetIp)); }
 
         // Автоопределение метода
         if (method == TraceMethod.Auto)
         {
             method = DetectBestMethod(targetIp);
-            progress?.Report($"[*] Выбран метод: {method}");
+            if (progress != null) { progress.Report(string.Format("[*] Выбран метод: {0}", method)); }
         }
 
         // Выполняем трассировку
@@ -627,7 +641,7 @@ public class AdvancedTraceroute
             var hostName = Dns.GetHostName();
             var ips = Dns.GetHostAddresses(hostName);
             var dns = ips.FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork);
-            result["DNS"] = dns?.ToString() ?? "UNKNOWN";
+            result["DNS"] = (dns != null ? dns.ToString() : null) ?? "UNKNOWN";
         } catch { result["DNS"] = "UNKNOWN"; }
 
         // CDN через DNS (быстро, без HTTP)
@@ -697,7 +711,7 @@ public class AdvancedTraceroute
 
             for (int ttl = 1; ttl <= maxHops; ttl++)
             {
-                progress?.Report($"[TRACE] Hop {ttl}/{maxHops} (ICMP)...");
+                if (progress != null) { progress.Report(string.Format("[TRACE] Hop {0}/{1} (ICMP)...", ttl, maxHops)); }
                 options.Ttl = ttl;
 
                 try
@@ -709,13 +723,13 @@ public class AdvancedTraceroute
                     var hop = new TraceHop
                     {
                         HopNumber = ttl,
-                        IP = reply.Address?.ToString() ?? "*",
+                        IP = (reply.Address != null ? reply.Address.ToString() : null) ?? "*",
                         RttMs = (int)sw.ElapsedMilliseconds,
                         Status = MapIcmpStatus(reply.Status)
                     };
 
                     results.Add(hop);
-                    progress?.Report($"[OK] Hop {ttl}: {hop.IP} - {hop.Status} ({hop.RttMs}ms)");
+                    if (progress != null) { progress.Report(string.Format("[OK] Hop {0}: {1} - {2} ({3}ms)", ttl, hop.IP, hop.Status, hop.RttMs)); }
 
                     if (reply.Status == IPStatus.Success ||
                         (reply.Address != null && reply.Address.Equals(targetIp)))
@@ -724,11 +738,11 @@ public class AdvancedTraceroute
                 catch (PingException)
                 {
                     results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "TIMEOUT" });
-                    progress?.Report($"[!] Hop {ttl}: TIMEOUT");
+                    if (progress != null) { progress.Report(string.Format("[!] Hop {0}: TIMEOUT", ttl)); }
                 }
                 catch (Exception ex)
                 {
-                    progress?.Report($"[ERROR] Hop {ttl}: {ex.Message}");
+                    if (progress != null) { progress.Report(string.Format("[ERROR] Hop {0}: {1}", ttl, ex.Message)); }
                 }
 
                 Thread.Sleep(20); // Небольшая задержка между хопами
@@ -747,7 +761,7 @@ public class AdvancedTraceroute
 
         for (int ttl = 1; ttl <= maxHops; ttl++)
         {
-            progress?.Report($"[TRACE] Hop {ttl}/{maxHops} (TCP SYN:{port})...");
+            if (progress != null) { progress.Report(string.Format("[TRACE] Hop {0}/{1} (TCP SYN:{2})...", ttl, maxHops, port)); }
 
             using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.IP))
             using (var receiver = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.IP))
@@ -763,8 +777,8 @@ public class AdvancedTraceroute
                     receiver.Bind(new IPEndPoint(IPAddress.Any, 0));
 
                     // Собираем TCP SYN пакет
-                    var srcPort = Random.Shared.Next(1024, 65535);
-                    var seq = (uint)Random.Shared.Next(1, int.MaxValue);
+                    var srcPort = NextBoundedInt(1024, 65535);
+                    var seq = (uint)NextBoundedInt(1, int.MaxValue);
 
                     var tcpPacket = BuildTcpSynPacket(srcPort, port, seq);
                     var ipPacket = BuildIpPacket(localIp, targetIp, 6, tcpPacket);
@@ -803,19 +817,19 @@ public class AdvancedTraceroute
                     };
 
                     results.Add(hop);
-                    progress?.Report($"[OK] Hop {ttl}: {hop.IP} - {hop.Status} ({hop.RttMs}ms)");
+                    if (progress != null) { progress.Report(string.Format("[OK] Hop {0}: {1} - {2} ({3}ms)", ttl, hop.IP, hop.Status, hop.RttMs)); }
 
                     if (status == "SYNACK" || (responderIp == targetIp.ToString()))
                         break;
                 }
                 catch (SocketException ex)
                 {
-                    progress?.Report($"[!] Hop {ttl}: SOCKET ERROR - {ex.Message}");
+                    if (progress != null) { progress.Report(string.Format("[!] Hop {0}: SOCKET ERROR - {1}", ttl, ex.Message)); }
                     results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "ERROR" });
                 }
                 catch (Exception ex)
                 {
-                    progress?.Report($"[ERROR] Hop {ttl}: {ex.Message}");
+                    if (progress != null) { progress.Report(string.Format("[ERROR] Hop {0}: {1}", ttl, ex.Message)); }
                 }
             }
             Thread.Sleep(20);
@@ -832,7 +846,7 @@ public class AdvancedTraceroute
 
         for (int ttl = 1; ttl <= maxHops; ttl++)
         {
-            progress?.Report($"[TRACE] Hop {ttl}/{maxHops} (UDP)...");
+            if (progress != null) { progress.Report(string.Format("[TRACE] Hop {0}/{1} (UDP)...", ttl, maxHops)); }
 
             using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
             using (var receiver = new Socket(AddressFamily.InterNetwork, SocketType.Raw, ProtocolType.Icmp))
@@ -875,7 +889,7 @@ public class AdvancedTraceroute
                     };
 
                     results.Add(hop);
-                    progress?.Report($"[OK] Hop {ttl}: {hop.IP} - {hop.Status} ({hop.RttMs}ms)");
+                    if (progress != null) { progress.Report(string.Format("[OK] Hop {0}: {1} - {2} ({3}ms)", ttl, hop.IP, hop.Status, hop.RttMs)); }
 
                     if (responderIp == targetIp.ToString())
                         break;
@@ -885,12 +899,12 @@ public class AdvancedTraceroute
                     if (LooksLikeTracerouteTtlExpired(ex))
                     {
                         // TTL истек - это нормально для промежуточных хопов
-                        progress?.Report($"[*] Hop {ttl}: TTL expired");
+                        if (progress != null) { progress.Report(string.Format("[*] Hop {0}: TTL expired", ttl)); }
                         results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "TTL_EXPIRED" });
                     }
                     else
                     {
-                        progress?.Report($"[!] Hop {ttl}: {ex.Message}");
+                        if (progress != null) { progress.Report(string.Format("[!] Hop {0}: {1}", ttl, ex.Message)); }
                         results.Add(new TraceHop { HopNumber = ttl, IP = "*", Status = "ERROR" });
                     }
                 }
@@ -908,7 +922,7 @@ public class AdvancedTraceroute
         {
             socket.Connect("8.8.8.8", 53);
             var endPoint = socket.LocalEndPoint as IPEndPoint;
-            return endPoint?.Address;
+            return (endPoint == null) ? null : endPoint.Address;
         }
     }
 
@@ -999,7 +1013,7 @@ public class AdvancedTraceroute
             var type = buffer[20];
             if (type == 11) return "TTL_EXPIRED";
             if (type == 3) return "PORT_UNREACHABLE";
-            return $"ICMP_{type}";
+            return string.Format("ICMP_{0}", type);
         }
         else if (protocol == 6) // TCP
         {
@@ -1048,12 +1062,13 @@ public class TraceHop
     public string Status { get; set; }
     public string TcpStatus { get; set; } // Для TCP метода (SYNACK/RST)
 
-    public bool IsBlocking => Status == "BLOCKED" || TcpStatus == "RST";
-    public bool IsTimeout => Status == "TIMEOUT" || Status == "TTL_EXPIRED";
+    public bool IsBlocking { get { return Status == "BLOCKED" || TcpStatus == "RST"; } }
+    public bool IsTimeout { get { return Status == "TIMEOUT" || Status == "TTL_EXPIRED"; } }
 
     public override string ToString()
     {
-        return $"Hop {HopNumber,2}: {IP,-15} {Status} {(RttMs > 0 ? $"({RttMs}ms)" : "")}";
+        string rttPart = (RttMs > 0) ? string.Format("({0}ms)", RttMs) : "";
+        return string.Format("Hop {0,2}: {1,-15} {2} {3}", HopNumber, IP == null ? "" : IP, Status == null ? "" : Status, rttPart);
     }
 }
 "@
