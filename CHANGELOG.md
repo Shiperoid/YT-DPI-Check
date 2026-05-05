@@ -168,7 +168,7 @@
 
 ### Релиз на GitHub (v2.3.2)
 
-Для Linux / macOS / Git Bash / Entware скачайте **`YT-DPI.sh`** со [страницы релиза v2.3.2](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.2) (или последнего релиза).
+Для Linux / macOS / Git Bash / Entware скачайте **`YT-DPI.sh`** со [страницы релиза v2.3.2](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.2).
 
 Запуск одной строкой (нужен `bash`):
 
