@@ -3,4 +3,5 @@
 *.log
 *.tmp
 *.txt
+!targets.txt
 TODO.md
