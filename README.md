@@ -1,5 +1,5 @@
 # YT-DPI
-![GitHub Release (Windows)](https://img.shields.io/badge/Windows%20.ps1-2.3.2-green)
+![GitHub Release (Windows)](https://img.shields.io/badge/Windows%20.ps1-2.3.3-green)
 ![GitHub Release (Bash)](https://img.shields.io/badge/Bash%20.sh-2.3.2-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
@@ -169,8 +169,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\release-gate.ps1
 Проект построен на исследованиях сообщества обхода DPI:
 *   [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI) — от ValdikSS.
 *   [Zapret](https://github.com/bol-van/zapret) — от bol-van.
-*   [B4](https://github.com/DanielLavrushin/b4) — от Даниила Лаврушина.
-*   [dpi-detector](https://github.com/Runnin4ik/dpi-detector) — методики детекции ТСПУ.
+*   [B4](https://github.com/DanielLavrushin/b4) — от DanielLavrushin.
+*   [dpi-detector](https://github.com/Runnin4ik/dpi-detector) — от Runnin4ik.
 
 ## ⚖️ Лицензия и отказ от ответственности
 Распространяется по лицензии **MIT**. Инструмент создан исключительно для **диагностических** целей. Он не является средством обхода блокировок, но помогает правильно их настроить.
