@@ -86,13 +86,15 @@ fi
 OS_MAC=false
 if [[ "$OSTYPE" == "darwin"* ]]; then OS_MAC=true; fi
 
-# Опрос клавиши [Q] во время скана; без анимации можно реже будить цикл.
+# Опрос клавиш в главном меню (idle) и во время скана.
+# Во время скана используем более редкий poll, чтобы не грузить CPU.
 READ_TIMEOUT="0.05"
+SCAN_READ_TIMEOUT="${YT_DPI_SCAN_READ_TIMEOUT:-0.2}"
 if (( BASH_VERSINFO[0] < 4 )); then READ_TIMEOUT="1"; fi
 # Параллельных worker одновременно (каждый — fork + несколько curl). 0 = без лимита (как раньше «все сразу»).
 SCAN_MAX_JOBS="${YT_DPI_MAX_JOBS:-}"
 if [[ -z "$SCAN_MAX_JOBS" ]] || [[ ! "$SCAN_MAX_JOBS" =~ ^[0-9]+$ ]]; then
-    if [[ -n "${MSYSTEM:-}" ]]; then SCAN_MAX_JOBS=12
+    if [[ -n "${MSYSTEM:-}" ]]; then SCAN_MAX_JOBS=6
     elif [[ -d /jffs ]] || [[ -d /overlay ]] || [[ -d /rom ]] || [[ -n "${OPENWRT_RELEASE:-}" ]] || [[ -d /opt/etc/opkg ]]; then
         SCAN_MAX_JOBS=6
     else SCAN_MAX_JOBS=0
@@ -101,6 +103,7 @@ fi
 
 if [[ -n "${MSYSTEM:-}" ]]; then
     READ_TIMEOUT="${YT_DPI_READ_TIMEOUT:-0.2}"
+    SCAN_READ_TIMEOUT="${YT_DPI_SCAN_READ_TIMEOUT:-0.3}"
 fi
 
 E=$'\033'
@@ -1178,22 +1181,25 @@ while true; do
 
         export PROXY_ENABLED PROXY_TYPE PROXY_STR IP_PREFERENCE TLS_MODE HAS_IPV6 OS_MAC
 
+        running_jobs=0
         for i in "${!TARGETS[@]}"; do
             row=$((12 + i))
             out_str $X_VER $row $W_VER "PREPARING..." "$C_GRY"
             JOB_STATE[$i]=1
             if (( SCAN_MAX_JOBS > 0 )); then
-                while (( $(jobs -pr 2>/dev/null | wc -l) >= SCAN_MAX_JOBS )); do
+                while (( running_jobs >= SCAN_MAX_JOBS )); do
                     wait -n 2>/dev/null || sleep 0.05
+                    ((running_jobs--))
                 done
             fi
             worker "${TARGETS[$i]}" "$row" < /dev/null &
+            ((running_jobs++))
         done
         flush_buffer
 
         aborted=false
         while [ $ACTIVE_JOBS -gt 0 ]; do
-            read -t $READ_TIMEOUT -n 1 -s inkey
+            read -t $SCAN_READ_TIMEOUT -n 1 -s inkey
             if [[ "$inkey" == "q" || "$inkey" == "Q" || "$inkey" == "й" || "$inkey" == "Й" || "$inkey" == $'\e' ]]; then aborted=true; break; fi
 
             for i in "${!TARGETS[@]}"; do
