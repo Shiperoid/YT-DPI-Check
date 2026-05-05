@@ -105,7 +105,7 @@ fi
 
 E=$'\033'
 
-SCRIPT_VERSION="2.3.1"
+SCRIPT_VERSION="2.2.5"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/yt-dpi"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 GEO_CACHE_FILE="$CONFIG_DIR/geo_cache.json"
@@ -631,7 +631,7 @@ draw_ui() {
     out_str 45 6 0 '╚══════╝╚═╝╚══════╝' "$C_GRY"
 
     out_str 65 1 0 "> SYS STATUS: [ ONLINE ]" "$C_GRN"
-    out_str 65 2 50 "> ENGINE: Barebuh Pro v2.3.4" "$C_RED"
+    out_str 65 2 50 "> ENGINE: Barebuh Pro v2.3.7" "$C_RED"
     out_str 65 3 50 "> LOCAL DNS: $DNS" "$C_CYA"
     out_str 65 4 50 "> CDN NODE: $CDN" "$C_YEL"
     out_str 65 5 0 "> AUTHOR: github.com/Shiperoid" "$C_GRN"
