@@ -28,7 +28,7 @@ if ($script:AllowInsecureTls) {
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.3.1"   # текущая версия yt-dpi
+$scriptVersion = "2.3.2"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $debugEnvRaw = [System.Environment]::GetEnvironmentVariable("YT_DPI_DEBUG", "Process")
 if (-not $debugEnvRaw) { $debugEnvRaw = [System.Environment]::GetEnvironmentVariable("YT_DPI_DEBUG", "User") }

@@ -16,53 +16,99 @@ fi
 # Скрипт проверяет HTTP, TLS 1.2 и TLS 1.3, поддерживает прокси и сохраняет отчёт.
 # Часть настроек хранится в ~/.config/yt-dpi/config.json (если установлен jq).
 
-# Инициализация TUI: скрываем ввод/курсор и переходим в альтернативный экран.
-stty -echo
-printf "\033[?1049h"
-printf "\033[?25l"
+# Инициализация TUI: скрываем ввод/курсор и переходим в альтернативный экран (только при TTY).
+tui_leave() {
+    [ -t 0 ] && stty echo 2>/dev/null || true
+    printf '\033[?25h\033[?1049l'
+}
+
+tui_enter() {
+    printf '\033[?1049h\033[?25l'
+    [ -t 0 ] && stty -echo 2>/dev/null || true
+}
 
 cleanup() {
-    stty echo
-    printf "\033[?1049l"
-    printf "\033[?25h"
-    rm -rf "$TMP_DIR"
+    tui_leave
+    [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ] && rm -rf "$TMP_DIR"
     exit
 }
 
 unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
 
-if [ -x "/usr/bin/curl" ]; then
-    curl() {
-        "/usr/bin/curl" "$@"
-    }
-fi
+TMP_DIR=""
+trap 'cleanup' INT TERM EXIT
+
+tui_enter
 
 for cmd in curl awk; do
     if ! command -v $cmd &> /dev/null; then
-        stty echo; printf "\033[?1049l"; echo "Error: $cmd is required."; exit 1
+        echo "Error: $cmd is required." >&2
+        exit 1
     fi
 done
+
+# Один и тот же curl, что даёт command -v (не только /usr/bin/curl).
+CURL_BIN=$(command -v curl)
+curl() { "$CURL_BIN" "$@"; }
+
+# Проверка, поддерживает ли текущий curl конкретный флаг.
+curl_supports_opt() {
+    local opt="$1"
+    curl --help all 2>/dev/null | awk -v o="$opt" 'index($0, o) { found=1; exit } END { exit(found?0:1) }'
+}
+
+# Не все curl-сборки на роутерах поддерживают одинаковые TLS- и SOCKS-флаги.
+CURL_HAS_TLS13=false
+CURL_HAS_TLS_MAX=false
+CURL_HAS_SOCKS5H=false
+curl_supports_opt "--tlsv1.3" && CURL_HAS_TLS13=true
+curl_supports_opt "--tls-max" && CURL_HAS_TLS_MAX=true
+curl_supports_opt "socks5h://" && CURL_HAS_SOCKS5H=true
+
+proxy_url_for_curl() {
+    local px="$1"
+    if [[ "$px" == socks5://* ]] && ! $CURL_HAS_SOCKS5H; then
+        echo "$px"
+        return 0
+    fi
+    if [[ "$px" == socks5://* ]]; then
+        echo "${px/socks5:\/\//socks5h:\/\/}"
+        return 0
+    fi
+    echo "$px"
+}
+
+if ! TMP_DIR=$(mktemp -d); then
+    echo "Error: mktemp failed (cannot create temp dir)." >&2
+    exit 1
+fi
 
 OS_MAC=false
 if [[ "$OSTYPE" == "darwin"* ]]; then OS_MAC=true; fi
 
+# Опрос клавиши [Q] во время скана; без анимации можно реже будить цикл.
 READ_TIMEOUT="0.05"
 if (( BASH_VERSINFO[0] < 4 )); then READ_TIMEOUT="1"; fi
-ANIM_EVERY=1
-
-# Профиль обновления экрана для Git Bash на Windows.
-if [[ -n "${MSYSTEM:-}" ]]; then
-    READ_TIMEOUT="0.03"
-    ANIM_EVERY=2
+# Параллельных worker одновременно (каждый — fork + несколько curl). 0 = без лимита (как раньше «все сразу»).
+SCAN_MAX_JOBS="${YT_DPI_MAX_JOBS:-}"
+if [[ -z "$SCAN_MAX_JOBS" ]] || [[ ! "$SCAN_MAX_JOBS" =~ ^[0-9]+$ ]]; then
+    if [[ -n "${MSYSTEM:-}" ]]; then SCAN_MAX_JOBS=12
+    elif [[ -d /jffs ]] || [[ -d /overlay ]] || [[ -d /rom ]] || [[ -n "${OPENWRT_RELEASE:-}" ]] || [[ -d /opt/etc/opkg ]]; then
+        SCAN_MAX_JOBS=6
+    else SCAN_MAX_JOBS=0
+    fi
 fi
 
-TMP_DIR=$(mktemp -d)
+if [[ -n "${MSYSTEM:-}" ]]; then
+    READ_TIMEOUT="${YT_DPI_READ_TIMEOUT:-0.2}"
+fi
+
 E=$'\033'
-trap 'cleanup' INT TERM EXIT
 
 SCRIPT_VERSION="2.3.1"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/yt-dpi"
 CONFIG_FILE="$CONFIG_DIR/config.json"
+GEO_CACHE_FILE="$CONFIG_DIR/geo_cache.json"
 
 # Блок runtime-настроек (формат совместим с bat-версией по основным полям).
 export IP_PREFERENCE="IPv6"
@@ -79,8 +125,8 @@ PROXY_STR=""
 
 PROXY_HISTORY=()
 
-CDN_LIST=()
 TARGETS=()
+CDN=""
 
 # Базовый список целей для сканирования.
 BASE_TARGETS=(
@@ -197,7 +243,7 @@ config_load() {
         t_lower=$(echo "$PROXY_TYPE" | tr 'A-Z' 'a-z')
         if [[ -n "$PROXY_USER" && -n "$PROXY_PASS" ]]; then userpass_str="${PROXY_USER}:${PROXY_PASS}@"; fi
         PROXY_STR="${t_lower}://${userpass_str}${PROXY_HOST}:${PROXY_PORT}"
-        if [[ "$PROXY_TYPE" == "SOCKS5" ]]; then PROXY_STR="${PROXY_STR/socks5:\/\//socks5h:\/\/}"; fi
+        PROXY_STR=$(proxy_url_for_curl "$PROXY_STR")
     fi
 }
 
@@ -224,27 +270,278 @@ detect_ipv6() {
         return
     fi
 
-    # Шаг 2: проверяем исходящую IPv6-связность.
-    if curl -6 -s -m 2 -I "https://ipv6.google.com" -o /dev/null 2>/dev/null; then
-        HAS_IPV6=true
-        return
-    fi
+    # Шаг 2: исходящая IPv6-связность (несколько проб: блок только HTTPS к Google ≠ отсутствие IPv6).
+    local ping_ok=false
     if command -v ping6 &>/dev/null; then
-        if ping6 -c 1 -W 1 2001:4860:4860::8888 &>/dev/null; then
+        if $OS_MAC; then
+            # На Darwin не полагаемся на флаги таймаута (-W различается по версиям).
+            ping6 -c 1 2001:4860:4860::8888 &>/dev/null && ping_ok=true
+        else
+            ping6 -c 1 -W 1 2001:4860:4860::8888 &>/dev/null && ping_ok=true
+            if ! $ping_ok; then ping6 -c 1 -w 1 2001:4860:4860::8888 &>/dev/null && ping_ok=true; fi
+        fi
+    fi
+    if $ping_ok; then HAS_IPV6=true; return; fi
+
+    local curl_ep
+    for curl_ep in "https://www.cloudflare.com" "https://ipv6.google.com"; do
+        if curl -6 -s -m 2 -I "$curl_ep" -o /dev/null 2>/dev/null; then
             HAS_IPV6=true
             return
         fi
-    fi
+    done
 }
 
-# Формирование итогового списка целей: base + CDN, без дублей, сортировка по длине.
+# BaseTargets без manifest: узел вида manifest / rN.* задаёт только CDN после redirector (локальный CDN-шард).
 rebuild_targets() {
     local -a raw=()
     local x
     for x in "${BASE_TARGETS[@]}"; do raw+=("$x"); done
-    for x in "${CDN_LIST[@]}"; do raw+=("$x"); done
     [[ -n "${CDN:-}" ]] && raw+=("$CDN")
     mapfile -t TARGETS < <(printf '%s\n' "${raw[@]}" | awk '!seen[$0]++' | awk '{ print length"\t"$0 }' | sort -n | cut -f2-)
+}
+
+# Тики .NET совместимо с geo_cache из YT-DPI.ps1 для расчёта TTL.
+_geo_ticks_now_utc() {
+    local sec
+    sec=$(date -u +%s 2>/dev/null) || sec=$(date +%s)
+    echo $(( (sec + 62135596800) * 10000000 ))
+}
+
+geo_proxy_key() {
+    if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then
+        echo "${PROXY_TYPE}|${PROXY_HOST}:${PROXY_PORT}"
+    else
+        echo "direct"
+    fi
+}
+
+# Нормализация ISP как в PS1 Get-NetworkInfo.
+_strip_isp_suffix() {
+    if command -v perl &>/dev/null; then
+        perl -pe 's/\s+(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation|Ltd|Limited)\b//gi'
+    else
+        sed -E 's/[[:space:]]*(LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC|Private Enterprise|Group|Corporation|Ltd|Limited)//g'
+    fi
+}
+
+_geo_cache_hours_age() {
+    local cached_ticks now_ticks dt
+    cached_ticks=$(jq -r '.TimestampTicks // 0 | tonumber' "$GEO_CACHE_FILE" 2>/dev/null) || return 99
+    now_ticks=$(_geo_ticks_now_utc)
+    dt=$(( now_ticks > cached_ticks ? now_ticks - cached_ticks : 0 ))
+    awk -v d="$dt" 'BEGIN { printf "%.4f\n", d / 36000000000000 }'
+}
+
+load_geo_cache() {
+    local want pk cached_key age
+    ! have_jq && return 1
+    [[ -f "$GEO_CACHE_FILE" ]] || return 1
+    want=$(geo_proxy_key)
+    cached_key=$(jq -r '.ProxyKey // ""' "$GEO_CACHE_FILE" 2>/dev/null)
+    [[ -n "$cached_key" ]] && [[ "$cached_key" == "$want" ]] || return 1
+    age=$(_geo_cache_hours_age)
+    awk -v a="$age" 'BEGIN { if (a+0 >= 24) exit 1; exit 0 }' || return 1
+    ISP=$(jq -r '.ISP // empty' "$GEO_CACHE_FILE" 2>/dev/null)
+    LOC=$(jq -r '.LOC // empty' "$GEO_CACHE_FILE" 2>/dev/null)
+    [[ -n "$ISP" && -n "$LOC" ]]
+}
+
+save_geo_cache() {
+    local isp="$1" loc="$2"
+    ! have_jq && return 0
+    mkdir -p "$CONFIG_DIR" || return 1
+    local ticks pk
+    ticks=$(_geo_ticks_now_utc)
+    pk=$(geo_proxy_key)
+    jq -n \
+        --arg ISP "$isp" \
+        --arg LOC "$loc" \
+        --arg ProxyKey "$pk" \
+        --arg ScriptVersion "$SCRIPT_VERSION" \
+        --argjson TimestampTicks "$ticks" \
+        '{ISP:$ISP,LOC:$LOC,ProxyKey:$ProxyKey,TimestampTicks:$TimestampTicks,ScriptVersion:$ScriptVersion}' \
+        >"${GEO_CACHE_FILE}.tmp" && mv "${GEO_CACHE_FILE}.tmp" "$GEO_CACHE_FILE"
+}
+
+# Берём первое поле после «nameserver» (IPv4 / IPv6 / stub 127.0.0.53 / имя хоста).
+_dns_from_resolv_file() {
+    local f="$1"
+    [[ -f "$f" ]] || return 1
+    awk '/^nameserver[[:space:]]+/ { print $2; exit }' "$f" 2>/dev/null
+}
+
+detect_local_dns() {
+    DNS="UNKNOWN"
+    local dn
+
+    # macOS: первый nameserver из scutil (не только [0], строка «nameserver[N]»).
+    if $OS_MAC && command -v scutil &>/dev/null; then
+        dn=$(scutil --dns 2>/dev/null | awk -F': *' '/nameserver\[[0-9]+\]/{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 != "") { print $2; exit } }')
+        [[ -n "$dn" ]] && DNS="$dn" && return
+    fi
+
+    # systemd-resolved: реальные апстримы (предпочтительнее stub в /etc/resolv.conf).
+    if command -v resolvectl &>/dev/null; then
+        dn=$(resolvectl status 2>/dev/null | awk '
+            /^[[:space:]]*Current DNS Server:/ {
+                sub(/^[[:space:]]*Current DNS Server:[[:space:]]*/, "")
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+                if ($0 != "") { print $0; exit }
+            }
+        ')
+        [[ -z "$dn" ]] && dn=$(resolvectl status 2>/dev/null | awk '
+            /^[[:space:]]*DNS Servers:/ {
+                sub(/^[[:space:]]*DNS Servers:[[:space:]]*/, "")
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+                if ($1 != "") { print $1; exit }
+            }
+        ')
+        [[ -n "$dn" ]] && DNS="$dn" && return
+    fi
+
+    # NetworkManager.
+    if command -v nmcli &>/dev/null; then
+        dn=$(nmcli dev show 2>/dev/null | awk -F': +' '/^IP4\.DNS/ { print $2; exit }')
+        [[ -n "$dn" ]] && DNS="$dn" && return
+    fi
+
+    # systemd-resolved: фактический resolv.conf (не только IPv4).
+    dn=$(_dns_from_resolv_file /run/systemd/resolve/resolv.conf)
+    [[ -n "$dn" ]] && DNS="$dn" && return
+
+    # OpenWrt / UCI.
+    if command -v uci &>/dev/null; then
+        dn=$(uci -q get network.wan.dns 2>/dev/null | awk '{ print $1; exit }')
+        [[ -z "$dn" ]] && dn=$(uci -q get network.@dnsmasq[0].server 2>/dev/null | awk '{ print $1; exit }')
+        [[ -n "$dn" ]] && DNS="$dn" && return
+    fi
+
+    # Обычный resolv.conf (в т.ч. WSL и stub 127.0.0.53).
+    dn=$(_dns_from_resolv_file /etc/resolv.conf)
+    [[ -n "$dn" ]] && DNS="$dn" && return
+
+    # Android / Termux.
+    if command -v getprop &>/dev/null; then
+        dn=$(getprop net.dns1 2>/dev/null | tr -d '\r')
+        [[ -z "$dn" ]] && dn=$(getprop dhcp.wlan0.dns1 2>/dev/null | tr -d '\r')
+        [[ -n "$dn" ]] && DNS="$dn" && return
+    fi
+
+    # Windows (Git Bash / MSYS / Cygwin): ipconfig.exe.
+    local ipcfg=""
+    if [[ -n "${SYSTEMROOT:-}" && -x "${SYSTEMROOT}/System32/ipconfig.exe" ]]; then
+        ipcfg="${SYSTEMROOT}/System32/ipconfig.exe"
+    elif [[ -n "${WINDIR:-}" && -x "${WINDIR}/System32/ipconfig.exe" ]]; then
+        ipcfg="${WINDIR}/System32/ipconfig.exe"
+    elif [[ -x "/c/Windows/System32/ipconfig.exe" ]]; then
+        ipcfg="/c/Windows/System32/ipconfig.exe"
+    fi
+    if [[ -n "$ipcfg" ]]; then
+        dn=$(MSYS2_ARG_CONV_EXCL='*' "$ipcfg" /all 2>/dev/null | tr -d '\r' | LC_ALL=C awk '
+            function low(s) { return tolower(s) }
+            {
+                if (low($0) ~ /dns[[:space:]-]*servers?/) {
+                    blk = 1
+                    if (match($0, /([0-9]{1,3}\.){3}[0-9]{1,3}/)) {
+                        d = substr($0, RSTART, RLENGTH)
+                        if (!(d ~ /^169\.254\./ || d ~ /^127\./)) { print d; exit }
+                    }
+                    next
+                }
+            }
+            blk && /^[[:space:]]+([0-9]{1,3}\.){3}[0-9]{1,3}/ {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
+                d = $1
+                if (!(d ~ /^169\.254\./ || d ~ /^127\./)) { print d; exit }
+            }
+            blk && NF && $0 !~ /^[[:space:]]/ { blk = 0 }
+        ')
+        [[ -n "$dn" ]] && DNS="$dn" && return
+    fi
+}
+
+# CDN как в PS1: только redirector report_mapping, разбор r1.<short> vs полный *.googlevideo.com.
+resolve_cdn_from_redirector() {
+    CDN="manifest.googlevideo.com"
+    local curl_px=() rnd cdn_raw cdn_short
+    if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then curl_px=( -x "$PROXY_STR" ); fi
+    rnd=$(awk 'BEGIN { srand(); print int(1048576 * rand()) }')
+    cdn_raw=$(curl -s -m 3 -A "curl/7.88.1" "${curl_px[@]}" "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd" 2>/dev/null) || true
+    [[ -z "$cdn_raw" ]] && return
+
+    if [[ "$cdn_raw" =~ =\>[[:space:]]+([A-Za-z0-9-]+) ]]; then
+        cdn_short="${BASH_REMATCH[1]}"
+    else
+        cdn_short=""
+    fi
+    if [[ -n "$cdn_short" && "$cdn_short" != "r1" ]]; then
+        CDN="r1.${cdn_short}.googlevideo.com"
+        return
+    fi
+    if [[ "$cdn_raw" =~ =\>[[:space:]]*([A-Za-z0-9.-]+\.googlevideo\.com) ]]; then
+        CDN="${BASH_REMATCH[1]}"
+    fi
+}
+
+# Цепочка GEO-провайдеров как в Get-NetworkInfo (PS1); нужен jq.
+geo_fetch_from_providers() {
+    local curl_px=() raw url
+    if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then curl_px=( -x "$PROXY_STR" ); fi
+
+    # ip-api.com
+    url="https://ip-api.com/json/?fields=status,countryCode,city,isp"
+    raw=$(curl -s -A "curl/7.88.1" -m 2 "${curl_px[@]}" "$url" 2>/dev/null) || raw=""
+    if echo "$raw" | jq -e '.status == "success" and .isp' &>/dev/null; then
+        local isp loc
+        isp=$(echo "$raw" | jq -r '.isp // empty')
+        loc=$(echo "$raw" | jq -r '[(.city // ""), (.countryCode // "")] | join(", ")')
+        if [[ -n "$isp" && -n "$loc" ]]; then
+            echo "$isp"; echo "$loc"; return 0
+        fi
+    fi
+
+    # ifconfig.co
+    url="https://ifconfig.co/json"
+    raw=$(curl -s -A "curl/7.88.1" -m 2 "${curl_px[@]}" "$url" 2>/dev/null) || raw=""
+    if echo "$raw" | jq -e '.org and .country' &>/dev/null; then
+        local isp loc
+        isp=$(echo "$raw" | jq -r '.org // empty')
+        loc=$(echo "$raw" | jq -r '[(.city // ""), (.country // "")] | join(", ")' 2>/dev/null)
+        if [[ -n "$isp" && -n "$loc" ]]; then echo "$isp"; echo "$loc"; return 0; fi
+    fi
+
+    # ipapi.co
+    url="https://ipapi.co/json/"
+    raw=$(curl -s -A "curl/7.88.1" -m 2 "${curl_px[@]}" "$url" 2>/dev/null) || raw=""
+    if echo "$raw" | jq -e '(.error | not) and .org and .country_code' &>/dev/null; then
+        local isp loc
+        isp=$(echo "$raw" | jq -r '.org // empty')
+        loc=$(echo "$raw" | jq -r '[(.city // ""), (.country_code // "")] | join(", ")' 2>/dev/null)
+        if [[ -n "$isp" && -n "$loc" ]]; then echo "$isp"; echo "$loc"; return 0; fi
+    fi
+
+    # ipwhois.app
+    url="https://ipwhois.app/json/"
+    raw=$(curl -s -A "curl/7.88.1" -m 2 "${curl_px[@]}" "$url" 2>/dev/null) || raw=""
+    if echo "$raw" | jq -e '.success == true and .isp' &>/dev/null; then
+        local isp loc
+        isp=$(echo "$raw" | jq -r '.isp // empty')
+        loc=$(echo "$raw" | jq -r '[(.city // ""), (.country_code // "")] | join(", ")' 2>/dev/null)
+        if [[ -n "$isp" && -n "$loc" ]]; then echo "$isp"; echo "$loc"; return 0; fi
+    fi
+
+    # ipinfo.io
+    url="https://ipinfo.io/json"
+    raw=$(curl -s -A "curl/7.88.1" -m 2 "${curl_px[@]}" "$url" 2>/dev/null) || raw=""
+    if echo "$raw" | jq -e '(.error | not) and .org and .country' &>/dev/null; then
+        local isp loc
+        isp=$(echo "$raw" | jq -r '(.org // "") | split(" ") | .[0:2] | join(" ")' 2>/dev/null)
+        loc=$(echo "$raw" | jq -r '[(.city // ""), (.country // "")] | join(", ")' 2>/dev/null)
+        if [[ -n "$isp" && -n "$loc" ]]; then echo "$isp"; echo "$loc"; return 0; fi
+    fi
+
+    return 1
 }
 
 proxy_history_add() {
@@ -264,45 +561,55 @@ proxy_history_add() {
     config_save
 }
 
-# Получение сетевого контекста для верхней панели: DNS, CDN, ISP/LOC, наличие IPv6.
+# Получение сетевого контекста для верхней панели (аналог YT-DPI.ps1 Get-NetworkInfo).
 get_network_info() {
-    DNS=$(grep nameserver /etc/resolv.conf 2>/dev/null | head -n 1 | awk '{print $2}' | tr -d '\r\n')
-    [ -z "$DNS" ] && DNS="UNKNOWN"
+    detect_local_dns
 
-    local px_args=""
-    if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then px_args="-x $PROXY_STR"; fi
+    resolve_cdn_from_redirector
 
-    CDN_LIST=()
-    local cdn_prefixes=( r1 r2 r3 rr1 rr2 rr3 rr4 rr5 )
-    local pfx host
-    for pfx in "${cdn_prefixes[@]}"; do
-        host="${pfx}.googlevideo.com"
-        if command -v getent &>/dev/null; then
-            if getent ahostsv4 "$host" &>/dev/null; then CDN_LIST+=("$host"); fi
-        elif command -v nslookup &>/dev/null; then
-            if nslookup "$host" &>/dev/null; then CDN_LIST+=("$host"); fi
+    ISP="Detecting..."
+    LOC="Please wait"
+
+    local curl_px=() geo_ok=false
+    if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then curl_px=( -x "$PROXY_STR" ); fi
+
+    local -a _gl=()
+    if load_geo_cache; then
+        geo_ok=true
+    elif have_jq; then
+        local _gf="$TMP_DIR/gf.$$"
+        if geo_fetch_from_providers >"$_gf" 2>/dev/null && [[ -s "$_gf" ]]; then
+            _gl=()
+            while IFS= read -r line; do _gl+=("$line"); done < "$_gf"
         fi
-    done
+        rm -f "$_gf"
+        if [[ ${#_gl[@]} -ge 2 && -n "${_gl[0]}" && -n "${_gl[1]}" ]]; then
+            ISP=$(printf '%s' "${_gl[0]}" | _strip_isp_suffix | tr -d '\r')
+            LOC=$(printf '%s' "${_gl[1]}" | tr -d '\r')
+            save_geo_cache "$ISP" "$LOC"
+            geo_ok=true
+        fi
+    fi
 
-    if [ ${#CDN_LIST[@]} -eq 0 ]; then
-        local rnd=$RANDOM
-        local cdn_raw=$(curl -s -m 2 $px_args "http://redirector.googlevideo.com/report_mapping?di=no&nocache=$rnd")
-        if [[ "$cdn_raw" =~ =\>\ ([a-zA-Z0-9-]+) ]]; then
-            CDN_LIST+=("r1.${BASH_REMATCH[1]}.googlevideo.com")
+    if ! $geo_ok; then
+        ISP="UNKNOWN"
+        LOC="UNKNOWN"
+        local geo_tmp geo_raw
+        geo_tmp="$TMP_DIR/yt_dpi_geo.$$"
+        curl -s -A "curl/7.88.1" -m 2 "${curl_px[@]}" "http://ip-api.com/line/?fields=status,countryCode,city,isp" >"$geo_tmp" 2>/dev/null || true
+        geo_raw=$(cat "$geo_tmp" 2>/dev/null)
+        rm -f "$geo_tmp"
+        if [[ "$(echo "$geo_raw" | sed -n '1p' | tr -d '\r\n')" == "success" ]]; then
+            LOC="$(echo "$geo_raw" | sed -n '3p' | tr -d '\r\n'), $(echo "$geo_raw" | sed -n '2p' | tr -d '\r\n')"
+            ISP=$(echo "$geo_raw" | sed -n '4p' | tr -d '\r\n' | _strip_isp_suffix)
+            [[ -n "$ISP" && -n "$LOC" ]] && have_jq && save_geo_cache "$ISP" "$LOC"
         else
-            CDN_LIST+=("manifest.googlevideo.com")
+            ISP="Geo unavailable"
+            LOC="Use --fast-mode"
         fi
     fi
 
-    CDN="${CDN_LIST[0]}"
-
-    ISP="UNKNOWN"; LOC="UNKNOWN"
-    local geo_raw=$(curl -s -A "curl/7.88.1" -m 2 $px_args "http://ip-api.com/line/?fields=status,countryCode,city,isp")
-    if [ "$(echo "$geo_raw" | sed -n '1p' | tr -d '\r\n')" == "success" ]; then
-        LOC="$(echo "$geo_raw" | sed -n '3p' | tr -d '\r\n'), $(echo "$geo_raw" | sed -n '2p' | tr -d '\r\n')"
-        ISP=$(echo "$geo_raw" | sed -n '4p' | tr -d '\r\n' | sed -E 's/ (LLC|Inc\.?|Ltd\.?|sp\. z o\.o\.|CJSC|OJSC|PJSC|PAO|ZAO|OOO|JSC)//g')
-        [ ${#ISP} -gt 25 ] && ISP="${ISP:0:22}..."
-    fi
+    ((${#ISP} > 30)) && ISP="${ISP:0:27}..."
 
     detect_ipv6
 }
@@ -375,6 +682,7 @@ draw_ui() {
 }
 
 show_help() {
+    tui_leave
     clear
     echo -e "${C_CYA}=== YT-DPI v${SCRIPT_VERSION} : GUIDE ===${C_RST}"
     echo -e "\n${C_YEL}[ STATUS CODES ]${C_RST}"
@@ -387,17 +695,18 @@ show_help() {
     echo -e "\n${C_YEL}[ RESULT ]${C_RST}"
     echo -e "  ${C_GRN}AVAILABLE     - TLS passed. Domain is fully accessible.${C_RST}"
     echo -e "  ${C_YEL}DPI BLOCK     - HTTP works, but TLS is blocked/dropped.${C_RST}"
-    echo -e "  ${C_YEL}THROTTLED    - HTTP works, but one TLS version is blocked.${C_RST}"
+    echo -e "  ${C_YEL}THROTTLED     - HTTP works, but one TLS version is blocked.${C_RST}"
     echo -e "  ${C_RED}IP  BLOCK     - Both HTTP and TLS are unreachable.${C_RST}"
     echo -e "  ${C_RED}ROUTING ERROR - Network issues, proxy failure, bad routing.${C_RST}"
 
     echo -ne "\n${C_CYA}PRESS ANY KEY TO RETURN...${C_RST}"
     read -r -n 1 -s
+    tui_enter
 }
 
 # Меню общих настроек сканера (IP preference и TLS mode).
 show_settings_menu() {
-    stty echo
+    tui_leave
     clear
     echo -e "${C_CYA}=== SETTINGS (как в YT-DPI.bat, упрощённо) ===${C_RST}"
     echo -e "  IpPreference: ${C_YEL}$IP_PREFERENCE${C_RST}   TlsMode: ${C_YEL}$TLS_MODE${C_RST}"
@@ -412,18 +721,18 @@ show_settings_menu() {
     echo -ne "\n${C_YEL}> ${C_RST}"
     local c
     read -r c
-    stty -echo
     case "$c" in
         1) IP_PREFERENCE="IPv6" ;;
         2) IP_PREFERENCE="IPv4" ;;
         3) TLS_MODE="Auto" ;;
         4) TLS_MODE="TLS12" ;;
         5) TLS_MODE="TLS13" ;;
-        *) return 0 ;;
+        *) tui_enter; return 0 ;;
     esac
     config_save
     echo -e "\n${C_GRN}[OK] Сохранено.${C_RST}"
     sleep 1
+    tui_enter
 }
 
 # Применение записи из истории прокси.
@@ -446,24 +755,24 @@ apply_proxy_history_entry() {
     PROXY_USER="${user:-}"
     PROXY_PASS=""
     if [[ -n "$PROXY_USER" ]]; then
-        stty echo
+        [ -t 0 ] && stty echo 2>/dev/null || true
         echo -ne "\n${C_YEL}Пароль для $PROXY_USER@${PROXY_HOST}:${PROXY_PORT}: ${C_RST}"
         read -r PROXY_PASS
-        stty -echo
+        [ -t 0 ] && stty -echo 2>/dev/null || true
     fi
     local userpass_str="" t_lower
     if [[ -n "$PROXY_USER" && -n "$PROXY_PASS" ]]; then userpass_str="${PROXY_USER}:${PROXY_PASS}@"; fi
     t_lower=$(echo "$PROXY_TYPE" | tr 'A-Z' 'a-z')
     PROXY_STR="${t_lower}://${userpass_str}${PROXY_HOST}:${PROXY_PORT}"
     PROXY_ENABLED=true
-    if [[ "$PROXY_TYPE" == "SOCKS5" ]]; then PROXY_STR="${PROXY_STR/socks5:\/\//socks5h:\/\/}"; fi
+    PROXY_STR=$(proxy_url_for_curl "$PROXY_STR")
     proxy_history_add
     return 0
 }
 
 # Интерактивное меню настройки прокси.
 show_proxy_menu() {
-    stty echo
+    tui_leave
     clear
     echo -e "${C_CYA}=== НАСТРОЙКИ ПРОКСИ (YT-DPI v${SCRIPT_VERSION}) ===${C_RST}"
 
@@ -491,10 +800,9 @@ show_proxy_menu() {
     echo -ne "\n${C_YEL}> Введите прокси (или номер из истории): ${C_RST}"
     local px_input
     read -r px_input
-    stty -echo
 
     px_input=$(echo "$px_input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    [[ -z "$px_input" ]] && return 0
+    [[ -z "$px_input" ]] && { tui_enter; return 0; }
 
     shopt -s nocasematch
     if [[ "$px_input" == "TEST" ]]; then
@@ -507,6 +815,7 @@ show_proxy_menu() {
         PROXY_HISTORY=()
         config_save
         echo -e "\n${C_GRN}[OK] История очищена.${C_RST}"; sleep 1
+        tui_enter
         return 0
     fi
     shopt -u nocasematch
@@ -517,12 +826,19 @@ show_proxy_menu() {
             PROXY_HISTORY=()
             config_save
             echo -e "\n${C_GRN}[OK] История очищена.${C_RST}"; sleep 1
+            tui_enter
             return 0
         fi
         if (( n >= 1 && n <= ${#PROXY_HISTORY[@]} )); then
             if apply_proxy_history_entry "${PROXY_HISTORY[$((n-1))]}"; then
                 echo -e "\n${C_GRN}[OK] Прокси из истории применён.${C_RST}"; sleep 1
             fi
+            tui_enter
+            return 0
+        fi
+        if (( n >= 1 )); then
+            echo -e "\n${C_RED}[x] История прокси пуста или нет записи №${n}.${C_RST}"; sleep 2
+            tui_enter
             return 0
         fi
     fi
@@ -532,6 +848,7 @@ show_proxy_menu() {
         PROXY_TYPE="HTTP"; PROXY_HOST=""; PROXY_PORT=""; PROXY_USER=""; PROXY_PASS=""; PROXY_STR=""
         config_save
         echo -e "\n${C_GRN}[OK] Прокси отключён.${C_RST}"; sleep 1
+        tui_enter
         return 0
     fi
 
@@ -546,6 +863,7 @@ show_proxy_menu() {
 
         if (( p <= 0 || p > 65535 )); then
             echo -e "\n${C_RED}[x] Неверный порт.${C_RST}"; sleep 2
+            tui_enter
             return 0
         fi
 
@@ -576,22 +894,26 @@ show_proxy_menu() {
 
         local t_lower=$(echo "$PROXY_TYPE" | tr 'A-Z' 'a-z')
         PROXY_STR="${t_lower}://${userpass_str}${PROXY_HOST}:${PROXY_PORT}"
-        if [[ "$PROXY_TYPE" == "SOCKS5" ]]; then PROXY_STR="${PROXY_STR/socks5:\/\//socks5h:\/\/}"; fi
+        PROXY_STR=$(proxy_url_for_curl "$PROXY_STR")
 
         proxy_history_add
         echo -e "\n${C_GRN}[OK] Прокси сохранён.${C_RST}"; sleep 1
+        tui_enter
     else
         shopt -u nocasematch
         echo -e "\n${C_RED}[x] Неверный формат.${C_RST}"; sleep 2
+        tui_enter
     fi
 }
 
 # Быстрая проверка текущих прокси-настроек.
 test_proxy() {
+    tui_leave
     clear
     echo -e "${C_CYA}=== ТЕСТ ПРОКСИ ===${C_RST}"
     if [[ "${PROXY_ENABLED}" != true ]] && [[ "${PROXY_ENABLED}" != "1" ]]; then
         echo -e "${C_RED}Прокси отключён.${C_RST}"; sleep 2
+        tui_enter
         return
     fi
 
@@ -605,6 +927,7 @@ test_proxy() {
         echo -e "${C_RED}Ошибка соединения.${C_RST}"
     fi
     echo -ne "\n${C_CYA}Нажмите любую клавишу...${C_RST}"; read -r -n 1 -s
+    tui_enter
 }
 
 # Резолв адреса цели с учётом IP preference и доступности IPv6.
@@ -626,12 +949,24 @@ resolve_target_ip() {
     if command -v getent &>/dev/null; then
         ip=$(getent ahostsv4 "$target" 2>/dev/null | awk '{print $1}' | head -n 1)
     fi
+    # Не брать первый «Address:» — в выводе Windows это часто адрес DNS-сервера (192.168.x.x), а не цель.
     if [ -z "$ip" ] && command -v nslookup &>/dev/null; then
-        ip=$(nslookup "$target" 2>/dev/null | awk '/^Address: / {print $2}' | grep -v ':' | head -n 1)
+        ip=$(nslookup "$target" 2>/dev/null | awk '
+            /^Name:[[:space:]]/ { grab = 1; next }
+            grab && /^Address(es)?:[[:space:]]+[0-9]/ {
+                for (i = 2; i <= NF; i++)
+                    if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit }
+            }
+        ')
     fi
     if [ -z "$ip" ]; then
-        if $OS_MAC; then ip=$(LC_ALL=C ping -c 1 -t 1 "$target" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
-        else ip=$(LC_ALL=C ping -c 1 -W 1 "$target" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1); fi
+        local ping_out
+        if $OS_MAC; then ping_out=$(LC_ALL=C ping -c 1 -t 1 "$target" 2>/dev/null)
+        else ping_out=$(LC_ALL=C ping -c 1 -W 1 "$target" 2>/dev/null); fi
+        ip=$(printf '%s\n' "$ping_out" | sed -n 's/^PING[^(]*(\([0-9.]\{1,\}\)).*/\1/p' | head -n 1)
+        if [ -z "$ip" ]; then
+            ip=$(printf '%s\n' "$ping_out" | sed -n 's/^Pinging [[:alnum:].-]* \[\([0-9.]\{1,\}\)\].*/\1/p' | head -n 1)
+        fi
     fi
 
     if [ -z "$ip" ]; then echo ""; return 1; fi
@@ -645,19 +980,28 @@ worker() {
     local target=$1 row=$2
     local ip="" http="FAIL" t12="FAIL" t13="FAIL" lat="0ms" verdict="IP BLOCK" color="$C_RED"
 
-    local px_args=""
+    local curl_px=()
     if [[ "${PROXY_ENABLED}" == true ]] || [[ "${PROXY_ENABLED}" == "1" ]]; then
-        px_args="-x $PROXY_STR"
-        if [[ "$PROXY_TYPE" == "SOCKS5" ]]; then px_args="${px_args/socks5:\/\//socks5h:\/\/}"; fi
+        local px_url
+        px_url=$(proxy_url_for_curl "$PROXY_STR")
+        curl_px=( -x "$px_url" )
         ip="[ *PROXIED* ]"
-    else
-        ip=$(resolve_target_ip "$target") || true
-        if [ -z "$ip" ]; then echo "ERROR|FAIL|FAIL|FAIL|0ms|DNS ERROR|$C_RED" > "$TMP_DIR/$row.res"; return; fi
     fi
 
-    local http_out lat_raw
-    http_out=$(curl -s -m 2 $px_args -I "http://$target" -A "curl/7.88.1" -w "\nTIME_TOTAL=%{time_total}" 2>&1)
-    if [ $? -eq 0 ]; then
+    local http_out lat_raw rip http_ec
+    http_out=$(curl -s -m 2 "${curl_px[@]}" -I "http://$target" -A "curl/7.88.1" -w "\nREMOTE_IP=%{remote_ip}\nTIME_TOTAL=%{time_total}" 2>&1)
+    http_ec=$?
+    rip=$(printf '%s\n' "$http_out" | sed -n 's/^REMOTE_IP=//p' | tail -n 1 | tr -d '\r\n\t ')
+    if [[ "${PROXY_ENABLED}" != true ]] && [[ "${PROXY_ENABLED}" != "1" ]]; then
+        if [[ -n "$rip" ]] && [[ "$rip" != "0.0.0.0" ]] && [[ "$rip" != "::" ]]; then
+            ip="$rip"
+        else
+            ip=$(resolve_target_ip "$target") || true
+            [[ -z "$ip" ]] && ip="---"
+        fi
+    fi
+
+    if [ "$http_ec" -eq 0 ]; then
         http="OK"
         lat_raw=$(echo "$http_out" | tr ',' '.' | awk -F= '/^TIME_TOTAL=/{print $2}' | tail -n1 | tr -d '\r')
         if [[ "$lat_raw" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
@@ -671,21 +1015,58 @@ worker() {
 
     if [[ "$TLS_MODE" == "TLS13" ]]; then
         t12="---"
+        if ! $CURL_HAS_TLS13; then
+            t13="N/A"
+        else
+            local t13_out
+            t13_out=$(LC_ALL=C curl -k -s -m 3 "${curl_px[@]}" -I "https://$target" --tlsv1.3 2>&1)
+            if [ $? -eq 0 ]; then t13="OK"
+            elif echo "$t13_out" | grep -qiE "unsupported|not supported|unknown option|unrecognized option|built-in"; then t13="N/A"
+            elif echo "$t13_out" | grep -qi "reset"; then t13="RST"
+            else t13="DRP"
+            fi
+        fi
+    elif [[ "$TLS_MODE" == "TLS12" ]]; then
+        t13="---"
+        if ! $CURL_HAS_TLS_MAX; then
+            t12="N/A"
+        else
+            local t12_out
+            t12_out=$(curl -k -s -m 3 "${curl_px[@]}" -I "https://$target" --tls-max 1.2 2>&1)
+            if [ $? -eq 0 ]; then t12="OK"
+            elif echo "$t12_out" | grep -qi "reset"; then t12="RST"
+            else t12="DRP"
+            fi
+        fi
     else
-        local t12_out
-        t12_out=$(curl -k -s -m 3 $px_args -I "https://$target" --tls-max 1.2 2>&1)
-        if [ $? -eq 0 ]; then t12="OK"
+        # Auto: обе проверки TLS независимы — параллельно, чтобы не суммировать таймауты.
+        local t12_tmp="$TMP_DIR/w.${row}.12" t13_tmp="$TMP_DIR/w.${row}.13" t12_out t13_out ec12 ec13 pid12 pid13
+        if $CURL_HAS_TLS_MAX; then
+            curl -k -s -m 3 "${curl_px[@]}" -I "https://$target" --tls-max 1.2 >"$t12_tmp" 2>&1 & pid12=$!
+        else
+            : >"$t12_tmp"
+            ec12=2
+        fi
+        if $CURL_HAS_TLS13; then
+            LC_ALL=C curl -k -s -m 3 "${curl_px[@]}" -I "https://$target" --tlsv1.3 >"$t13_tmp" 2>&1 & pid13=$!
+        else
+            : >"$t13_tmp"
+            ec13=2
+        fi
+
+        if [[ -n "${pid12:-}" ]]; then wait "$pid12"; ec12=$?; fi
+        if [[ -n "${pid13:-}" ]]; then wait "$pid13"; ec13=$?; fi
+        t12_out=$(cat "$t12_tmp")
+        t13_out=$(cat "$t13_tmp")
+        rm -f "$t12_tmp" "$t13_tmp"
+
+        if ! $CURL_HAS_TLS_MAX; then t12="N/A"
+        elif [ "$ec12" -eq 0 ]; then t12="OK"
         elif echo "$t12_out" | grep -qi "reset"; then t12="RST"
         else t12="DRP"
         fi
-    fi
-
-    if [[ "$TLS_MODE" == "TLS12" ]]; then
-        t13="---"
-    else
-        local t13_out
-        t13_out=$(LC_ALL=C curl -k -s -m 3 $px_args -I "https://$target" --tlsv1.3 2>&1)
-        if [ $? -eq 0 ]; then t13="OK"
+        if ! $CURL_HAS_TLS13; then t13="N/A"
+        elif [ "$ec13" -eq 0 ]; then t13="OK"
         elif echo "$t13_out" | grep -qiE "unsupported|not supported|unknown option|unrecognized option|built-in"; then t13="N/A"
         elif echo "$t13_out" | grep -qi "reset"; then t13="RST"
         else t13="DRP"
@@ -722,13 +1103,15 @@ worker() {
     echo "$ip|$http|$t12|$t13|$lat|$verdict|$color" > "$TMP_DIR/$row.res"
 }
 
+ui_state_sig() {
+    local tg
+    tg=$(printf '%s|' "${TARGETS[@]}")
+    printf '%s' "${DNS}|${CDN}|${ISP}|${LOC}|${PROXY_ENABLED}|${PROXY_TYPE}|${PROXY_HOST}|${PROXY_PORT}|${IP_PREFERENCE}|${TLS_MODE}|${HAS_IPV6}|${tg}"
+}
+
 config_load
 
 FIRST_RUN=true
-FRAMES=("[=   ]" "[ =  ]" "[  = ]" "[   =]" "[  = ]" "[ =  ]")
-# Кадры анимации строки LAT во время ожидания результата.
-LAT_WAVE=("=     " "==    " "===   " " ===  " "  === " "   ===" "  === " " ===  " "===   " "==    ")
-f=0
 
 while true; do
     if $FIRST_RUN; then
@@ -774,12 +1157,19 @@ while true; do
         out_str 2 $UI_Y 121 "[ SUCCESS ] SAVED: $(pwd)/$LOG" "$C_GRN"; flush_buffer
         sleep 2; out_str 2 $UI_Y 121 "$NAV_STR" "$C_WHT"; flush_buffer
 
-    elif [[ -z "$key" && $READ_STATUS -eq 0 ]]; then
+    elif [[ "$key" == $'\n' || "$key" == $'\r' ]] || [[ $READ_STATUS -eq 0 && -z "$key" ]]; then
+        old_sig=""
+        new_sig=""
+        old_sig=$(ui_state_sig)
         out_str 2 $UI_Y 121 "[ WAIT ] REFRESHING NETWORK STATE..." "$C_CYA"; flush_buffer
         get_network_info
         rebuild_targets
+        new_sig=$(ui_state_sig)
 
-        draw_ui; UI_Y=$((12 + ${#TARGETS[@]} + 1))
+        if [[ "$new_sig" != "$old_sig" ]]; then
+            draw_ui
+            UI_Y=$((12 + ${#TARGETS[@]} + 1))
+        fi
         out_str 2 $UI_Y 121 "$NAV_SCAN" "$C_YEL"; flush_buffer
 
         rm -f "$TMP_DIR"/*.res
@@ -792,16 +1182,17 @@ while true; do
             row=$((12 + i))
             out_str $X_VER $row $W_VER "PREPARING..." "$C_GRY"
             JOB_STATE[$i]=1
+            if (( SCAN_MAX_JOBS > 0 )); then
+                while (( $(jobs -pr 2>/dev/null | wc -l) >= SCAN_MAX_JOBS )); do
+                    wait -n 2>/dev/null || sleep 0.05
+                done
+            fi
             worker "${TARGETS[$i]}" "$row" < /dev/null &
         done
         flush_buffer
 
         aborted=false
         while [ $ACTIVE_JOBS -gt 0 ]; do
-            ((f++))
-            should_draw_anim=false
-            if (( f % ANIM_EVERY == 0 )); then should_draw_anim=true; fi
-
             read -t $READ_TIMEOUT -n 1 -s inkey
             if [[ "$inkey" == "q" || "$inkey" == "Q" || "$inkey" == "й" || "$inkey" == "Й" || "$inkey" == $'\e' ]]; then aborted=true; break; fi
 
@@ -827,13 +1218,6 @@ while true; do
 
                     JOB_STATE[$i]=0
                     ((ACTIVE_JOBS--))
-                else
-                    if $should_draw_anim; then
-                        anim_idx=$(( (f + row) % 6 ))
-                        wave_idx=$(( f % ${#LAT_WAVE[@]} ))
-                        out_str $X_VER $row $W_VER "SCANNING ${FRAMES[$anim_idx]}" "$C_CYA"
-                        out_str $X_LAT $row $W_LAT "${LAT_WAVE[$wave_idx]}" "$C_CYA"
-                    fi
                 fi
             done
             if [[ -n "$FRAME_BUFFER" ]]; then flush_buffer; fi
