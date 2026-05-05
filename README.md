@@ -1,5 +1,6 @@
 # YT-DPI
-![GitHub Release](https://img.shields.io/badge/release-2.3.1-green)
+![GitHub Release (Windows)](https://img.shields.io/badge/Windows%20.ps1-2.3.2-green)
+![GitHub Release (Bash)](https://img.shields.io/badge/Bash%20.sh-2.3.2-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 [![Telegram Channel](https://img.shields.io/badge/Telegram-blue)](https://t.me/YT_DPI)
 [![Поддержать проект](https://img.shields.io/badge/%D0%9F%D0%BE%D0%B4%D0%B4%D0%B5%D1%80%D0%B6%D0%B0%D1%82%D1%8C%20%D0%B0%D0%B2%D1%82%D0%BE%D1%80%D0%B0-blue)](https://spasibomir.ru/pay/31732)
@@ -9,9 +10,30 @@
 
 ![Preview](https://raw.githubusercontent.com/Shiperoid/YT-DPI/refs/heads/master/img/YT-DPI-v2.2.3.png)
 
-## Что нового в v2.3.1 (кратко)
+## Что нового в v2.3.2 (Windows, кратко)
 
-* **Hotfix:** на **Windows PowerShell 5.1** снова корректно компилируется встроенный C# (TLS и трассировка); в **2.3.0** у части пользователей ломался скан по **Enter** и показывалась ошибка загрузки TLS. Подробности — [CHANGELOG_ru.md](CHANGELOG_ru.md#yt-dpi-v231-hotfix).
+* **Скорость скана и Deep Trace.** Все таймауты вынесены в единую таблицу `$SCRIPT:CONST` ([`YT-DPI.ps1`](YT-DPI.ps1)) и снижены примерно в 2–3 раза: `TimeoutMs 1500 → 700`, `ProxyTimeout 2500 → 1200`, `Mutex 15000 → 7000`, TLS fast `1600 → 800` (direct) / `2200 → 1200` (proxy), Deep Trace `5s → 2s` и т.п. Логика **retry** с увеличенным таймаутом сохранена — на медленных каналах ложных вердиктов не прибавилось.
+* **Меньше нагрузки на консоль.** Троттлинг строки прогресса в фазе сбора `240 → 90 ms`, в фазе «водопада» `280 → 110 ms`; для «водопада» отдельный `RevealAnimFps = 48` поверх общего `AnimFps = 30`.
+* **Параллельный первый проход TLS (опц., по умолчанию ВЫКЛ).** Новый пункт **6** в меню `[S]`: одновременная первая проба TLS 1.3 и TLS 1.2 через `Tasks.Task`. При сбое — автоматический откат на последовательный путь без ложного `IP BLOCK`. Поведение по умолчанию **не меняется**, для PS 5.1 сохранён проверенный последовательный режим.
+* **«Двусторонний» вердикт в одиночных режимах TLS.** В `TlsMode = TLS12`/`TLS13`, если основная колонка показала `RST`/`DRP`, скрипт теневым проходом проверяет другую версию TLS и выдаёт корректный `THROTTLED` / `DPI RESET` / `DPI BLOCK`/`AVAILABLE` (вместо плоского `DPI BLOCK`).
+* **Внутренние хелперы.** TLS 1.2 handshake и логика вердикта свёрнуты в `Invoke-Tls12HandshakeOnce` и `Set-Verdict-DualTlsCells` — единая точка для исправлений.
+* **Совместимость.** Конфиги старых версий читаются как раньше (новые поля добавляются миграцией с «безопасными» значениями ВЫКЛ). Полная совместимость с PS 5.1 и PS 7 проверяется `release-gate` (см. ниже).
+* Подробный разбор — [CHANGELOG_ru.md](CHANGELOG_ru.md#yt-dpi-v232-windows-yt-dpips1--yt-dpibat).
+
+## Что нового в v2.3.2 (Bash, кратко)
+
+Bash выпущен в том же релизе **2.3.2**, что и Windows‑версия (`YT-DPI.ps1`), с единым номером версии в обоих файлах.
+
+* **Параллельные TLS 1.2 + TLS 1.3 в Auto.** Внутри воркера обе пробы запускаются одновременно — на цель уходит максимум одного таймаута, а не их сумма.
+* **Лимит фоновых воркеров `SCAN_MAX_JOBS`** (env‑override `YT_DPI_MAX_JOBS`): авто `12` для Git Bash/MSYS, `6` для OpenWrt/Entware, `0` (без лимита) для Linux/macOS. Слабые роутеры больше не получают залп из 25 одновременных `curl`.
+* **Кросс‑скриптовый кэш гео `~/.config/yt-dpi/geo_cache.json`** (тики `.NET` совместимы с PS1) и **цепочка GEO‑провайдеров** `ip-api.com → ifconfig.co → ipapi.co → ipwhois.app → ipinfo.io` с нормализацией ISP. Повторный старт мгновенный.
+* **Надёжный `detect_local_dns`:** macOS `scutil`, Linux `resolvectl`/`nmcli`/`/run/systemd/resolve/resolv.conf`, OpenWrt `uci`, Android/Termux `getprop`, Windows Git Bash `ipconfig.exe /all` (с фильтром `127.*` и `169.254.*`). Раньше брался первый `nameserver` из `/etc/resolv.conf` и часто отдавал stub `127.0.0.53`.
+* **Резолв CDN как в PS1** — через `redirector.googlevideo.com/report_mapping` (вместо ненадёжных пробивок `r1..r3`/`rr1..rr5`).
+* **Capability‑детект `curl`** на старте (`--tlsv1.3`, `--tls-max`, `socks5h://`): на busybox‑curl (Entware/OpenWrt) соответствующие колонки покажутся `N/A`, а не упадут в `DRP`/`FAIL`.
+* **TUI без «зависших» строк ANSI.** `tui_enter` / `tui_leave` для меню Help / Settings / Proxy / Test, перерисовка по сигнатуре (`ui_state_sig`) — на повторном `[Enter]` экран не моргает.
+* **REMOTE_IP из `curl`** (`-w "%{remote_ip}"`), корректный парсинг `nslookup` (с пропуском адреса DNS‑сервера), `ping6` с разными флагами под macOS/Linux, IPv6‑детект против `cloudflare.com` **и** `ipv6.google.com` (раньше ложно «нет IPv6», когда HTTPS к Google заблокирован).
+* **Engine‑метка** `Barebuh Pro v2.3.4` → `v2.3.7` (внутренний номер ядра, не влияет на формат отчёта/конфига).
+* Подробности — [CHANGELOG_ru.md](CHANGELOG_ru.md#yt-dpi-v232-bash-yt-dpish).
 
 ## Что нового в v2.3.0 (кратко)
 
@@ -21,9 +43,9 @@
 * **Прокси:** снимок настроек и **откат** при неудачном полном тесте.
 * **Отладка:** `YT-DPI_Debug.log` из меню **[S]** или **`YT_DPI_DEBUG`**, mutex между процессами/runspace’ами; по умолчанию обезличенный заголовок лога (полные ПК/пути — опционально).
 * **Bash (`YT-DPI.sh`):** те же горячие клавиши при **русской раскладке** (физические клавиши, соответствующие Q/H/S/P/T/R).
-* **Релиз:** [Releases](https://github.com/Shiperoid/YT-DPI/releases) — для Windows нужны **`YT-DPI.bat`** и **`YT-DPI.ps1`** в одной папке; см. [v2.3.1](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.1) (или последний тег).
+* **Релиз:** [Releases](https://github.com/Shiperoid/YT-DPI/releases) — для Windows нужны **`YT-DPI.bat`** и **`YT-DPI.ps1`** в одной папке; см. [v2.3.2](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.2) (или последний тег линии **`2.3.x`**).
 
-Полный разбор от последнего опубликованного **v2.2.3** — [CHANGELOG_ru.md](CHANGELOG_ru.md#yt-dpi-v230) (внутри блока **v2.3.0** пункты сгруппированы: добавлено / обновлено / исправлено / производительность; черновик **2.2.4** не выпускался — см. ввод там).
+Полный разбор изменений релиза **v2.3.2** для Windows и Bash — [CHANGELOG_ru.md](CHANGELOG_ru.md#yt-dpi-v232-windows-yt-dpips1--yt-dpibat). Историческая база релиза 2.3.0 сохранена ниже в файле.
 
 ## Проверки перед релизом (`release-gate`)
 
@@ -62,7 +84,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\release-gate.ps1
 
 ### Windows — `YT-DPI.bat` и `YT-DPI.ps1`
 
-1. Скачайте **`YT-DPI.bat`** и **`YT-DPI.ps1`** со [страницы релиза v2.3.1](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.1) (или последнего релиза) и положите **в одну папку**.
+1. Скачайте **`YT-DPI.bat`** и **`YT-DPI.ps1`** со [страницы релиза v2.3.2](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.2) (или последнего релиза) и положите **в одну папку**.
 2. Если у вас остался только старый монолитный **`YT-DPI.bat`**, замените его новым лаунчером из релиза и добавьте **`YT-DPI.ps1`** (или удалите старый `.bat` и распакуйте оба файла заново).
 3. По желанию используйте отдельную папку — рядом могут появиться служебные файлы (кэш в `%LOCALAPPDATA%`, отчёт `YT-DPI_Report.txt` при сохранении).
 4. **Права администратора** не обязательны для сканирования; для **Deep Trace** и части сетевых операций они могут понадобиться (скрипт подскажет в справке **[H]**).
@@ -70,11 +92,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\release-gate.ps1
 
 ### Linux, macOS, Git Bash, Entware — `YT-DPI.sh`
 
-1. Скачайте **`YT-DPI.sh`** с той же [страницы релиза](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.1) (или последнего тега).
+1. Скачайте **`YT-DPI.sh`** со [страницы релиза v2.3.2](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.2) (или последнего релиза).
 2. **Зависимости:**
    - **`bash`** (желательно **4+**; на Bash 3 скрипт запустится, но таймауты чтения клавиш будут грубее).
-   - **`curl`** и **`awk`** — обязательны (проверка при старте).
-   - **`jq`** — *необязателен*; без него скрипт работает, но **не читает и не пишет** `~/.config/yt-dpi/config.json` (настройки прокси, IPv4/IPv6, TLS и история между запусками не сохраняются). С установленным `jq` формат конфига совместим с Windows-версией по основным полям.
+   - **`curl`** и **`awk`** — обязательны (проверка при старте). На **busybox‑curl** (Entware/OpenWrt и часть роутерных прошивок) скрипт **тоже работает**: если `--tls-max` или `socks5h://` не поддерживаются, соответствующие колонки отметятся как `N/A`, а не упадут в `DRP`/`FAIL`.
+   - **`jq`** — *необязателен*; без него скрипт работает, но **не читает и не пишет** `~/.config/yt-dpi/config.json` и **не использует** кросс‑скриптовый кэш гео `~/.config/yt-dpi/geo_cache.json`. С установленным `jq` формат конфига и формат кэша гео совместимы с Windows‑версией по основным полям.
 3. Сделайте файл исполняемым и запустите из терминала не меньше **≈120×30** символов (иначе таблица может «ехать»):
    ```bash
    chmod +x YT-DPI.sh
@@ -84,9 +106,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\release-gate.ps1
 5. **macOS:** нужен `curl` из системы или Homebrew; для стабильного TLS 1.3 убедитесь, что `curl` собран с подходящим SSL (обычно так и есть на актуальных macOS).
 6. **Entware / OpenWrt:** установите пакеты **`bash`**, **`curl`**, **`coreutils`** (для `mktemp` и пр.), при необходимости **`jq`**. Запуск: `/path/to/YT-DPI.sh` или из `screen`/`tmux`, если SSH-сессия обрывается. Скрипт ищет `bash` в `PATH`, `/opt/bin/bash` и через `/opt/bin/env`.
 7. **Роутеры без Entware (в т.ч. ASUSWRT/Merlin со штатным busybox):** нужны **полноценный Bash** и нормальный **`curl`**; на «урезанном» busybox возможны долгие паузы на старте и на шагах вроде `[ WAIT ] REFRESHING NETWORK STATE...` до установки **bash** из пакетов. После старта сетевой проход по целям у многих пользователей остаётся быстрым; тяжесть сильно зависит от CPU и DNS.
-8. **Запуск одной строкой (нужен Bash):** скачать скрипт с конкретного тега и сразу выполнить (подставьте нужный тег, например **2.3.1**):
+8. **Запуск одной строкой (нужен Bash):** скачать скрипт с конкретного тега и сразу выполнить (например **2.3.2**):
    ```bash
-   bash <(curl -Ls "https://raw.githubusercontent.com/Shiperoid/YT-DPI/2.3.1/YT-DPI.sh")
+   bash <(curl -Ls "https://raw.githubusercontent.com/Shiperoid/YT-DPI/2.3.2/YT-DPI.sh")
    ```
 9. Отличия от **`.bat`**: в этой редакции **нет** встроенного **Deep Trace** и автообновления с GitHub по клавише **[U]**; в нижней строке меню есть **[T] TEST** для проверки прокси. Выход — **[Q]**.
 

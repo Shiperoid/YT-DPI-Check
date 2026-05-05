@@ -105,7 +105,7 @@ fi
 
 E=$'\033'
 
-SCRIPT_VERSION="2.2.5"
+SCRIPT_VERSION="2.3.2"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/yt-dpi"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 GEO_CACHE_FILE="$CONFIG_DIR/geo_cache.json"

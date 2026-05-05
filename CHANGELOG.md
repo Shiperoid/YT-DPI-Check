@@ -1,3 +1,147 @@
+# YT-DPI v2.3.2 (Windows: `YT-DPI.ps1` + `YT-DPI.bat`)
+
+**Сравнение в Git:** [2.3.1…2.3.2](https://github.com/Shiperoid/YT-DPI/compare/2.3.1...2.3.2) (после публикации тега `2.3.2`; до тега — [2.3.1…master](https://github.com/Shiperoid/YT-DPI/compare/2.3.1...master)).
+
+Релиз сосредоточен на **скорости скана**, **снижении нагрузки на консоль** и **внутреннем рефакторинге** TLS‑логики. Все таймауты вынесены в один блок констант `$SCRIPT:CONST` — там же видны старые значения в комментариях «Снижено с …», поэтому при необходимости можно вернуться к консервативным таймингам, поправив одну таблицу.
+
+### Быстрее (главное в этом релизе)
+
+Массовое снижение таймаутов и пауз через **единую таблицу** `$SCRIPT:CONST` ([`YT-DPI.ps1`](YT-DPI.ps1), верхний блок):
+
+* **Базовые сетевые:** `TimeoutMs` **1500 → 700**, `ProxyTimeout` **2500 → 1200**, `Mutex.WaitMs` **15000 → 7000**.
+* **Скан:** `HttpDirectCapMs` **1200 → 600**, `TlsFastMsDirect` **1600 → 800**, `TlsFastMsProxy` **2200 → 1200**, `TlsRetryMsDirect/ProxyFloor` **2600 → 1300**.
+* **NetInfo (определение ISP/CDN/DNS):** `WebFastDefaultMs` **3000 → 1000**, `RedirectorMs` **2000 → 700**, `GeoPerRequestMs` **1500 → 500**, `Ipv6ProbeWaitMs` **1000 → 350**, `RedirectorRequestMs` **3000 → 700**.
+* **Deep Trace:** `DefaultTimeoutSec` **5 → 2**, `HopTcpTlsTimeoutSec` **2 → 1**, `HopTlsCapMs` **3000 → 1200**, `HopTcpCapMs` **2000 → 800**, `TracertHopWaitMs` **350 → 120**, `TraceProcessKillMsBase` **12000 → 5000**, `TraceProcessKillMsPerHop` **1400 → 400**, `TcpPollSliceMs` **90 → 40**, `UdpRecvPollMs` **1000 → 300**.
+* **Самотест прокси `[T]`:** `Tunnel443Ms` **7000 → 2000**, `HttpGstaticMs` **5000 → 1300**, `TcpToProxyMs` **4000 → 1500**, `QuickTunnelMs` **5000 → 2000**, `DetectTcpConnectMs` **2000 → 700**, `DetectStreamRwMs` **2000 → 800**, `HttpSlowWarnMs` **4800 → 1500**; внутренние паузы между фазами `120/150/200ms → 60/60/80ms`.
+* **Internet probe (перед сканом):** `PingTimeoutMs` **1000 → 400**, `TcpFallbackMs` **1000 → 400**.
+* **HTTP misc через прокси:** `GitHubReleaseApiMs` **5000 → 1500**, `RedirectorViaProxyMs` **3000 → 1200**, `GeoProviderViaProxyMs` **1500 → 500**.
+
+**Что это даёт на практике.** На стабильном интернете весь скан и Deep Trace заметно быстрее «холодным» прогоном. Логика **retry с увеличенным таймаутом сохранена**: если первый быстрый проход TLS даёт `DRP`, скрипт автоматически повторяет с увеличенным окном (`TlsRetryMsDirect/ProxyFloor`) — ложных вердиктов на медленных каналах не прибавилось.
+
+### Меньше нагрузки на консоль и плавнее анимация
+
+* **Троттлинг строки прогресса в фазе сбора результатов:** `StatusBarThrottleCollectMs` **240 → 90 ms** — показатель `[X/Y]` теперь обновляется заметно быстрее без перерисовки таблицы.
+* **Троттлинг в фазе «водопада»:** `StatusBarThrottleRevealMs` **280 → 110 ms**.
+* **Отдельный FPS «водопада»:** `RevealAnimFps = 48` (общий `AnimFps = 30` остался для остальной анимации). Ровные кадры при выводе уже готовых строк.
+
+### Добавлено
+
+* **Параллельный первый проход TLS (эксперимент, по умолчанию ВЫКЛ).** Новый пункт **6** в меню **`[S]`**: «Параллельный первый проход TLS (Auto, T13+T12)». В Auto‑режиме первая проба `TLS 1.3` и `TLS 1.2` идёт одновременно через `[System.Threading.Tasks.Task]::Run`, не суммируя таймауты. При сбое `Task.WaitAll` (PS5.1, нестандартный SynchronizationContext и т.п.) — **автоматический откат** на последовательный путь без ложного `IP BLOCK`. Конфиг‑поле `ScanParallelTlsFirstPass` хранится между запусками.
+* **Принудительный сброс «сломанного» эксперимента в существующих конфигах.** Новая миграция `Initialize-DisableBrokenParallelTlsTasks` ставит метку `ParallelTlsTasksDisabled032026 = true` и принудительно `ScanParallelTlsFirstPass = false` при первом запуске **2.3.2** — у пользователей с поломанным значением флаг гарантированно начнёт жизнь с «ВЫКЛ».
+* **«Двусторонний» вердикт в одиночных режимах TLS.** В режимах `TlsMode = TLS12` и `TlsMode = TLS13`, если основная колонка показала `RST`/`DRP`, скрипт **тихо** (без вывода в таблицу) проверяет другую версию TLS и присваивает корректный вердикт: `THROTTLED`, `AVAILABLE`, `DPI RESET` или `DPI BLOCK`. Раньше в одиночных режимах вердикт сводился к плоскому `DPI BLOCK`/`AVAILABLE`. Описание поведения добавлено в подсказки пунктов **3** меню `[S]`.
+* **Хелперы `Set-Verdict-DualTlsCells` и `Invoke-Tls12HandshakeOnce`.** Логика вердикта и handshake TLS 1.2 вынесены в отдельные функции внутри воркера — единая точка для исправлений.
+* **`CONST`‑параметры пула воркеров.** `ScanPoolMinWorkers = 8`, `ScanPoolDirectMax = 24`, `ScanPoolProxyMax = 12`, `ScanPoolCpuMultiplier = 3`. Поведение прежнее (`8…24`, при прокси `≤ 12`, не больше числа целей), но теперь крутится через таблицу констант.
+
+### Обновлено
+
+* **`Worker` принимает `[bool]$ParallelTlsFirstPass`.** `Start-ScanWithAnimation` пробрасывает текущее значение из конфига в каждый runspace — без этого новая опция меню была бы «декоративной».
+* **Все ранее «зашитые» лимиты** — `15000` ms у mutex, `1200/1600/2200/2600` ms TLS, `240/280` ms UI‑троттлинг — читаются из `$CONST`. Единая точка для тюнинга и тестов.
+* **Фоновое задание `Start-QuickNetInfoUpdater`** теперь принимает `mutexWaitMs` параметром (передаётся из `$CONST.Mutex.WaitMs`); внутри job‑скриптблока больше нет «магической» `15000`.
+* **Описание режимов TLS в меню `[S]`** переписано: явно показано, что в `TLS12`/`TLS13` теневая проверка другой версии используется **только** для уточнения вердикта, а соответствующая колонка остаётся `N/A`.
+
+### Исправлено
+
+* **Дубликат TLS 1.2 handshake** (Auto / TLS12 / retry) свёрнут в `Invoke-Tls12HandshakeOnce`. Ранее три похожих блока с `BeginAuthenticateAsClient`/`AsyncWaitHandle` могли немного расходиться по набору `catch`‑паттернов («reset / сброс / forcibly / closed / разорвано / failed»), теперь единый источник правды.
+* **Логика вердикта в Auto** свёрнута в `Set-Verdict-DualTlsCells` — раньше она дублировалась тремя ветками (`-not consider13`, `-not consider12`, оба), теперь правится в одном месте.
+
+### Совместимость
+
+* **Поведение по умолчанию не меняется.** Первый проход TLS остаётся **последовательным** (T13 → T12) — это проверенная ветка для **Windows PowerShell 5.1**. Параллельный путь включается **только** через **`[S] → 6`** и сохраняется в конфиге.
+* **Существующие `config.json`** читаются без миграции; новые поля `ScanParallelTlsFirstPass` и метка `ParallelTlsTasksDisabled032026` добавляются автоматически со значениями «ВЫКЛ» / `true`.
+* Никакого изменения внешнего API: формат отчёта **`YT-DPI_Report.txt`**, протоколы прокси (HTTP/SOCKS5), формат `YT-DPI_Debug.log` — всё прежнее.
+* **Совместимо с PS 5.1 и PS 7.** Для проверки именно сборки `Add-Type` встроенных C#‑блоков по матрице PS перед релизом прогоняется `release-gate` (см. ниже и **[README.md](README.md)**).
+
+### Проект
+
+* Расширен скрипт **[`tools/release-gate.ps1`](tools/release-gate.ps1)** и добавлены вспомогательные:
+  * **[`tools/release-gate.cmd`](tools/release-gate.cmd)** и **[`tools/release-gate-quick.cmd`](tools/release-gate-quick.cmd)** — CMD‑обёртки для запуска без знания PowerShell‑параметров.
+  * **[`tools/release-gate-addtype.ps1`](tools/release-gate-addtype.ps1)** — извлекает `$tlsCode` / `$traceCode` here‑string из `YT-DPI.ps1` и вызывает `Add-Type` в указанном PowerShell‑процессе.
+  * **[`tools/smoke-yt-dpi-engines.ps1`](tools/smoke-yt-dpi-engines.ps1)** — пост‑компиляционный smoke (AST + короткие паттерны runspace).
+  * **[`tools/smoke-yt-dpi-sh.sh`](tools/smoke-yt-dpi-sh.sh)** — `bash -n` для `YT-DPI.sh` (синтаксический smoke в CI).
+* **CI:** workflow [`.github/workflows/release-gate.yml`](.github/workflows/release-gate.yml) теперь использует `paths`‑фильтр на `push`, а `pull_request` идёт без фильтра — required‑чек больше не «висит» в ожидании.
+
+### Как обновиться с 2.3.1
+
+* Запускайте **`YT-DPI.bat`** (он задаёт `-ExecutionPolicy Bypass`).
+* Внутри программы нажмите **`[U] UPDATE`**, когда GitHub отдаст релиз `2.3.2` как «последний». Файл `YT-DPI.bat` и/или `YT-DPI.ps1` обновятся через временные процессы; вторая часть комплекта докачается рядом.
+* Либо вручную возьмите оба файла со страницы [Releases](https://github.com/Shiperoid/YT-DPI/releases) и положите в одну папку.
+
+---
+
+---
+
+# YT-DPI v2.3.2 (Bash, `YT-DPI.sh`)
+
+**Базис сравнения:** `YT-DPI.sh` из релиза **`2.3.1`** → `YT-DPI.sh` версии **`2.3.2`**. Внутренний движок повышен: **`Barebuh Pro v2.3.4` → `v2.3.7`**.
+
+Главное в релизе — **параллельная и более экономная Bash‑реализация**: одновременные TLS 1.2/1.3, лимит фоновых воркеров для слабых роутеров, кросс‑скриптовый кэш гео и нормальный многоплатформенный детектор локального DNS.
+
+### Параллелизм и производительность
+
+* **Лимит фоновых воркеров** `SCAN_MAX_JOBS` (env‑override `YT_DPI_MAX_JOBS`): авто **`12`** для Git Bash/MSYS, **`6`** для OpenWrt/Entware (по эвристикам `/jffs`, `/overlay`, `/rom`, `OPENWRT_RELEASE`, `/opt/etc/opkg`), **`0`** (без лимита) для обычных Linux/macOS. Цикл скана дожидается освобождения слота через `wait -n` — слабые роутеры больше не получают залп из 25 одновременных `curl`.
+* **Параллельные TLS 1.2 + TLS 1.3 в Auto.** Внутри воркера обе пробы идут одновременно `&` + `wait $pid12 / $pid13`, не суммируя таймауты. Раньше шли последовательно — на каждую цель уходило `tls12_timeout + tls13_timeout`.
+* **Удалена анимация `SCANNING …` / волны LAT.** Кадры `FRAMES` / `LAT_WAVE` / счётчик `f` / `ANIM_EVERY` убраны — больше не перерисовываем целевые строки на каждом тике; вместо этого один статический `PREPARING…`, и строка обновляется по факту прихода `*.res`. На роутерах и в Git Bash «лесенки» в строке LAT исчезают, а CPU‑нагрузка падает.
+* **Перерисовка по сигнатуре.** Новая функция `ui_state_sig` собирает «отпечаток» состояния (DNS / CDN / ISP / LOC / прокси / IPv6 / цели / IP‑pref / TLS‑mode); после `[Enter]` `draw_ui` вызывается **только если** отпечаток изменился — нажатия Enter подряд больше не моргают полным переисованием.
+* **`READ_TIMEOUT` для MSYS** поднят до `0.2 s` (env `YT_DPI_READ_TIMEOUT`) — без анимации цикл не нужно так часто будить.
+
+### Добавлено
+
+* **Кросс‑скриптовый кэш гео** `~/.config/yt-dpi/geo_cache.json`. Тики `.NET` совместимы по формату с `YT-DPI.ps1` — общий кэш ISP/LOC. TTL 24 часа, ключ — состояние прокси (`direct` либо `TYPE|HOST:PORT`). Повторный старт мгновенный, меньше внешних запросов.
+* **Цепочка GEO‑провайдеров (как в `Get-NetworkInfo` PS1):** `ip-api.com → ifconfig.co → ipapi.co → ipwhois.app → ipinfo.io`, с нормализацией ISP `_strip_isp_suffix` (отрезает `LLC`, `Inc`, `Ltd`, `OOO`, `JSC`, `Group`, `Corporation`, …). Цепочка работает только при наличии **`jq`**; без `jq` остаётся прежний fallback на `ip-api.com/line/`.
+* **Надёжное определение локального DNS (`detect_local_dns`):**
+  * **macOS** — `scutil --dns`, первый `nameserver[N]`;
+  * **Linux с systemd‑resolved** — `resolvectl status` (`Current DNS Server` → `DNS Servers`), затем `/run/systemd/resolve/resolv.conf` (раньше отдавал stub `127.0.0.53`);
+  * **NetworkManager** — `nmcli dev show`, поле `IP4.DNS`;
+  * **OpenWrt** — `uci get network.wan.dns` / `network.@dnsmasq[0].server`;
+  * **Android / Termux** — `getprop net.dns1` / `dhcp.wlan0.dns1`;
+  * **Windows Git Bash / MSYS / Cygwin** — `ipconfig.exe /all` через `MSYS2_ARG_CONV_EXCL`, с фильтром `169.254.*` и `127.*`;
+  * **Общий `/etc/resolv.conf`** как последний fallback.
+* **Резолв CDN как в PS1.** Теперь дёргается `redirector.googlevideo.com/report_mapping?di=no&nocache=…`, разбирается короткий код (`=> <short>`) и складывается `r1.<short>.googlevideo.com` (или полный `*.googlevideo.com`). Раньше пробивались статические префиксы `r1..r3`, `rr1..rr5` через `getent`/`nslookup` — у многих провайдеров это не работало (без рабочего обратного резолва).
+* **Capability‑детект curl на старте.** Флаги `CURL_HAS_TLS13` (`--tlsv1.3`), `CURL_HAS_TLS_MAX` (`--tls-max`), `CURL_HAS_SOCKS5H` (`socks5h://`) определяются по `curl --help all`. Если флага нет — соответствующая колонка показывается как `N/A`, а не как `DRP`/`FAIL`. Решает типичный сценарий с busybox‑curl на роутерах.
+* **`proxy_url_for_curl`** — корректное преобразование `socks5://` ↔ `socks5h://` **только** если curl поддерживает `socks5h` (иначе оставляем `socks5://`, чтобы не получить «scheme not supported»).
+* **Полный TUI‑стек:** `tui_enter` / `tui_leave`, переход в alt‑screen только при TTY, корректный `cleanup` (не падает при пустом `TMP_DIR`). Меню Help / Settings / Proxy / Test теперь явно вызывают `tui_leave` при входе и `tui_enter` при выходе — после возврата нет «зависших» строк ANSI.
+* **`REMOTE_IP` из curl.** В HTTP‑пробе передаётся `-w "%{remote_ip}"`, IP цели берётся из реального соединения. Resolver вызывается только если `REMOTE_IP` пустой / `0.0.0.0` / `::`.
+* **Корректный парсинг `nslookup` в `resolve_target_ip`.** Проход по блокам `Name:` → `Address(es): IPv4`, а не по первому `Address:` (последний под Windows‑Git‑Bash часто отдавал адрес DNS‑сервера, а не цели). Резерв через `ping` теперь читает и Linux‑формат `PING host (1.2.3.4)`, и Windows‑формат `Pinging host [1.2.3.4]`.
+* **IPv6‑детект.** `ping6` с разным набором флагов под macOS/Linux + `curl -6` к **`cloudflare.com`** **и** `ipv6.google.com`. Раньше пробивался только `ipv6.google.com` — у пользователей с заблокированной TLS 1.3 к Google скрипт ошибочно решал «нет IPv6».
+* **Меню прокси:** информативное сообщение, если запросили несуществующую запись истории (раньше тихо ничего не происходило). Все ветки меню парные по `tui_leave` / `tui_enter`.
+* **Обновлён движок** в баннере: `Barebuh Pro v2.3.4` → **`v2.3.7`**.
+* **Подровнен пробел** в строке HELP: `THROTTLED    ` → `THROTTLED     ` — теперь столбцы помощника ровные.
+
+### Убрано
+
+* **Кадры анимации** `FRAMES` / `LAT_WAVE` / `ANIM_EVERY`, счётчик `f` и связанные `out_str` каждый тик. Они стоили дороже, чем давали — при параллельных проверках и быстром приходе результатов анимация только мешала.
+* **Массив `CDN_LIST`** — заменён на одиночный `CDN`, как в PS1.
+* **Жёстко зашитый wrapper `/usr/bin/curl`.** Теперь используется `command -v curl` и переменная `CURL_BIN`. Работает там, где curl лежит в `/opt/bin/` (Entware), `/usr/local/bin/` (macOS Homebrew), MSYS‑путях.
+* **Наивный `grep nameserver /etc/resolv.conf | head -1`** — заменён полноценным `detect_local_dns`.
+
+### Исправлено
+
+* **Меню Help / Settings / Proxy / Test** больше не оставляют alt‑буфер «полуоткрытым» при возврате — экран не «прыгает» и не печатает поверх рамки.
+* **macOS:** `ping6` без `-W` (Darwin использует другой ключ), отдельная ветка детекта `OS_MAC`.
+* **Пустой `TMP_DIR`** больше не передаётся в `rm -rf` в `cleanup` (защита от ранних ошибок до `mktemp`).
+* **`nslookup` под Windows‑Git‑Bash** больше не возвращает адрес DNS‑сервера как «найденный IP» цели.
+* **Усечение ISP до 30 символов** теперь делается **в одном месте** (`get_network_info`), а не в `get_network_info` и `draw_ui` параллельно с разной длиной.
+
+### Совместимость
+
+* **busybox‑curl на Entware/OpenWrt** без `--tls-max` или `socks5h://` поддержан корректно: соответствующие колонки покажут `N/A`, а не `DRP`/`FAIL`. Сам скан на таких прошивках теперь не «ломается».
+* **Профиль `MSYSTEM` (Git Bash)** подхватывается автоматически: лимит воркеров `12`, повышенный `READ_TIMEOUT`.
+* **Конфиг `~/.config/yt-dpi/config.json`** со старых версий читается без миграции (нужен `jq`); кэш гео — отдельный файл `geo_cache.json` рядом, ничего не пересекается.
+* **Engine `v2.3.7`** в баннере — это **внутренний** номер ядра обработки; на формат `YT-DPI_Report.txt`, `config.json` и поведение CLI это не влияет.
+* **Bash 3 / Bash 4+:** работают оба, на Bash 3 точные таймауты `read` грубее (`READ_TIMEOUT="1"`), как и раньше.
+
+### Релиз на GitHub (v2.3.2)
+
+Для Linux / macOS / Git Bash / Entware скачайте **`YT-DPI.sh`** со [страницы релиза v2.3.2](https://github.com/Shiperoid/YT-DPI/releases/tag/2.3.2) (или последнего релиза).
+
+Запуск одной строкой (нужен `bash`):
+
+```bash
+bash <(curl -Ls "https://raw.githubusercontent.com/Shiperoid/YT-DPI/2.3.2/YT-DPI.sh")
+```
+
+---
+
 # YT-DPI v2.3.1 (hotfix)
 
 **Сравнение в Git:** [2.3.0…2.3.1](https://github.com/Shiperoid/YT-DPI/compare/2.3.0...2.3.1) (после публикации тега `2.3.1`).
