@@ -28,7 +28,7 @@ if ($script:AllowInsecureTls) {
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 [System.Net.ServicePointManager]::DefaultConnectionLimit = 100
 
-$scriptVersion = "2.3.2"   # текущая версия yt-dpi
+$scriptVersion = "2.3.3"   # текущая версия yt-dpi
 # ===== ОТЛАДКА =====
 $debugEnvRaw = [System.Environment]::GetEnvironmentVariable("YT_DPI_DEBUG", "Process")
 if (-not $debugEnvRaw) { $debugEnvRaw = [System.Environment]::GetEnvironmentVariable("YT_DPI_DEBUG", "User") }
@@ -153,22 +153,42 @@ function Test-DebugLogWriteFullIdentifiers {
 
 function Get-DebugHudTail {
     param([int]$maxLen = 0)
+
+    # Определяем редакцию (Core / Desktop) и версию PowerShell
     $edition = if ($PSVersionTable.PSEdition) { [string]$PSVersionTable.PSEdition } else { 'Desktop' }
+    $version = $PSVersionTable.PSVersion.ToString()  # например "7.6.2" или "5.1.19041.1"
+    $editionVersion = "$edition $version"
+
+    # Проверка прав администратора
     try {
         $isAdm = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     } catch { $isAdm = $false }
     $au = if ($isAdm) { 'Adm' } else { 'Usr' }
+
+    # IpPreference из конфига
     $ipPref = '?'
     try { if ($script:Config -and $script:Config.IpPreference) { $ipPref = [string]$script:Config.IpPreference } } catch { }
+
+    # TlsMode из конфига
     $tls = 'Auto'
     try { if ($script:Config -and $script:Config.TlsMode) { $tls = [string]$script:Config.TlsMode } } catch { }
+
+    # Прокси
     $px = if ($global:ProxyConfig -and $global:ProxyConfig.Enabled) { 'Px1' } else { 'Px0' }
+
+    # Размер окна консоли
     try {
         $ww = [Console]::WindowWidth
         $wh = [Console]::WindowHeight
     } catch { $ww = 0; $wh = 0 }
-    $base = "${edition} ${au} ${ipPref} ${tls} ${px} ${ww}x${wh}"
+
+    # Собираем базовую строку (теперь с редакцией и версией)
+    $base = " ${editionVersion} ${au} ${ipPref} ${tls} ${px} ${ww}x${wh}"
+
+    # Добавляем PID, если требуется
     if ($script:DebugHudIncludePid) { $base = "PID=$PID $base" }
+
+    # Обрезаем до максимальной длины, если нужно
     if ($maxLen -gt 0 -and $base.Length -gt $maxLen) { return $base.Substring(0, $maxLen) }
     return $base
 }
@@ -1339,16 +1359,33 @@ function Set-NetInfoCacheIfUsable {
 }
 
 function Start-Updater {
-    param($currentFile, $downloadUrl)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$currentFile,
+        [Parameter(Mandatory = $true)]
+        [string]$downloadUrl
+    )
 
-    $parentPid = $PID
+    # Проверка входных параметров
+    if ([string]::IsNullOrWhiteSpace($currentFile) -or -not (Test-Path -LiteralPath $currentFile -PathType Leaf)) {
+        Write-DebugLog "Start-Updater: currentFile='$currentFile' не существует или не указан."
+        return
+    }
+
+    $parentPid = $pid
     $tempFile = Join-Path $env:TEMP ("YT-DPI_update_" + [Guid]::NewGuid().ToString("N") + ".tmp")
     $logFile = Join-Path $env:TEMP "yt_updater_debug.log"
     $updaterPath = Join-Path $env:TEMP "yt_run_updater.ps1"
 
     Write-DebugLog "Запуск апдейтера. Лог: $logFile"
 
-    $mainDir = Split-Path -LiteralPath $currentFile -Parent
+    # Получаем родительскую директорию через .NET – надёжно и без «parameter set»
+    $mainDir = [System.IO.Path]::GetDirectoryName($currentFile)
+    if ([string]::IsNullOrEmpty($mainDir)) {
+        Write-DebugLog "Не удалось определить директорию для файла $currentFile"
+        return
+    }
+
     $companionUrl = $null
     $companionDest = $null
     if ($currentFile -match '\.(?i)bat$') {
@@ -1358,15 +1395,21 @@ function Start-Updater {
         $companionUrl = "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.bat"
         $companionDest = Join-Path $mainDir "YT-DPI.bat"
     }
-    $integrityExpr = if ($currentFile -match '\.(?i)bat$') {
-        '$size -gt 300 -and ($content -match "YT-DPI.ps1")'
+
+    # Условия целостности (выражения, которые будут вставлены в генерируемый скрипт)
+    if ($currentFile -match '\.(?i)bat$') {
+        $integrityExpr = '$size -gt 300 -and ($content -match "YT-DPI.ps1")'
+        $compMin = "300"
+        $compPat = "YT-DPI.ps1"
     } else {
-        '$size -gt 8000 -and ($content -match "scriptVersion")'
+        $integrityExpr = '$size -gt 8000 -and ($content -match "scriptVersion")'
+        $compMin = "8000"
+        $compPat = "scriptVersion"
     }
-    $compMin = if ($currentFile -match '\.(?i)bat$') { "8000" } else { "300" }
-    $compPat = if ($currentFile -match '\.(?i)bat$') { "scriptVersion" } else { "YT-DPI.ps1" }
-    $companionLeaf = if ($companionDest) { Split-Path -LiteralPath $companionDest -Leaf } else { "" }
-    $compDestEsc = if ($companionDest) { ($companionDest -replace "'", "''") } else { "" }
+
+    # Безопасное получение имени файла компаньона
+    $companionLeaf = if (-not [string]::IsNullOrEmpty($companionDest)) { [System.IO.Path]::GetFileName($companionDest) } else { "" }
+    $compDestEsc = if (-not [string]::IsNullOrEmpty($companionDest)) { $companionDest -replace "'", "''" } else { "" }
 
     $companionTpl = @'
                 try {
@@ -1378,9 +1421,9 @@ function Start-Updater {
                     $t2 = [System.Text.Encoding]::UTF8.GetString($bytes2)
                     if ($t2.Length -gt 0 -and [int][char]$t2[0] -eq 0xFEFF) { $t2 = $t2.Substring(1) }
                     $t2 = $t2 -replace "`r`n", "`n" -replace "`n", "`r`n"
-                    $utf2 = New-Object System.Text.UTF8Encoding $false
+                    $utf8WithBom = New-Object System.Text.UTF8Encoding $true
                     $tf2 = Join-Path $env:TEMP ("yt_comp_" + [Guid]::NewGuid().ToString("N") + ".tmp")
-                    [System.IO.File]::WriteAllText($tf2, $t2, $utf2)
+                    [System.IO.File]::WriteAllText($tf2, $t2, $utf8WithBom)
                     $sz2 = (Get-Item $tf2).Length
                     $raw2 = Get-Content $tf2 -Raw -Encoding UTF8
                     if ($sz2 -gt REPLACE_COMP_MIN -and ($raw2 -match "REPLACE_COMP_PATTERN")) {
@@ -1390,6 +1433,7 @@ function Start-Updater {
                     Remove-Item $tf2 -Force -ErrorAction SilentlyContinue
                 } catch { Write-Log "Companion error: $($_.Exception.Message)" }
 '@
+
     $companionBlock = ""
     if ($companionUrl -and $companionDest) {
         $companionBlock = $companionTpl.
@@ -1400,12 +1444,13 @@ function Start-Updater {
             Replace("REPLACE_COMP_DEST", $compDestEsc)
     }
 
+    # Шаблон апдейтера — все сохранения с BOM (UTF8Encoding $true)
     $updaterTemplate = @'
-$parentPid = "REPLACE_PID"
-$currentFile = "REPLACE_FILE"
-$downloadUrl = "REPLACE_URL"
-$tempFile = "REPLACE_TEMP"
-$logFile = "REPLACE_LOG"
+$parentPid = REPLACE_PID
+$currentFile = 'REPLACE_FILE'
+$downloadUrl = 'REPLACE_URL'
+$tempFile = 'REPLACE_TEMP'
+$logFile = 'REPLACE_LOG'
 
 function Write-Log($m) {
     $line = "[$(Get-Date -Format 'HH:mm:ss')] $m`r`n"
@@ -1437,7 +1482,7 @@ while (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {
 }
 Start-Sleep -Seconds 1
 
-# 3. Скачивание и замена файла (с конвертацией CRLF)
+# 3. Скачивание и замена файла (с конвертацией CRLF и сохранением с BOM)
 try {
     Write-Log "Downloading from $downloadUrl..."
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
@@ -1447,11 +1492,11 @@ try {
     $text = [System.Text.Encoding]::UTF8.GetString($bytes)
     # Конвертируем LF -> CRLF
     $text = $text -replace "`r`n", "`n" -replace "`n", "`r`n"
-    # Удаляем BOM
+    # Удаляем BOM, если он был (чтобы не дублировать)
     if ($text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
 
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($tempFile, $text, $utf8NoBom)
+    $utf8WithBom = New-Object System.Text.UTF8Encoding $true
+    [System.IO.File]::WriteAllText($tempFile, $text, $utf8WithBom)
 
     Write-Log "Downloaded and fixed. Size: $($text.Length)"
 
@@ -1475,16 +1520,19 @@ try {
             if ($replaced) {
 REPLACE_COMPANION_BLOCK
                 Write-Log "Update successful! Restarting..."
-                $rb = Join-Path (Split-Path -LiteralPath $currentFile -Parent) "YT-DPI.bat"
+                $dir = [System.IO.Path]::GetDirectoryName($currentFile)
+                $rb = [System.IO.Path]::Combine($dir, "YT-DPI.bat")
                 if (Test-Path -LiteralPath $rb) { Start-Process -FilePath $rb } else { Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","$currentFile" }
             } else {
                 Write-Log "CRITICAL: Could not overwrite file."
-                $rb = Join-Path (Split-Path -LiteralPath $currentFile -Parent) "YT-DPI.bat"
+                $dir = [System.IO.Path]::GetDirectoryName($currentFile)
+                $rb = [System.IO.Path]::Combine($dir, "YT-DPI.bat")
                 if (Test-Path -LiteralPath $rb) { Start-Process -FilePath $rb } else { Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","$currentFile" }
             }
         } else {
             Write-Log "Integrity FAIL."
-            $rb = Join-Path (Split-Path -LiteralPath $currentFile -Parent) "YT-DPI.bat"
+            $dir = [System.IO.Path]::GetDirectoryName($currentFile)
+            $rb = [System.IO.Path]::Combine($dir, "YT-DPI.bat")
             if (Test-Path -LiteralPath $rb) { Start-Process -FilePath $rb } else { Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","$currentFile" }
         }
     }
@@ -1492,7 +1540,8 @@ REPLACE_COMPANION_BLOCK
     Write-Log "GENERAL ERROR: $($_.Exception.Message)"
     Start-Sleep -Seconds 3
     if (Test-Path $currentFile) {
-        $rb = Join-Path (Split-Path -LiteralPath $currentFile -Parent) "YT-DPI.bat"
+        $dir = [System.IO.Path]::GetDirectoryName($currentFile)
+        $rb = [System.IO.Path]::Combine($dir, "YT-DPI.bat")
         if (Test-Path -LiteralPath $rb) { Start-Process -FilePath $rb } else { Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","$currentFile" }
     }
 }
@@ -1501,33 +1550,35 @@ Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
 Write-Log "--- UPDATER SESSION END ---"
 '@
 
+    # Подстановка значений с экранированием для одинарных кавычек
     $updaterContent = $updaterTemplate.
         Replace("REPLACE_PID", $parentPid).
-        Replace("REPLACE_FILE", $currentFile).
-        Replace("REPLACE_URL", $downloadUrl).
-        Replace("REPLACE_TEMP", $tempFile).
-        Replace("REPLACE_LOG", $logFile).
+        Replace("REPLACE_FILE", ($currentFile -replace "'", "''")).
+        Replace("REPLACE_URL", ($downloadUrl -replace "'", "''")).
+        Replace("REPLACE_TEMP", ($tempFile -replace "'", "''")).
+        Replace("REPLACE_LOG", ($logFile -replace "'", "''")).
         Replace("REPLACE_INTEGRITY_EXPR", $integrityExpr).
         Replace("REPLACE_COMPANION_BLOCK", $companionBlock)
 
-    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-    [System.IO.File]::WriteAllText($updaterPath, $updaterContent, $utf8NoBom)
+    # Сохраняем сам апдейтер-скрипт тоже с BOM
+    $utf8WithBom = New-Object System.Text.UTF8Encoding $true
+    [System.IO.File]::WriteAllText($updaterPath, $updaterContent, $utf8WithBom)
 
+    # Запускаем апдейтер в скрытом окне
     $pInfo = New-Object System.Diagnostics.ProcessStartInfo
     $pInfo.FileName = "powershell.exe"
     $pInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$updaterPath`""
-    $pInfo.WindowStyle = "Hidden"
+    $pInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
     [System.Diagnostics.Process]::Start($pInfo) | Out-Null
 
-    # Даём апдейтеру время на запуск и убийство процесса
     Start-Sleep -Milliseconds 500
-    # Выходим без лишних действий
-    [System.Environment]::Exit(0)
+    exit
 }
 
 # ====================================================================================
 # Список целей для теста
 # ====================================================================================
+
 $BaseTargets = @(
     "youtu.be",
     "youtube.com",
@@ -1914,12 +1965,12 @@ function Clear-StatusBlock {
 
 function Get-IdleStatusMessage {
     if (-not $script:HasCompletedScan -or -not $script:LastScanResults -or $script:LastScanResults.Count -lt 1) {
-        return [PSCustomObject]@{ Text = "STATUS: READY"; Fg = "Black"; Bg = "Green" }
+        return [PSCustomObject]@{ Text = "STATUS: ГОТОВ"; Fg = "Black"; Bg = "Green" }
     }
 
     $rows = @($script:LastScanResults | Where-Object { $_ })
     if ($rows.Count -lt 1) {
-        return [PSCustomObject]@{ Text = "STATUS: READY"; Fg = "Black"; Bg = "Green" }
+        return [PSCustomObject]@{ Text = "STATUS: ГОТОВ"; Fg = "Black"; Bg = "Green" }
     }
 
     $available = @($rows | Where-Object { $_.Verdict -eq "AVAILABLE" }).Count
@@ -1934,7 +1985,7 @@ function Get-IdleStatusMessage {
     }
 
     $parts = @()
-    if ($available -gt 0) { $parts += "$available AVAILABLE" }
+   # if ($available -gt 0) { $parts += "$available AVAILABLE" } # пока пишем только заблоченные
     if ($throttled -gt 0) { $parts += "$throttled THROTTLED" }
     if ($dpi -gt 0) { $parts += "$dpi DPI BLOCK/RESET" }
     if ($ipBlock -gt 0) { $parts += "$ipBlock IP BLOCK" }
@@ -1944,7 +1995,7 @@ function Get-IdleStatusMessage {
     return [PSCustomObject]@{
         Text = "SCAN RESULT: DPI DETECTED | " + ($parts -join " | ")
         Fg = "Black"
-        Bg = "Green"
+        Bg = "Yellow"
     }
 }
 
@@ -2769,30 +2820,30 @@ function Test-TlsHandshake {
 # ====================================================================================
 function Invoke-Update {
     param($Config)
-    Draw-StatusBar -Message "[ UPDATE ] Checking GitHub for latest release..." -Fg "Black" -Bg "Cyan"
+    Draw-StatusBar -Message "[ UPDATE ] Проверка обновлений на GitHub..." -Fg "Black" -Bg "Cyan"
 
     $res = Check-UpdateVersion -ManualMode -IgnoreLastChecked
 
     if ($res -eq "LATEST") {
-        Draw-StatusBar -Message "[ UPDATE ] You are already using the latest version ($scriptVersion)." -Fg "Black" -Bg "DarkGreen"
+        Draw-StatusBar -Message "[ UPDATE ] Вы уже используете последнюю версию ($scriptVersion)" -Fg "Black" -Bg "DarkGreen"
         # Обновляем LastCheckedVersion
         $Config.LastCheckedVersion = $scriptVersion
         Save-Config $Config
         Start-Sleep -Seconds 2
     }
     elseif ($res -eq "DEV_VERSION") {
-        Draw-StatusBar -Message "[ UPDATE ] Your version ($scriptVersion) is newer than GitHub release ($res)." -Fg "Black" -Bg "Magenta"
+        Draw-StatusBar -Message "[ UPDATE ] Ваша верися ($scriptVersion) новее, чем GitHub релиз ($res)." -Fg "Black" -Bg "Magenta"
         # Обновляем LastCheckedVersion, чтобы не показывать снова
         $Config.LastCheckedVersion = $scriptVersion
         Save-Config $Config
         Start-Sleep -Seconds 3
     }
     elseif ($null -ne $res) {
-        Draw-StatusBar -Message "[ UPDATE ] New version $res available! Download now? (Y/N)" -Fg "Black" -Bg "Yellow"
+        Draw-StatusBar -Message "[ UPDATE ] Новая версия $res доступна! Установить сейчас? (Y/N)" -Fg "Black" -Bg "Yellow"
         $menuKey = Read-MenuKeyOrResize
         if ($menuKey.Resized) { continue }
         $key = $menuKey.KeyChar
-        if ($key -eq 'y' -or $key -eq 'Y') {
+        if ($key -eq 'y' -or $key -eq 'Y' -or $key -eq 'н' -or $key -eq 'Н') { #Добавил обработку кириллицы
             $currentFile = $script:OriginalFilePath
             $downloadUrl = if ($currentFile -match '\.(?i)bat$') {
                 "https://raw.githubusercontent.com/Shiperoid/YT-DPI/master/YT-DPI.bat"
@@ -2807,7 +2858,7 @@ function Invoke-Update {
             Save-Config $Config
         }
     } else {
-        Draw-StatusBar -Message "[ UPDATE ] Update server unreachable or API limit reached." -Fg "Black" -Bg "Red"
+        Draw-StatusBar -Message "[ UPDATE ] Сервер обновлений недоступен или достигнул лимит API." -Fg "Black" -Bg "Red"
         Start-Sleep -Seconds 2
     }
 }
