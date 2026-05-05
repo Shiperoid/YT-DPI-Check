@@ -236,6 +236,25 @@ function Write-DebugLogSessionHeaderIfNeeded {
     try {
         Write-DebugLog "Архитектура: OS 64-bit=$([System.Environment]::Is64BitOperatingSystem), процесс PowerShell 64-bit=$([System.Environment]::Is64BitProcess)" "INFO"
     } catch { }
+
+    # ---------- НОВЫЙ БЛОК: статус загрузки целей ----------
+    if (Get-Variable -Name BaseTargets -Scope Script -ErrorAction SilentlyContinue) {
+        $targetsCount = $BaseTargets.Count
+        if ($script:CustomTargetsLoaded) {
+            Write-DebugLog "Список целей: загружен из кастомного файла ($targetsCount шт.)" "INFO"
+        } else {
+            Write-DebugLog "Список целей: используется встроенный список ($targetsCount шт.)" "INFO"
+            if (Get-Variable -Name NetInfo -Scope Script -ErrorAction SilentlyContinue) {
+                if ($NetInfo.CDN -and $NetInfo.CDN -notin $BaseTargets) {
+                    Write-DebugLog "Примечание: встроенный список будет дополнен CDN-адресом: $($NetInfo.CDN)" "INFO"
+                }
+            }
+        }
+    } else {
+        Write-DebugLog "Список целей: не определён (переменная BaseTargets не найдена)" "WARN"
+    }
+    # -------------------------------------------------------
+
     if (Test-DebugLogWriteFullIdentifiers) {
         Write-DebugLog "Путь к скрипту: $script:OriginalFilePath" "INFO"
         Write-DebugLog "Рабочая папка: $((Get-Location).Path)" "INFO"
@@ -1579,42 +1598,105 @@ Write-Log "--- UPDATER SESSION END ---"
 # Список целей для теста
 # ====================================================================================
 
-$BaseTargets = @(
-    "youtu.be",
-    "youtube.com",
-    "i.ytimg.com",
-    "s.ytimg.com",
-    "yt3.ggpht.com",
-    "yt4.ggpht.com",
-    "s.youtube.com",
-    "m.youtube.com",
-    "googleapis.com",
-    "tv.youtube.com",
-    "googlevideo.com",
-    "www.youtube.com",
-    "play.google.com",
-    "youtubekids.com",
-    "video.google.com",
-    "music.youtube.com",
-    "accounts.google.com",
-    "clients6.google.com",
-    "studio.youtube.com",
-    "manifest.googlevideo.com",
-    "youtubei.googleapis.com",
-    "www.youtube-nocookie.com",
-    "signaler-pa.youtube.com",
-    "redirector.googlevideo.com",
-    "youtubeembeddedplayer.googleapis.com"
-)
+function Initialize-Targets {
+    Write-DebugLog "=== Initialize-Targets: START ===" "DEBUG"
+ 
+    $script:CustomTargetsLoaded = $false
+    $script:BaseTargets = @()
+
+    # Определяем директорию скрипта и полный путь к targets.txt
+    $parentDir = Split-Path -Parent $script:OriginalFilePath
+    $targetsFile = Join-Path $parentDir "targets.txt"
+    Write-DebugLog "Определён путь к файлу целей: '$targetsFile' (ParentDir='$parentDir')" "DEBUG"
+
+    $useCustom = $false
+    if ($script:Config.UseCustomTargets -eq $true) { 
+        $useCustom = $true 
+        Write-DebugLog "Настройка UseCustomTargets = true (из конфига)" "DEBUG"
+    } else {
+        Write-DebugLog "Настройка UseCustomTargets = false или отсутствует, useCustom = false" "DEBUG"
+    }
+
+    $fileExists = Test-Path $targetsFile
+    Write-DebugLog "Существование файла целей: $fileExists" "DEBUG"
+
+    if ($useCustom -and $fileExists) {
+        Write-DebugLog "Попытка загрузить кастомный список целей из файла..." "INFO"
+        try {
+            $raw = Get-Content -LiteralPath $targetsFile -Encoding UTF8 -ErrorAction Stop
+            Write-DebugLog "Прочитано строк из файла: $($raw.Count)" "DEBUG"
+
+            $list = $raw | Where-Object {
+                $line = $_.Trim()
+                if ([string]::IsNullOrWhiteSpace($line)) { 
+                    Write-DebugLog "Пропущена пустая строка" "DEBUG"
+                    return $false 
+                }
+                if ($line.StartsWith('#')) { 
+                    Write-DebugLog "Пропущен комментарий: $line" "DEBUG"
+                    return $false 
+                }
+                if ($line -notmatch '\.') { 
+                    Write-DebugLog "Пропущена строка без точки: $line" "DEBUG"
+                    return $false 
+                }
+                return $true
+            } | ForEach-Object { $_.Trim() }
+
+            Write-DebugLog "После фильтрации осталось целей: $($list.Count)" "DEBUG"
+            if ($list.Count -gt 0) {
+                $script:BaseTargets = $list
+                $script:CustomTargetsLoaded = $true
+                Write-DebugLog "Загружено $($list.Count) целей из кастомного файла ($targetsFile)" "INFO"
+                Write-DebugLog "=== Initialize-Targets: END (кастомный файл успешно загружен) ===" "DEBUG"
+                return
+            } else {
+                Write-DebugLog "Кастомный файл существует, но не содержит ни одной валидной цели (после фильтрации пусто)." "WARN"
+            }
+        } catch {
+            Write-DebugLog "Ошибка чтения кастомного файла: $($_.Exception.Message)" "ERROR"
+            Write-DebugLog "Стек вызова: $($_.ScriptStackTrace)" "DEBUG"
+        }
+    } else {
+        if (-not $useCustom) {
+            Write-DebugLog "Использование кастомного файла отключено в конфиге (UseCustomTargets != true)" "DEBUG"
+        }
+        if (-not $fileExists) {
+            Write-DebugLog "Файл кастомных целей не найден по пути: $targetsFile" "DEBUG"
+        }
+    }
+
+    # Дефолтный список
+    Write-DebugLog "Переключение на встроенный (дефолтный) список целей." "INFO"
+    $defaultTargets = @(
+        "accounts.google.com", "clients6.google.com", "googlevideo.com",
+        "googleapis.com", "i.ytimg.com", "m.youtube.com", "manifest.googlevideo.com",
+        "music.youtube.com", "play.google.com", "redirector.googlevideo.com",
+        "s.ytimg.com", "s.youtube.com", "signaler-pa.youtube.com", "studio.youtube.com",
+        "tv.youtube.com", "video.google.com", "www.youtube-nocookie.com", "www.youtube.com",
+        "yt3.ggpht.com", "yt4.ggpht.com", "youtu.be", "youtube.com",
+        "youtubeembeddedplayer.googleapis.com", "youtubei.googleapis.com", "youtubekids.com"
+    )
+    $script:BaseTargets = $defaultTargets
+    $script:CustomTargetsLoaded = $false
+    Write-DebugLog "Используется встроенный список целей ($($defaultTargets.Count) шт.)" "INFO"
+    Write-DebugLog "=== Initialize-Targets: END (дефолтный список) ===" "DEBUG"
+}
 
 # Функция для получения актуального списка целей
 function Get-Targets {
     param($NetInfo)
+
     $targets = $BaseTargets
-    if ($NetInfo.CDN -and $NetInfo.CDN -notin $targets) {
-        $targets += $NetInfo.CDN
+
+    # Добавляем CDN только если НЕ были загружены кастомные цели из файла
+    if (-not $script:CustomTargetsLoaded) {
+        if ($NetInfo.CDN -and $NetInfo.CDN -notin $targets) {
+            $targets += $NetInfo.CDN
+        }
     }
-    # Сортировка по длине строки
+
+    # Сортировка по длине строки + уникальность
     return $targets | Sort-Object { $_.Length } | Select-Object -Unique
 }
 
@@ -3566,10 +3648,14 @@ function Show-SettingsMenu {
         }
         Write-Host "     Для разового полного заголовка: YT_DPI_DEBUG_IDENTIFIERS=1 (перекрывает ВЫКЛ в конфиге)." -ForegroundColor Gray
 
-        Write-Host "`n  6. Параллельный первый проход TLS (Auto, T13+T12) " -NoNewline -ForegroundColor White
-        if ($curParallelTls) { Write-Host "[ ВКЛ ]" -ForegroundColor Yellow } else { Write-Host "[ ВЫКЛ ]" -ForegroundColor DarkGray }
-        Write-Host "     Если ВКЛ: эксперимент, параллельные Tasks; при сбое — последовательный TLS без ложного IP BLOCK." -ForegroundColor Gray
-        Write-Host "     Если ВЫКЛ: последовательно T13 → T12 (медленнее строка скана)." -ForegroundColor Gray
+        $curUseCustom = ($script:Config.UseCustomTargets -eq $true)
+        Write-Host "`n  6. Использовать кастомный файл целей (targets.txt) " -NoNewline -ForegroundColor White
+        if ($curUseCustom) { Write-Host "[ ВКЛ ]" -ForegroundColor Green } else { Write-Host "[ ВЫКЛ ]" -ForegroundColor DarkGray }
+        Write-Host "     Если ВКЛ и файл targets.txt существует и не пуст — используется он." -ForegroundColor Gray
+        Write-Host "     Если ВЫКЛ — всегда используется встроенный список Youtube/Google." -ForegroundColor Gray
+
+        Write-Host "`n  7. Экспортировать текущие цели в targets.txt " -ForegroundColor White
+        Write-Host "     (перезапишет файл, создаст при отсутствии; после экспорта ВКЛ автоматически)" -ForegroundColor Gray
 
         Write-Host "`n  0. Назад в главное меню" -ForegroundColor DarkGray
         Write-Host "`n $line" -ForegroundColor Cyan
@@ -3649,12 +3735,70 @@ function Show-SettingsMenu {
                 Start-Sleep -Seconds 1
             }
             elseif ($key -eq "6") {
-                $nextPar = -not $curParallelTls
-                $script:Config | Add-Member -MemberType NoteProperty -Name "ScanParallelTlsFirstPass" -Value $nextPar -Force
+                Write-DebugLog "=== Меню: пункт 6 (переключение UseCustomTargets) ===" "DEBUG"
+                $oldUse = $curUseCustom
+                $newUse = -not $oldUse
+                Write-DebugLog "Текущее UseCustomTargets: $oldUse, новое значение: $newUse" "DEBUG"
+
+                $script:Config | Add-Member -MemberType NoteProperty -Name "UseCustomTargets" -Value $newUse -Force
                 Save-Config $script:Config
-                $st6 = if ($nextPar) { "ВКЛ" } else { "ВЫКЛ" }
-                Write-Host "`n  [OK] Параллельный первый проход TLS: $st6 (сохранено в конфиг)" -ForegroundColor Green
+                Write-DebugLog "Настройка сохранена в конфиг." "DEBUG"
+
+                Write-DebugLog "Вызов Initialize-Targets для перезагрузки списка целей..." "DEBUG"
+                Initialize-Targets
+                Write-DebugLog "Initialize-Targets завершён." "DEBUG"
+
+                $st6 = if ($newUse) { "ВКЛ" } else { "ВЫКЛ" }
+                Write-Host "`n  [OK] Использование кастомного файла целей: $st6" -ForegroundColor Green
+                Write-DebugLog "Пользователь включил/выключил кастомный файл: $st6" "INFO"
                 Start-Sleep -Seconds 1
+            }
+            elseif ($key -eq "7") {
+                Write-DebugLog "=== Меню: пункт 7 (экспорт целей в targets.txt) ===" "DEBUG"
+
+                $parentDir = Split-Path -Parent $script:OriginalFilePath
+                $targetsFile = Join-Path $parentDir "targets.txt"
+                Write-DebugLog "Путь для экспорта: $targetsFile" "DEBUG"
+                Write-DebugLog "Родительская директория (ParentDir): $parentDir" "DEBUG"
+
+                $exportList = $script:BaseTargets
+                Write-DebugLog "Текущий список целей (BaseTargets) содержит $($exportList.Count) элементов." "DEBUG"
+                if ($exportList.Count -eq 0) {
+                    Write-DebugLog "ОШИБКА: нечего экспортировать — список целей пуст." "ERROR"
+                    Write-Host "`n  [ОШИБКА] Нет целей для экспорта!" -ForegroundColor Red
+                    Start-Sleep -Seconds 2
+                    continue
+                }
+
+                try {
+                    Write-DebugLog "Попытка записи $($exportList.Count) строк в файл $targetsFile (UTF-8 без BOM)..." "INFO"
+                    [System.IO.File]::WriteAllLines($targetsFile, $exportList, [System.Text.UTF8Encoding]::new($false))
+                    Write-DebugLog "Файл успешно записан." "DEBUG"
+
+                    # Проверяем, что файл действительно создан
+                    if (Test-Path $targetsFile) {
+                        Write-DebugLog "Файл подтверждён: $(Get-Item $targetsFile | Select-Object Length, LastWriteTime)" "DEBUG"
+                    } else {
+                        Write-DebugLog "Предупреждение: файл не обнаружен после записи!" "WARN"
+                    }
+
+                    Write-Host "`n  [OK] Экспортировано $($exportList.Count) целей в файл:`n       $targetsFile" -ForegroundColor Green
+
+                    # Принудительно включаем использование кастомного файла
+                    Write-DebugLog "Принудительная установка UseCustomTargets = true" "DEBUG"
+                    $script:Config | Add-Member -MemberType NoteProperty -Name "UseCustomTargets" -Value $true -Force
+                    Save-Config $script:Config
+                    Write-DebugLog "Настройка сохранена." "DEBUG"
+
+                    Write-DebugLog "Вызов Initialize-Targets для перезагрузки из свежесозданного файла..." "DEBUG"
+                    Initialize-Targets
+                    Write-DebugLog "Initialize-Targets завершён." "DEBUG"
+                } catch {
+                    Write-DebugLog "ОШИБКА при записи файла: $($_.Exception.Message)" "ERROR"
+                    Write-DebugLog "Стек вызова: $($_.ScriptStackTrace)" "DEBUG"
+                    Write-Host "`n  [ОШИБКА] Не удалось записать файл: $($_.Exception.Message)" -ForegroundColor Red
+                    Start-Sleep -Seconds 2
+                }
             }
             elseif ($key -eq "0" -or $key -eq "`r") {
                 break
@@ -5818,37 +5962,53 @@ function Invoke-ScanAction {
 # ====================================================================================
 
 function Initialize-AppState {
-# 1. Загрузка конфигурации (Мгновенно)
-$script:Config = Load-Config
-$global:ProxyConfig = $script:Config.Proxy
-Write-DebugLogSessionHeaderIfNeeded
-$script:Config.RunCount++
+    # 1. Загрузка конфигурации (Мгновенно)
+    $script:Config = Load-Config
+    $global:ProxyConfig = $script:Config.Proxy
 
-# 2. Синхронизация DNS кэша
-Sync-DnsCacheFromConfig
-Initialize-DisableBrokenParallelTlsTasks
-
-# 3. Выбираем готовые данные из завершённого фонового обновления/кэша или единую заглушку
-$script:NetInfo = Get-ReadyNetInfo
-$script:Targets = Get-Targets -NetInfo $script:NetInfo
-[Console]::Clear()
-Draw-UI $script:NetInfo $script:Targets $null $false
-Draw-StatusBar
-Initialize-ScannerEngines
-
-
-# 4. Обновление сети запускаем после первого экрана; результат применится точечно.
-if ($script:Config.NetCacheStale -or $script:Config.RunCount -le 1 -or -not (Test-NetInfoUsable $script:NetInfo)) {
-    Start-BackgroundNetInfoUpdate
-}
-
-# 5. Проверка обновлений (только раз в 10 запусков, чтобы не бесить)
-if ($script:Config.RunCount % 10 -eq 0) {
-    $newVer = Check-UpdateVersion -Repo "Shiperoid/YT-DPI" -LastCheckedVersion $script:Config.LastCheckedVersion
-    if ($newVer) {
-        Draw-StatusBar -Message "[ UPDATE ] NEW VERSION v$newVer AVAILABLE! PRESS 'U' TO UPDATE." -Fg "White" -Bg "DarkMagenta"
-        Start-Sleep -Seconds 3
+    # 1b. Инициализация настройки UseCustomTargets, если отсутствует
+    if ($null -eq $script:Config.UseCustomTargets) {
+        $targetsFile = Join-Path (Split-Path -Parent $script:OriginalFilePath) "targets.txt"
+        $script:Config | Add-Member -MemberType NoteProperty -Name "UseCustomTargets" -Value (Test-Path $targetsFile) -Force
+        Save-Config $script:Config
     }
+
+    # 2. Инициализация целей (это установит $script:BaseTargets и $script:CustomTargetsLoaded)
+    Initialize-Targets
+
+    Write-DebugLogSessionHeaderIfNeeded
+    $script:Config.RunCount++
+
+    # 3. Синхронизация DNS кэша
+    Sync-DnsCacheFromConfig
+    Initialize-DisableBrokenParallelTlsTasks
+
+    # 4. Выбираем готовые данные из NetInfo
+    $script:NetInfo = Get-ReadyNetInfo
+    $script:Targets = Get-Targets -NetInfo $script:NetInfo
+    [Console]::Clear()
+    Draw-UI $script:NetInfo $script:Targets $null $false
+    Draw-StatusBar
+    Initialize-ScannerEngines
+
+    # 5. Обновление сети в фоне
+    if ($script:Config.NetCacheStale -or $script:Config.RunCount -le 1 -or -not (Test-NetInfoUsable $script:NetInfo)) {
+        Start-BackgroundNetInfoUpdate
+    }
+
+    # 6. Проверка обновлений
+    if ($script:Config.RunCount % 10 -eq 0) {
+        $newVer = Check-UpdateVersion -Repo "Shiperoid/YT-DPI" -LastCheckedVersion $script:Config.LastCheckedVersion
+        if ($newVer) {
+            Draw-StatusBar -Message "[ UPDATE ] NEW VERSION v$newVer AVAILABLE! PRESS 'U' TO UPDATE." -Fg "White" -Bg "DarkMagenta"
+            Start-Sleep -Seconds 3
+        }
+    }
+
+    Draw-StatusBar
+    Write-DebugLog "--- СИСТЕМА ГОТОВА ---" "INFO"
+    Clear-KeyBuffer
+    $FirstRun = $false
 }
 
 Draw-StatusBar
@@ -5856,7 +6016,7 @@ Write-DebugLog "--- СИСТЕМА ГОТОВА ---" "INFO"
 Clear-KeyBuffer
 $FirstRun = $false
 
-}
+
 
 function Start-MainLoop {
     $FirstRun = $false
